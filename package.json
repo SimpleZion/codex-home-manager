@@ -1,0 +1,14 @@
+{
+  "name": "codex-home-manager-public",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Public website and privacy-safe preview for Codex Home Manager.",
+  "scripts": {
+    "dev": "wrangler pages dev site",
+    "deploy": "wrangler pages deploy site --project-name codex-home-manager --branch main",
+    "check": "node scripts/check-public-boundary.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  }
+}

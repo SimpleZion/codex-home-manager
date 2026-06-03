@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://codex-home-manager.simplezion.com/sitemap.xml

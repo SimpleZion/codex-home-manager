@@ -1,0 +1,52 @@
+{
+  "name": "codex-home-manager-public-api-contract",
+  "version": "1.0.0",
+  "note": "This public contract describes agent-facing capabilities. It intentionally excludes the private local engine implementation.",
+  "capabilities": [
+    {
+      "name": "snapshot_threads",
+      "method": "GET",
+      "path": "/api/snapshot",
+      "purpose": "List and classify local Codex threads, including threads outside the first sidebar page."
+    },
+    {
+      "name": "show_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/show",
+      "purpose": "Promote a hidden thread into the initial sidebar ordering after preview and token validation."
+    },
+    {
+      "name": "hide_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/hide",
+      "purpose": "Hide a visible thread from the initial sidebar without deleting session JSONL."
+    },
+    {
+      "name": "export_prompts",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/export-prompts",
+      "purpose": "Export user prompts from a selected thread."
+    },
+    {
+      "name": "read_resource",
+      "method": "GET",
+      "path": "/api/resources/read",
+      "purpose": "Read safe text resources or directory metadata inside a local Codex Home."
+    },
+    {
+      "name": "import_thread_from_home",
+      "method": "POST",
+      "path": "/api/import/thread",
+      "purpose": "Copy a thread from another Codex Home into the active local home after preview validation."
+    }
+  ],
+  "safetyModel": {
+    "localFirst": true,
+    "publicDemoHasNoLocalEngine": true,
+    "writesRequireToken": true,
+    "dangerousWritesRequirePreviewTicket": true,
+    "backupsDefaultEnabled": true,
+    "createBackupCanBeFalsePerOperation": true,
+    "permanentJsonlDelete": false
+  }
+}
