@@ -43,6 +43,10 @@ The production site is designed for Cloudflare Pages:
 npx wrangler pages deploy site --project-name codex-home-manager --branch main
 ```
 
+Current public preview: <https://codex-home-manager.pages.dev/>.
+
+Planned custom domain: `codex-home-manager.simplezion.com`. The domain is intentionally not treated as live until the Cloudflare DNS CNAME record is active.
+
 ## Privacy stance
 
 All visible product data in this repository is synthetic. Screenshots and UI mockups are generated from fake project names, fake thread names, fake IDs, and fake paths. No real Codex Home content is committed.
