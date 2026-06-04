@@ -1,6 +1,6 @@
 # Codex Home Manager
 
-Public website and sanitized product preview for Codex Home Manager.
+Public Cloudflare Pages frontend for Codex Home Manager.
 
 Codex Home Manager is a local-first operations console for inspecting and maintaining a Codex Desktop home directory: threads, project bindings, local resources, imports, backups, logs, and agent-facing APIs.
 
@@ -8,10 +8,10 @@ Codex Home Manager is a local-first operations console for inspecting and mainta
 
 ## What is included
 
-- Static product website deployed on Cloudflare Pages.
-- A synthetic, privacy-safe product preview with mock projects and mock thread names.
+- Static Codex Home Manager web console deployed on Cloudflare Pages.
+- A browser frontend that connects to a user's local Codex Home Manager API at `http://127.0.0.1:8765` by default.
 - Public-facing API capability overview and safety model documentation.
-- Launch and security notes for evaluating the product without exposing local data.
+- Launch and security notes for using the product without exposing local data.
 
 ## What is intentionally not included
 
@@ -24,7 +24,7 @@ Excluded by design:
 - Token handling, write-gate implementation, preview ticket validation, and restore internals.
 - Any user-specific project paths, conversation titles, memory files, or machine identifiers.
 
-The public preview is suitable for product review and deployment. It is not the runnable local maintenance engine.
+This repository is suitable for the public frontend and deployment shell. It is not the private local maintenance engine.
 
 ## Local preview
 
@@ -43,10 +43,10 @@ The production site is designed for Cloudflare Pages:
 npx wrangler pages deploy site --project-name codex-home-manager --branch main
 ```
 
-Current public preview: <https://codex-home-manager.pages.dev/>.
+Current Cloudflare Pages deployment: <https://codex-home-manager.pages.dev/>.
 
-Planned custom domain: `codex-home-manager.simplezion.com`. The domain is intentionally not treated as live until the Cloudflare DNS CNAME record is active.
+Current custom domain: <https://codex-home-manager.simplezion.com/>.
 
 ## Privacy stance
 
-All visible product data in this repository is synthetic. Screenshots and UI mockups are generated from fake project names, fake thread names, fake IDs, and fake paths. No real Codex Home content is committed.
+The deployed frontend reads real Codex Home data only from the user's own local API. No real Codex Home content, session JSONL, SQLite database, logs, exports, backups, screenshots, or user-specific paths are committed.

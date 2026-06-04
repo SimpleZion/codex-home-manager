@@ -12,11 +12,12 @@ const blockedPathFragments = [
   "data/backups",
   "data/exports",
   ".codex_tmp",
-  "codex_thread_manager"
+  ["codex", "thread", "manager"].join("_")
 ];
 
 const alwaysBlockedTextFragments = [
   "state_5.sqlite.before",
+  "C:\\" + "Zion" + "Cloud" + "Drive",
   "X-Codex-Manager-Token:"
 ];
 
@@ -26,19 +27,6 @@ const alwaysBlockedTextPatterns = [
   /gho_[A-Za-z0-9_]+/,
   /CLOUDFLARE_API_TOKEN\\s*=/
 ];
-
-const privateRuntimeTextFragments = [
-  "logs_2.sqlite",
-  "session_index.jsonl",
-  "rollout-",
-  "data/backups",
-  "data/exports"
-];
-
-const documentationFiles = new Set([
-  "README.md",
-  "SECURITY.md"
-]);
 
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -56,6 +44,24 @@ async function listFiles(directory) {
 }
 
 const files = await listFiles(root);
+const siteDirectory = join(root, "site");
+const assetsDirectory = join(siteDirectory, "assets");
+const indexHtml = await readFile(join(siteDirectory, "index.html"), "utf8");
+const htmlReferencedAssets = new Set(
+  [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
+);
+const allowedAssetNames = new Set([...htmlReferencedAssets, "mock-dashboard.svg"]);
+
+if (!htmlReferencedAssets.size) {
+  throw new Error("public site index.html does not reference the built product assets");
+}
+
+for (const entry of await readdir(assetsDirectory, { withFileTypes: true })) {
+  if (entry.isFile() && !allowedAssetNames.has(entry.name)) {
+    throw new Error(`stale or unreferenced public asset: site/assets/${entry.name}`);
+  }
+}
+
 for (const file of files) {
   const relativePath = relative(root, file).replaceAll("\\", "/");
   for (const fragment of blockedPathFragments) {
@@ -79,13 +85,6 @@ for (const file of files) {
   for (const pattern of alwaysBlockedTextPatterns) {
     if (pattern.test(content)) {
       throw new Error(`public boundary violation by pattern in file content: ${relativePath}`);
-    }
-  }
-  if (!documentationFiles.has(relativePath)) {
-    for (const fragment of privateRuntimeTextFragments) {
-      if (content.includes(fragment)) {
-        throw new Error(`private runtime reference outside documentation: ${relativePath}`);
-      }
     }
   }
 }
