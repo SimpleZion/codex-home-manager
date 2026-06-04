@@ -55,10 +55,13 @@ const allowedAssetNames = new Set([...htmlReferencedAssets, "mock-dashboard.svg"
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
 const obsoleteAssetShims = new Set([
+  "index-BDBpbU1n.js",
+  "index-BaoxMYZU.css",
   "index-CcYcEs2C.css",
   "index-CD4z4gjT.js",
   "index-CUYf0Vs4.css",
   "index-DCFNfpD5.js",
+  "index-DhNJbMqY.js",
   "index-DSErXZpT.js",
   "index-kXmA3Tsf.js",
   "index-D-i-Dcu8.js"
@@ -85,6 +88,18 @@ async function isAllowedObsoleteShim(assetName) {
 
 if (!htmlReferencedAssets.size) {
   throw new Error("public site index.html does not reference the built product assets");
+}
+
+for (const assetName of htmlReferencedAssets) {
+  const assetPath = join(assetsDirectory, assetName);
+  try {
+    const assetInfo = await stat(assetPath);
+    if (!assetInfo.isFile()) {
+      throw new Error(`${assetName} is not a file`);
+    }
+  } catch (error) {
+    throw new Error(`public site index.html references a missing asset: site/assets/${assetName}`);
+  }
 }
 
 for (const entry of await readdir(assetsDirectory, { withFileTypes: true })) {
