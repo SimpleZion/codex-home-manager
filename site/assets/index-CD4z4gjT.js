@@ -1,2 +1,2 @@
 /* Obsolete Codex Home Manager asset shim. */
-import "/assets/index-CRRjjkB1.js";
+import "/assets/index-CKMgeurs.js";
