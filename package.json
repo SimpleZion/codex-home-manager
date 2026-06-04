@@ -2,7 +2,7 @@
   "name": "codex-home-manager-public",
   "version": "1.0.0",
   "private": false,
-  "description": "Public Cloudflare Pages frontend for Codex Home Manager.",
+  "description": "Hosted frontend and Windows connector release downloads for Codex Home Manager.",
   "scripts": {
     "dev": "npx wrangler pages dev site",
     "deploy": "npx wrangler pages deploy site --project-name codex-home-manager --branch main",
