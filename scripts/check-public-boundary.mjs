@@ -64,6 +64,7 @@ const obsoleteAssetShims = new Set([
   "index-CD4z4gjT.js",
   "index-CUYf0Vs4.css",
   "index-CZGTazmD.js",
+  "index-CKMgeurs.js",
   "index-DCFNfpD5.js",
   "index-DhNJbMqY.js",
   "index-DSErXZpT.js",
