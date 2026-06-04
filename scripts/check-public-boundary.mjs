@@ -51,13 +51,15 @@ const indexHtml = await readFile(join(siteDirectory, "index.html"), "utf8");
 const htmlReferencedAssets = new Set(
   [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
 );
-const allowedAssetNames = new Set([...htmlReferencedAssets, "mock-dashboard.svg"]);
+const allowedAssetNames = new Set([...htmlReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
 const obsoleteAssetShims = new Set([
+  "index-4bnkjVl0.js",
   "index-BDBpbU1n.js",
   "index-B7mEeyjg.css",
   "index-BaoxMYZU.css",
+  "index-C4iW-98y.css",
   "index-CcYcEs2C.css",
   "index-CD4z4gjT.js",
   "index-CUYf0Vs4.css",

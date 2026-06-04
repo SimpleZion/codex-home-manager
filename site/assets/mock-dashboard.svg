@@ -1,9 +1,0 @@
-﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 320" role="img" aria-label="Codex Home Manager">
-  <rect width="512" height="320" rx="24" fill="#f8fafc"/>
-  <rect x="32" y="32" width="448" height="256" rx="18" fill="#ffffff" stroke="#dbe3ef"/>
-  <rect x="58" y="62" width="120" height="24" rx="8" fill="#e8eef8"/>
-  <rect x="58" y="106" width="396" height="42" rx="10" fill="#eef5ff"/>
-  <rect x="58" y="164" width="396" height="34" rx="8" fill="#f8fafc" stroke="#dbe3ef"/>
-  <rect x="58" y="210" width="396" height="34" rx="8" fill="#f8fafc" stroke="#dbe3ef"/>
-  <text x="72" y="133" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="800" fill="#172033">Codex Home Manager</text>
-</svg>

@@ -1,21 +1,19 @@
 # Codex Home Manager
 
-Public Cloudflare Pages frontend for Codex Home Manager.
+This repository contains only the hosted Codex Home Manager frontend and public release downloads.
 
-Codex Home Manager is a local-first operations console for inspecting and maintaining a Codex Desktop home directory: threads, project bindings, local resources, imports, backups, logs, and agent-facing APIs.
-
-![Synthetic Codex Home Manager preview](site/assets/mock-dashboard.svg)
+The hosted page connects to a local connector running on the user's own machine at `http://127.0.0.1:8765`. The connector reads and manages the selected Codex Home directory. The hosted page itself does not contain the local engine source and does not upload `.codex` data.
 
 ## What is included
 
-- Static Codex Home Manager web console deployed on Cloudflare Pages.
-- A browser frontend that connects to a user's local Codex Home Manager API at `http://127.0.0.1:8765` by default.
-- Public-facing API capability overview and safety model documentation.
-- Launch and security notes for using the product without exposing local data.
+- The static web frontend deployed on Cloudflare Pages.
+- Public release downloads for the Windows local connector.
+- A public API capability overview and safety boundary notes.
+- Cloudflare Pages deployment files.
 
 ## What is intentionally not included
 
-This repository does not contain the private local engine or implementation code that can read, repair, migrate, slim, or write a real Codex Home directory.
+This repository does not contain the private local engine implementation that reads, repairs, migrates, slims, or writes a real Codex Home directory.
 
 Excluded by design:
 
@@ -24,7 +22,23 @@ Excluded by design:
 - Token handling, write-gate implementation, preview ticket validation, and restore internals.
 - Any user-specific project paths, conversation titles, memory files, or machine identifiers.
 
-This repository is suitable for the public frontend and deployment shell. It is not the private local maintenance engine.
+The public repository is only the hosted frontend and distribution shell.
+
+## Use the hosted product
+
+Open:
+
+<https://codex-home-manager.simplezion.com/>
+
+On Windows, download and run the local connector:
+
+<https://github.com/SimpleZion/codex-home-manager/releases/latest/download/codex-home-manager-local-win-x64.exe>
+
+The connector starts a local API on `127.0.0.1:8765`, registers the `codex-home-manager://start` browser protocol for the current Windows user, and opens the hosted page.
+
+If the browser or Windows warns that the executable is not commonly downloaded, verify the SHA256 checksum before running:
+
+<https://github.com/SimpleZion/codex-home-manager/releases/latest/download/SHA256SUMS.txt>
 
 ## Local preview
 
@@ -43,9 +57,7 @@ The production site is designed for Cloudflare Pages:
 npx wrangler pages deploy site --project-name codex-home-manager --branch main
 ```
 
-Current Cloudflare Pages deployment: <https://codex-home-manager.pages.dev/>.
-
-Current custom domain: <https://codex-home-manager.simplezion.com/>.
+Production custom domain: <https://codex-home-manager.simplezion.com/>.
 
 ## Privacy stance
 
