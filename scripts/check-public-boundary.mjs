@@ -18,6 +18,7 @@ const blockedPathFragments = [
 const alwaysBlockedTextFragments = [
   "state_5.sqlite.before",
   "C:\\" + "Zion" + "Cloud" + "Drive",
+  "D:\\" + ".codex",
   "X-Codex-Manager-Token:"
 ];
 
@@ -51,13 +52,43 @@ const htmlReferencedAssets = new Set(
   [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
 );
 const allowedAssetNames = new Set([...htmlReferencedAssets, "mock-dashboard.svg"]);
+const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
+const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
+const obsoleteAssetShims = new Set([
+  "index-CcYcEs2C.css",
+  "index-CD4z4gjT.js",
+  "index-CUYf0Vs4.css",
+  "index-DCFNfpD5.js",
+  "index-DSErXZpT.js",
+  "index-kXmA3Tsf.js",
+  "index-D-i-Dcu8.js"
+]);
+
+async function isAllowedObsoleteShim(assetName) {
+  if (!obsoleteAssetShims.has(assetName)) return false;
+  const content = await readFile(join(assetsDirectory, assetName), "utf8").catch(() => "");
+  if (!content.includes("Obsolete Codex Home Manager asset shim")) return false;
+  if (assetName.endsWith(".js")) {
+    return Boolean(currentScriptName && content.trim() === [
+      "/* Obsolete Codex Home Manager asset shim. */",
+      `import "/assets/${currentScriptName}";`
+    ].join("\n"));
+  }
+  if (assetName.endsWith(".css")) {
+    return Boolean(currentStyleName && content.trim() === [
+      "/* Obsolete Codex Home Manager asset shim. */",
+      `@import url("/assets/${currentStyleName}");`
+    ].join("\n"));
+  }
+  return false;
+}
 
 if (!htmlReferencedAssets.size) {
   throw new Error("public site index.html does not reference the built product assets");
 }
 
 for (const entry of await readdir(assetsDirectory, { withFileTypes: true })) {
-  if (entry.isFile() && !allowedAssetNames.has(entry.name)) {
+  if (entry.isFile() && !allowedAssetNames.has(entry.name) && !await isAllowedObsoleteShim(entry.name)) {
     throw new Error(`stale or unreferenced public asset: site/assets/${entry.name}`);
   }
 }
