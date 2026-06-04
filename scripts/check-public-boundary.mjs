@@ -56,10 +56,12 @@ const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
 const obsoleteAssetShims = new Set([
   "index-BDBpbU1n.js",
+  "index-B7mEeyjg.css",
   "index-BaoxMYZU.css",
   "index-CcYcEs2C.css",
   "index-CD4z4gjT.js",
   "index-CUYf0Vs4.css",
+  "index-CZGTazmD.js",
   "index-DCFNfpD5.js",
   "index-DhNJbMqY.js",
   "index-DSErXZpT.js",
