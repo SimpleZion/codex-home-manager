@@ -38,9 +38,7 @@ On Windows, download and run the local connector:
 
 The connector starts a local API on `127.0.0.1:8765`, registers the `codex-home-manager://start` browser protocol for the current Windows user, and opens the hosted page.
 
-If the browser or Windows warns that the executable is not commonly downloaded, verify the SHA256 checksum before running:
-
-<https://github.com/SimpleZion/codex-home-manager/releases/latest/download/SHA256SUMS.txt>
+The current Windows build is unsigned. If Windows SmartScreen shows "Windows protected your PC", choose "More info" and then "Run anyway" to start the app.
 
 ## Local preview
 
