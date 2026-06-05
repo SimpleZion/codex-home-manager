@@ -4,9 +4,7 @@ This repository contains only the hosted Codex Home Manager frontend and public 
 
 The hosted page connects to a local connector running on the user's own machine at `http://127.0.0.1:8765`. The connector reads and manages the selected Codex Home directory. The hosted page itself does not contain the local engine source and does not upload `.codex` data.
 
-![Anonymized Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
-
-The screenshot above uses anonymized sample thread and project names. Real Codex Home content, local paths, thread IDs, and private conversation text are not committed.
+![Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
 
 ## What is included
 
