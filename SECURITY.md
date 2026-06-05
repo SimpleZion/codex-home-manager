@@ -1,6 +1,8 @@
 # Security Boundary
 
-Codex Home Manager is local-first by design. The public repository contains a static website and mock product preview only.
+Codex Home Manager is local-first by design. The public repository contains the hosted static frontend, public release downloads, deployment files, and public safety checks. It does not contain the private local engine.
+
+The hosted frontend can operate in a read-only browser folder mode when a user explicitly selects a local `.codex` directory. Full write-capable management requires the local connector running on the user's own machine.
 
 ## Non-disclosure boundary
 
@@ -11,9 +13,9 @@ The private local engine is intentionally excluded from this repository. Do not 
 - Real screenshots containing conversation titles, project paths, machine usernames, account names, prompts, tokens, or logs.
 - Internal recovery scripts or one-off repair scripts.
 
-## Public demo data
+## Public screenshots and demo data
 
-Only synthetic data may be used in this repository. If a screenshot is needed, generate it from the mock UI in `site/`, not from the private local product.
+Only synthetic or anonymized data may be used in this repository. If a screenshot is needed, remove or replace real conversation titles, project paths, machine usernames, account names, prompts, tokens, and logs before committing it.
 
 ## Reporting
 

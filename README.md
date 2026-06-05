@@ -2,7 +2,12 @@
 
 This repository contains only the hosted Codex Home Manager frontend and public release downloads.
 
-The hosted page connects to a local connector running on the user's own machine at `http://127.0.0.1:8765`. The connector reads and manages the selected Codex Home directory. The hosted page itself does not contain the local engine source and does not upload `.codex` data.
+The hosted page has two operating modes:
+
+- Browser folder mode: the user manually selects a local `.codex` directory in a Chromium browser. The page can read thread JSONL, resources, logs, diagnostics inputs, and prompt exports through the browser File System Access API. This mode is read-only.
+- Local connector mode: the user runs the Windows connector on their own machine at `http://127.0.0.1:8765`. The connector enables the full local management surface, including repairs, migration, deletion, slimming, MCP, process checks, and guarded writes.
+
+The hosted page itself does not contain the private local engine source and does not upload `.codex` data.
 
 ![Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
 
@@ -32,7 +37,9 @@ Open:
 
 <https://codex-home-manager.simplezion.com/>
 
-On Windows, download and run the local connector:
+For read-only use, choose `.codex` directly from the hosted page in a Chromium browser.
+
+For the full local management mode on Windows, download and run the local connector:
 
 <https://github.com/SimpleZion/codex-home-manager/releases/latest/download/codex-home-manager-local-win-x64.exe>
 
@@ -61,4 +68,4 @@ Production custom domain: <https://codex-home-manager.simplezion.com/>.
 
 ## Privacy stance
 
-The deployed frontend reads real Codex Home data only from the user's own local API. No real Codex Home content, session JSONL, SQLite database, logs, exports, backups, screenshots, or user-specific paths are committed.
+The deployed frontend can read real Codex Home data only from a user-selected local folder or from the user's own local connector API. Real Codex Home content is not uploaded by the hosted page. No real session JSONL, SQLite database, logs, exports, backups, screenshots, or user-specific paths are committed.
