@@ -58,39 +58,11 @@ const readmeReferencedAssets = new Set(
 const allowedAssetNames = new Set([...htmlReferencedAssets, ...readmeReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
-const obsoleteAssetShims = new Set([
-  "index-4bnkjVl0.js",
-  "index-BDBpbU1n.js",
-  "index-B7mEeyjg.css",
-  "index-BaoxMYZU.css",
-  "index-C4iW-98y.css",
-  "index-CcYcEs2C.css",
-  "index-CD4z4gjT.js",
-  "index-CUYf0Vs4.css",
-  "index-CZGTazmD.js",
-  "index-CKMgeurs.js",
-  "index-DCFNfpD5.js",
-  "index-DhNJbMqY.js",
-  "index-DSErXZpT.js",
-  "index-CRRjjkB1.js",
-  "index-H84kf_uy.css",
-  "index-kXmA3Tsf.js",
-  "index-D-i-Dcu8.js",
-  "index-CvkKPkyT.js",
-  "index-FYk_tTtX.css",
-  "index-D4eE1uJo.js",
-  "index-KRvsmiiJ.css",
-  "index-ChgvxVwy.js",
-  "index-DtHFO_mj.css",
-  "index-c56AkLqK.js",
-  "index-Belip6q5.css",
-  "index-DaBkAiov.js",
-  "index-D4TK3VCN.css"
-]);
+const obsoleteAssetShimPattern = /^index-[A-Za-z0-9_-]+\.(?:js|css)$/;
 
 async function isAllowedObsoleteShim(assetName) {
-  if (!obsoleteAssetShims.has(assetName)) return false;
-  const content = await readFile(join(assetsDirectory, assetName), "utf8").catch(() => "");
+  if (!obsoleteAssetShimPattern.test(assetName)) return false;
+  const content = (await readFile(join(assetsDirectory, assetName), "utf8").catch(() => "")).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
   if (!content.includes("Obsolete Codex Home Manager asset shim")) return false;
   if (assetName.endsWith(".js")) {
     return Boolean(currentScriptName && content.trim() === [
