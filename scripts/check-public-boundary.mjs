@@ -48,10 +48,14 @@ const files = await listFiles(root);
 const siteDirectory = join(root, "site");
 const assetsDirectory = join(siteDirectory, "assets");
 const indexHtml = await readFile(join(siteDirectory, "index.html"), "utf8");
+const readmeMarkdown = await readFile(join(root, "README.md"), "utf8").catch(() => "");
 const htmlReferencedAssets = new Set(
   [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
 );
-const allowedAssetNames = new Set([...htmlReferencedAssets]);
+const readmeReferencedAssets = new Set(
+  [...readmeMarkdown.matchAll(/\(site\/assets\/([^)\s]+)\)/g)].map((match) => match[1])
+);
+const allowedAssetNames = new Set([...htmlReferencedAssets, ...readmeReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
 const obsoleteAssetShims = new Set([
