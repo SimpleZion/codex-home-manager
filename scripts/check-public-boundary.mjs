@@ -83,7 +83,9 @@ const obsoleteAssetShims = new Set([
   "index-ChgvxVwy.js",
   "index-DtHFO_mj.css",
   "index-c56AkLqK.js",
-  "index-Belip6q5.css"
+  "index-Belip6q5.css",
+  "index-DaBkAiov.js",
+  "index-D4TK3VCN.css"
 ]);
 
 async function isAllowedObsoleteShim(assetName) {
