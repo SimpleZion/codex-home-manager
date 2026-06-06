@@ -24,7 +24,7 @@ const alwaysBlockedTextFragments = [
 
 const alwaysBlockedTextPatterns = [
   /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\\s"'<>]+/i,
-  /[A-Za-z]:[\\/]+\\.codex[\\/]+sessions/i,
+  /[A-Za-z]:[\\/]+\.codex[\\/]+sessions/i,
   /gho_[A-Za-z0-9_]+/,
   /CLOUDFLARE_API_TOKEN\\s*=/
 ];
@@ -53,7 +53,7 @@ const htmlReferencedAssets = new Set(
   [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
 );
 const readmeReferencedAssets = new Set(
-  [...readmeMarkdown.matchAll(/\(site\/assets\/([^)\s]+)\)/g)].map((match) => match[1])
+  [...readmeMarkdown.matchAll(/\(site\/assets\/([^\)\s]+)\)/g)].map((match) => match[1])
 );
 const allowedAssetNames = new Set([...htmlReferencedAssets, ...readmeReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
