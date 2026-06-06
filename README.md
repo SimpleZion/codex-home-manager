@@ -11,6 +11,10 @@ The hosted page itself does not contain the private local engine source and does
 
 ![Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
 
+Diagnostics view:
+
+![Codex Home Manager diagnostics](site/assets/codex-home-manager-diagnostics.webp)
+
 ## What is included
 
 - The static web frontend deployed on Cloudflare Pages.

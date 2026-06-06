@@ -34,7 +34,7 @@ async function listFiles(directory) {
   const results = [];
   for (const entry of entries) {
     const fullPath = join(directory, entry.name);
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".wrangler") continue;
+    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".wrangler" || entry.name === ".tmp") continue;
     if (entry.isDirectory()) {
       results.push(...await listFiles(fullPath));
     } else {
