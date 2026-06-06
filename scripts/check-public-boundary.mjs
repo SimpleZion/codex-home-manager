@@ -24,7 +24,7 @@ const alwaysBlockedTextFragments = [
 
 const alwaysBlockedTextPatterns = [
   /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\\s"'<>]+/i,
-  /[A-Za-z]:[\\/]+\\.codex[\\/]+sessions/i,
+  /[A-Za-z]:[\\/]+\.codex[\\/]+sessions/i,
   /gho_[A-Za-z0-9_]+/,
   /CLOUDFLARE_API_TOKEN\\s*=/
 ];
@@ -34,7 +34,7 @@ async function listFiles(directory) {
   const results = [];
   for (const entry of entries) {
     const fullPath = join(directory, entry.name);
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".wrangler") continue;
+    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".wrangler" || entry.name === ".tmp") continue;
     if (entry.isDirectory()) {
       results.push(...await listFiles(fullPath));
     } else {
@@ -53,7 +53,7 @@ const htmlReferencedAssets = new Set(
   [...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1])
 );
 const readmeReferencedAssets = new Set(
-  [...readmeMarkdown.matchAll(/\(site\/assets\/([^)\s]+)\)/g)].map((match) => match[1])
+  [...readmeMarkdown.matchAll(/\(site\/assets\/([^\)\s]+)\)/g)].map((match) => match[1])
 );
 const allowedAssetNames = new Set([...htmlReferencedAssets, ...readmeReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
