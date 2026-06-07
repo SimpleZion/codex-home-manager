@@ -55,9 +55,16 @@ const htmlReferencedAssets = new Set(
 const readmeReferencedAssets = new Set(
   [...readmeMarkdown.matchAll(/\(site\/assets\/([^\)\s]+)\)/g)].map((match) => match[1])
 );
-const allowedAssetNames = new Set([...htmlReferencedAssets, ...readmeReferencedAssets]);
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
+const scriptReferencedAssets = new Set();
+if (currentScriptName) {
+  const currentScriptText = await readFile(join(assetsDirectory, currentScriptName), "utf8").catch(() => "");
+  for (const match of currentScriptText.matchAll(/\/assets\/([^"'\s)]+)/g)) {
+    scriptReferencedAssets.add(match[1]);
+  }
+}
+const allowedAssetNames = new Set([...htmlReferencedAssets, ...scriptReferencedAssets, ...readmeReferencedAssets]);
 const obsoleteAssetShimPattern = /^index-[A-Za-z0-9_-]+\.(?:js|css)$/;
 
 async function isAllowedObsoleteShim(assetName) {
