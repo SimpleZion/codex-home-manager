@@ -19,7 +19,7 @@
       "name": "thread_daily_tokens",
       "method": "GET",
       "path": "/api/threads/{thread_id}/daily-tokens",
-      "purpose": "Read the interactive daily token timeline for one thread, including own tokens, child-thread tokens, zero days, event counts, fallback markers, and summary totals."
+      "purpose": "Read the interactive daily token timeline for one thread, including own tokens, child-thread tokens, zero-token dates, hasData flags, activeDays/rangeDays/zeroDays summaries, event counts, fallback markers, and summary totals."
     },
     {
       "name": "action_preview",
