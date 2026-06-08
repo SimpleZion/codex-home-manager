@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $filePath = Join-Path $env:USERPROFILE "Downloads\codex-home-manager-local-win-x64.exe"
-$expectedSha256 = "3e160ebc1ca04130a39cc97d9b4f25d0b8074721c09d4b69dca7d0979b73dfe8"
+$expectedSha256 = "c8963dbdb803357106fd565f68694e44b7195ec59fd22fdae0d07f0e426a47ae"
 
 if (-not (Test-Path -LiteralPath $filePath)) {
     Write-Host "File not found: $filePath"
