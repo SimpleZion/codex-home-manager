@@ -15,11 +15,15 @@ Diagnostics view:
 
 ![Codex Home Manager diagnostics](site/assets/codex-home-manager-diagnostics.webp)
 
+Thread detail daily token timeline:
+
+![Codex Home Manager daily token timeline](site/assets/codex-home-manager-daily-tokens.jpg)
+
 ## What is included
 
 - The static web frontend deployed on Cloudflare Pages.
 - Public release downloads for the Windows local connector.
-- A public API capability overview and safety boundary notes.
+- A public API capability overview, MCP-oriented endpoints, and safety boundary notes.
 - Cloudflare Pages deployment files.
 
 ## What is intentionally not included
@@ -50,6 +54,8 @@ For the full local management mode on Windows, download and run the local connec
 The connector starts a local API on `127.0.0.1:8765`, registers the `codex-home-manager://start` browser protocol for the current Windows user, and opens the hosted page.
 
 The current Windows build is unsigned. If Windows SmartScreen shows "Windows protected your PC", choose "More info" and then "Run anyway" to start the app.
+
+Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed.
 
 ## Local preview
 

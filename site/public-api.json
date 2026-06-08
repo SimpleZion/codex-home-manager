@@ -10,6 +10,24 @@
       "purpose": "List and classify local Codex threads, including threads outside the first sidebar page."
     },
     {
+      "name": "thread_detail",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}?include_daily_tokens=false",
+      "purpose": "Read full metadata, storage, message structure, descendants, paths, prompts, and action context for one thread without blocking on the daily token timeline."
+    },
+    {
+      "name": "thread_daily_tokens",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/daily-tokens",
+      "purpose": "Read the interactive daily token timeline for one thread, including own tokens, child-thread tokens, zero days, event counts, fallback markers, and summary totals."
+    },
+    {
+      "name": "action_preview",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/action-preview",
+      "purpose": "Create a fast write-preview ticket for show, hide, archive, delete, slimming, copy, migration, or project rename operations before any guarded write."
+    },
+    {
       "name": "show_thread",
       "method": "POST",
       "path": "/api/threads/{thread_id}/show",
@@ -34,6 +52,12 @@
       "purpose": "Read safe text resources or directory metadata inside a local Codex Home."
     },
     {
+      "name": "diagnostics",
+      "method": "GET",
+      "path": "/api/diagnostics",
+      "purpose": "Run a bounded read-only health scan for visibility, plugin cache, logs, resources, storage, runtime risks, and repair prompts that users can paste into their own Codex."
+    },
+    {
       "name": "import_thread_from_home",
       "method": "POST",
       "path": "/api/import/thread",
@@ -45,6 +69,8 @@
     "publicDemoHasNoLocalEngine": true,
     "writesRequireToken": true,
     "dangerousWritesRequirePreviewTicket": true,
+    "threadDetailCanSkipDailyTokens": true,
+    "dailyTokensLoadOnDemand": true,
     "backupsDefaultEnabled": true,
     "createBackupCanBeFalsePerOperation": true,
     "permanentJsonlDelete": false
