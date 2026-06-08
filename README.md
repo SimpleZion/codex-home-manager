@@ -17,7 +17,7 @@ Diagnostics view:
 
 Thread detail daily token timeline:
 
-![Codex Home Manager daily token timeline](site/assets/codex-home-manager-daily-tokens.jpg)
+![Codex Home Manager daily token timeline](site/assets/codex-home-manager-daily-tokens.png)
 
 ## What is included
 
@@ -55,7 +55,7 @@ The connector starts a local API on `127.0.0.1:8765`, registers the `codex-home-
 
 The current Windows build is unsigned. If Windows SmartScreen shows "Windows protected your PC", choose "More info" and then "Run anyway" to start the app.
 
-Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed.
+Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed. That endpoint separates audited `token_count` totals from SQLite `tokens_used` reference estimates, so account-like usage analysis should use the audited fields and treat SQLite estimates as fallback context only.
 
 ## Local preview
 
