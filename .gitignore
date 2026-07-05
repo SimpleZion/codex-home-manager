@@ -9,3 +9,5 @@ coverage/
 .env
 .env.*
 !.env.example
+site/codex-home-manager-local-win-x64.exe
+site/codex-home-manager-local-win-x64.zip

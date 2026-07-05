@@ -51,11 +51,11 @@ For the full local management mode on Windows, download and run the local connec
 
 <https://github.com/SimpleZion/codex-home-manager/releases/latest/download/codex-home-manager-local-win-x64.exe>
 
-The connector starts a local API on `127.0.0.1:8765`, registers the `codex-home-manager://start` browser protocol for the current Windows user, and opens the hosted page.
+The connector starts the full local product at `http://127.0.0.1:8765/` and registers the `codex-home-manager://start` browser protocol for the current Windows user.
 
 The current Windows build is unsigned. If Windows SmartScreen shows "Windows protected your PC", choose "More info" and then "Run anyway" to start the app.
 
-Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed. That endpoint separates audited `token_count` totals from SQLite `tokens_used` reference estimates, so account-like usage analysis should use the audited fields and treat SQLite estimates as fallback context only.
+Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed. That endpoint returns numeric token usage only from auditable `token_count` events. Threads that only have SQLite `tokens_used` are marked with `unknownTokenThreads`; no token value is returned for those unknown records.
 
 ## Local preview
 

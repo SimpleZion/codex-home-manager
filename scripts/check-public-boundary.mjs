@@ -29,6 +29,11 @@ const alwaysBlockedTextPatterns = [
   /CLOUDFLARE_API_TOKEN\\s*=/
 ];
 
+const allowedLargeReleaseFiles = new Set([
+  "site/codex-home-manager-local-win-x64.exe",
+  "site/codex-home-manager-local-win-x64.zip"
+]);
+
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const results = [];
@@ -116,8 +121,11 @@ for (const file of files) {
     }
   }
   const info = await stat(file);
-  if (info.size > 2_000_000) {
+  if (info.size > 2_000_000 && !allowedLargeReleaseFiles.has(relativePath)) {
     throw new Error(`unexpected large file in public repository: ${relativePath}`);
+  }
+  if (allowedLargeReleaseFiles.has(relativePath)) {
+    continue;
   }
   if (relativePath === "scripts/check-public-boundary.mjs") {
     continue;

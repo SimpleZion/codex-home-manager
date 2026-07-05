@@ -19,7 +19,7 @@
       "name": "thread_daily_tokens",
       "method": "GET",
       "path": "/api/threads/{thread_id}/daily-tokens",
-      "purpose": "Read the interactive daily token timeline for one thread. Audited totals, peaks, own tokens, and child-thread tokens come from token_count events only. SQLite tokens_used fallback estimates are returned separately as sqliteEstimateTokens and should be treated as non-account reference context."
+      "purpose": "Read the interactive daily token timeline for one thread. Audited totals, peaks, own tokens, and child-thread tokens come from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for those unknown records."
     },
     {
       "name": "action_preview",
