@@ -2,6 +2,8 @@
 
 Codex Home Manager is local-first by design. The public repository contains the hosted static frontend, public release downloads, deployment files, and public safety checks. It does not contain the private local engine.
 
+Windows Authenticode is optional evidence, not a fallback trust root. A release may claim valid Authenticode only when Windows validates an existing trusted code-signing certificate. Releases without such a certificate explicitly report Authenticode as unavailable and still require the detached Ed25519 manifest signature plus an independently pinned public-key fingerprint. Self-signed certificates are not accepted as publisher trust.
+
 The hosted frontend can operate in a read-only browser folder mode when a user explicitly selects a local `.codex` directory. Full write-capable management requires the local connector running on the user's own machine.
 
 ## Non-disclosure boundary

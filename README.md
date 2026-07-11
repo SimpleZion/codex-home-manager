@@ -76,6 +76,14 @@ npx wrangler pages deploy site --project-name codex-home-manager --branch main
 
 Production custom domain: <https://codex-home-manager.simplezion.com/>.
 
+## Signed release proof
+
+The release manifest signs the immutable artifact deployment, GitHub Release identity, EXE and ZIP hashes, and source commits. Release mode refuses to proceed unless `release-manifest.json`, its detached Ed25519 signature, the public key, and the published fingerprint are all present. The verifier requires `CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256` from an independently retained publisher trust record and rejects a fingerprint learned only from either download channel.
+
+Final publication downloads the EXE, ZIP, manifest, detached signature, and public key independently from Cloudflare Pages and GitHub Release. It requires byte-identical metadata and artifacts, an exact GitHub asset set, valid Cloudflare deployment evidence, valid Ed25519 signing, and stable aliases that resolve to the current content-addressed files.
+
+Authenticode is reported only when the build machine already has a trusted Windows code-signing certificate with a private key and a valid chain. The release process never creates or presents a self-signed certificate as trusted. When no trusted certificate is available, metadata states `authenticode.status = "unavailable"`; the detached Ed25519 signature and independently pinned root remain mandatory in both cases.
+
 ## Privacy stance
 
 The deployed frontend can read real Codex Home data only from a user-selected local folder or from the user's own local connector API. Real Codex Home content is not uploaded by the hosted page. No real session JSONL, SQLite database, logs, exports, backups, screenshots, or user-specific paths are committed.

@@ -8,3 +8,36 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable, no-transform
+
+/codex-home-manager-local-win-x64-v*
+  Cache-Control: public, max-age=31536000, immutable, no-transform
+
+/codex-home-manager-local-win-x64.exe
+  Cache-Control: no-store, max-age=0
+
+/codex-home-manager-local-win-x64.zip
+  Cache-Control: no-store, max-age=0
+
+/downloads/latest/windows-x64.exe
+  Cache-Control: no-store, max-age=0
+
+/downloads/latest/windows-x64.zip
+  Cache-Control: no-store, max-age=0
+
+/connector-release.json
+  Cache-Control: no-store, max-age=0
+
+/SHA256SUMS.txt
+  Cache-Control: no-store, max-age=0
+
+/release-manifest.json
+  Cache-Control: no-store, max-age=0
+
+/release-manifest.json.sig
+  Cache-Control: no-store, max-age=0
+
+/release-signing-public-key.pem
+  Cache-Control: no-store, max-age=0
+
+/release-signing-public-key.sha256
+  Cache-Control: no-store, max-age=0
