@@ -1,3 +1,3 @@
-e246a5e47f231476877242c16d5f87d06124d946f5d62b6f1bba5e9849fdda28  codex-home-manager-local-win-x64.exe
-a9ed3bc1460241a1869907214164b240dc3b4ac754655892e80c65f5bf7872ab  codex-home-manager-local-win-x64.zip
-ea1fa91730dfa89b408907f65fa02dcb59d5f0550a2b514fafc87b051a34171b  verify-codex-home-manager.ps1
+0662fcb73af6c8651eecc856818055d3e8e77894d9bb08591836202335bc2b99  codex-home-manager-local-win-x64.exe
+abb9afdca13f24616566bfb20c63175b3581f2034ff590eb87d2c3fee390dc2d  codex-home-manager-local-win-x64.zip
+0d2e0da7b81d903b785587c16a2258ca41d7ee09290e36b8adbb2b0c53a9cb15  verify-codex-home-manager.ps1

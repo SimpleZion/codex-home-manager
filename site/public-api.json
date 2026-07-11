@@ -28,6 +28,18 @@
       "purpose": "Create a fast write-preview ticket for show, hide, archive, delete, slimming, copy, migration, or project rename operations before any guarded write."
     },
     {
+      "name": "preview_move_thread_workspace",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/move-workspace/preview",
+      "purpose": "Preview moving a thread, optional same-source-cwd threads, actual workspace files, SQLite/global state, and rollout workspace metadata."
+    },
+    {
+      "name": "move_thread_workspace",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/move-workspace",
+      "purpose": "Move the selected thread plus same-source-cwd threads and top-level workspace files to a target workspace after preview and token validation."
+    },
+    {
       "name": "show_thread",
       "method": "POST",
       "path": "/api/threads/{thread_id}/show",
@@ -43,7 +55,7 @@
       "name": "export_prompts",
       "method": "GET",
       "path": "/api/threads/{thread_id}/export-prompts",
-      "purpose": "Export user prompts from a selected thread."
+      "purpose": "Export prompts from a selected thread. The scope parameter supports pure, visible, with_agents, automation, delegation, and all; delegation returns messages sent from other Codex threads."
     },
     {
       "name": "read_resource",
@@ -58,6 +70,18 @@
       "purpose": "Run a bounded read-only health scan for visibility, plugin cache, logs, resources, storage, runtime risks, and repair prompts that users can paste into their own Codex."
     },
     {
+      "name": "preview_official_thread_tools_repair",
+      "method": "POST",
+      "path": "/api/codex/official-thread-tools/repair/preview",
+      "purpose": "Preview whether legacy codex_thread_messenger MCP fallback is active and can shadow official codex_app thread tools such as send_message_to_thread."
+    },
+    {
+      "name": "repair_official_thread_tools",
+      "method": "POST",
+      "path": "/api/codex/official-thread-tools/repair",
+      "purpose": "Disable the legacy codex_thread_messenger MCP fallback after preview and token validation. A full Codex Desktop restart and visible target-thread verification are still required."
+    },
+    {
       "name": "import_thread_from_home",
       "method": "POST",
       "path": "/api/import/thread",
@@ -69,8 +93,10 @@
     "publicDemoHasNoLocalEngine": true,
     "writesRequireToken": true,
     "dangerousWritesRequirePreviewTicket": true,
+    "workspaceMoveRequiresCodexClosed": true,
     "threadDetailCanSkipDailyTokens": true,
     "dailyTokensLoadOnDemand": true,
+    "officialThreadToolsRepairRequiresRestart": true,
     "backupsDefaultEnabled": true,
     "createBackupCanBeFalsePerOperation": true,
     "permanentJsonlDelete": false
