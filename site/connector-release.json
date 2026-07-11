@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "version": "1.0.1",
+  "artifacts": [
+    {
+      "name": "codex-home-manager-local-win-x64-v1.0.1-1f5164340cd9.exe",
+      "kind": "exe",
+      "sha256": "1f5164340cd9004d0f320d3d0d2bd7dd505336a8c8d7fd931fdb8df4e431e9dd",
+      "size": 19106710,
+      "audit": {
+        "method": "pyi-archive-viewer+strings",
+        "archiveEntryCount": 893,
+        "sourceFiles": [],
+        "sensitiveStrings": []
+      },
+      "authenticode": {
+        "status": "unavailable",
+        "signerThumbprint": null,
+        "signerSubject": null,
+        "detachedSignatureRequired": true
+      }
+    },
+    {
+      "name": "codex-home-manager-local-win-x64-v1.0.1-029ad2c019c9.zip",
+      "kind": "zip",
+      "sha256": "029ad2c019c9c07695eec71d241b38c38917e885c0fd3cf427df4dc9a1b94b88",
+      "size": 19034681
+    }
+  ]
+}
