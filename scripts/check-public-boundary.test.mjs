@@ -33,10 +33,14 @@ async function createReleaseFixture() {
 }
 
 function runChecker(root, environment = {}) {
+  const childEnvironment = { ...process.env };
+  delete childEnvironment.CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE;
+  delete childEnvironment.CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256;
+  Object.assign(childEnvironment, environment);
   return spawnSync(process.execPath, [checker, "--root", root], {
     encoding: "utf8",
     windowsHide: true,
-    env: { ...process.env, ...environment }
+    env: childEnvironment
   });
 }
 
