@@ -1,7 +1,7 @@
 {
   "name": "codex-home-manager-public-api-contract",
   "version": "1.0.0",
-  "note": "This public contract describes agent-facing capabilities. It intentionally excludes the private local engine implementation.",
+  "note": "This hosted contract describes agent-facing capabilities. The complete implementation is open source on the repository's source branch and is not bundled into the static browser deployment.",
   "capabilities": [
     {
       "name": "snapshot_threads",
@@ -90,7 +90,7 @@
   ],
   "safetyModel": {
     "localFirst": true,
-    "publicDemoHasNoLocalEngine": true,
+    "hostedPageBundlesLocalBackend": false,
     "writesRequireToken": true,
     "dangerousWritesRequirePreviewTicket": true,
     "workspaceMoveRequiresCodexClosed": true,

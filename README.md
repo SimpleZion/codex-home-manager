@@ -1,13 +1,13 @@
 # Codex Home Manager
 
-This repository contains only the hosted Codex Home Manager frontend and public release downloads.
+The default `source` branch contains the complete open-source Codex Home Manager product. This `main` branch is the deployed static-site and release-artifact boundary.
 
 The hosted page has two operating modes:
 
 - Browser folder mode: the user manually selects a local `.codex` directory in a Chromium browser. The page can read thread JSONL, resources, logs, diagnostics inputs, and prompt exports through the browser File System Access API. This mode is read-only.
 - Local connector mode: the user runs the Windows connector on their own machine at `http://127.0.0.1:8765`. The connector enables the full local management surface, including repairs, migration, deletion, slimming, MCP, process checks, and guarded writes.
 
-The hosted page itself does not contain the private local engine source and does not upload `.codex` data.
+The hosted browser bundle does not execute the local connector backend and does not upload `.codex` data. The complete local connector and backend source remains available on the [`source` branch](https://github.com/SimpleZion/codex-home-manager/tree/source).
 
 ![Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
 
@@ -19,25 +19,25 @@ Thread detail daily token timeline:
 
 ![Codex Home Manager daily token timeline](site/assets/codex-home-manager-daily-tokens.png)
 
-## What is included
+## What is included on `main`
 
 - The static web frontend deployed on Cloudflare Pages.
 - Public release downloads for the Windows local connector.
 - A public API capability overview, MCP-oriented endpoints, and safety boundary notes.
 - Cloudflare Pages deployment files.
+- Signed release metadata and public verification material.
 
-## What is intentionally not included
+## Deployment boundary
 
-This repository does not contain the private local engine implementation that reads, repairs, migrates, slims, or writes a real Codex Home directory.
+The complete implementation that reads, repairs, migrates, slims, and writes a Codex Home is open source on the [`source` branch](https://github.com/SimpleZion/codex-home-manager/tree/source). It is intentionally not bundled into the hosted static JavaScript or duplicated on this deployment branch.
 
-Excluded by design:
+Excluded from the deployed static branch and release downloads by design:
 
-- Local SQLite and JSONL manipulation code.
 - Real Codex Desktop session data, logs, exports, backups, or screenshots.
-- Token handling, write-gate implementation, preview ticket validation, and restore internals.
+- Private signing keys, credentials, tokens, local databases, and diagnostics snapshots.
 - Any user-specific project paths, conversation titles, memory files, or machine identifiers.
 
-The public repository is only the hosted frontend and distribution shell.
+Source review, issues, and contributions should target the default `source` branch.
 
 ## Use the hosted product
 
