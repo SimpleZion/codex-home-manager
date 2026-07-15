@@ -44,7 +44,7 @@ function runChecker(root, environment = {}) {
   });
 }
 
-async function addSignedReleaseMetadata(root, missingName = null) {
+async function addSignedReleaseMetadata(root, missingName = null, mutateManifest = null) {
   const { name } = await addExecutableRelease(root);
   const artifactPath = join(root, "site", name);
   const bundlePath = join(root, "site", "connector-release.json");
@@ -56,10 +56,23 @@ async function addSignedReleaseMetadata(root, missingName = null) {
     const content = await (await import("node:fs/promises")).readFile(path);
     return { path: path.split(/[\\/]/).at(-1), sha256: createHash("sha256").update(content).digest("hex"), size: content.length };
   }));
+  const publicSiteDistRecords = await Promise.all([
+    join(root, "site", "assets", "app-abc123.js"),
+    join(root, "site", "index.html")
+  ].map(async (path) => {
+    const content = await (await import("node:fs/promises")).readFile(path);
+    return {
+      path: path.slice(join(root, "site").length + 1).replaceAll("\\", "/"),
+      sha256: createHash("sha256").update(content).digest("hex"),
+      size: content.length
+    };
+  }));
   const manifest = {
-    schema_version: 2,
+    schema_version: 3,
     sources: { build: { root: { head: "a".repeat(40), branch: "main", clean: true }, manager: { head: "b".repeat(40), branch: "main", clean: true } }, artifact_public: { head: "c".repeat(40), branch: "main", clean: true } },
     public_key_fingerprint: fingerprint,
+    dist_files: publicSiteDistRecords,
+    public_site_dist_files: publicSiteDistRecords.map((record) => ({ ...record })),
     public_artifacts: records,
     cloudflare: { artifact_deployment: { id: "7d7aeac7-23a7-4eca-bc4a-c76c515727c0", project: "codex-home-manager", branch: "main", public_commit: "c".repeat(40), url: "https://artifact.codex-home-manager.pages.dev", status: "success" } },
     github: {
@@ -72,6 +85,7 @@ async function addSignedReleaseMetadata(root, missingName = null) {
       metadata_assets: ["release-manifest.json", "release-manifest.json.sig", "release-signing-public-key.pem", "release-signing-public-key.sha256"]
     }
   };
+  if (mutateManifest) mutateManifest(manifest);
   const manifestBytes = Buffer.from(JSON.stringify(manifest) + "\n");
   const metadata = new Map([
     ["release-manifest.json", manifestBytes],
@@ -269,6 +283,29 @@ test("validates signed release metadata only against a separately pinned public 
   const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects public frontend bytes that drift from the signed dist mirror", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  await writeFile(join(root, "site", "assets", "app-abc123.js"), "console.info('drifted public UI');\n");
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /signed public site dist hash mismatch/i);
+});
+
+test("rejects a signed manifest whose build and public dist sets differ", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root, null, (manifest) => {
+    manifest.public_site_dist_files = manifest.public_site_dist_files.slice(1);
+  });
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /signed build and public site dist records differ/i);
 });
 
 test("rejects signed metadata when the private-root fingerprint pin or published artifact bytes drift", async () => {

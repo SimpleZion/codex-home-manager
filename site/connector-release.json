@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "artifacts": [
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.1-1f5164340cd9.exe",
+      "name": "codex-home-manager-local-win-x64-v1.0.2-d267c3929863.exe",
       "kind": "exe",
-      "sha256": "1f5164340cd9004d0f320d3d0d2bd7dd505336a8c8d7fd931fdb8df4e431e9dd",
-      "size": 19106710,
+      "sha256": "d267c392986358e87b47b0bb6c85d1ae4095c5a64212d620514736d4d07dcb4c",
+      "size": 19143629,
       "audit": {
         "method": "pyi-archive-viewer+strings",
-        "archiveEntryCount": 893,
+        "archiveEntryCount": 894,
         "sourceFiles": [],
         "sensitiveStrings": []
       },
@@ -21,10 +21,10 @@
       }
     },
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.1-029ad2c019c9.zip",
+      "name": "codex-home-manager-local-win-x64-v1.0.2-d0f567216f7b.zip",
       "kind": "zip",
-      "sha256": "029ad2c019c9c07695eec71d241b38c38917e885c0fd3cf427df4dc9a1b94b88",
-      "size": 19034681
+      "sha256": "d0f567216f7b6ee1353d811d8e39581a02bd196cc02bd4617bea5770a1ee247a",
+      "size": 19071748
     }
   ]
 }

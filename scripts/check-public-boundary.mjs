@@ -70,6 +70,34 @@ const textExtensions = new Set([
   ".css", ".html", ".js", ".json", ".md", ".mjs", ".pem", ".ps1", ".svg", ".toml", ".txt", ""
 ]);
 const releaseNamePattern = /^codex-home-manager-local-win-x64-v([0-9]+\.[0-9]+\.[0-9]+)-([0-9a-f]{12})\.(exe|zip)$/;
+const publicDistRootNames = new Set(["favicon.svg", "index.html"]);
+const publicDistAssetExtensions = new Set([".css", ".js", ".wasm"]);
+
+function isPublicDistPath(path) {
+  if (publicDistRootNames.has(path)) return true;
+  const parts = path.split("/");
+  return parts.length === 2 && parts[0] === "assets" &&
+    /^[A-Za-z0-9._-]+$/.test(parts[1]) && publicDistAssetExtensions.has(extname(parts[1]).toLowerCase());
+}
+
+function validateSignedPublicDistRecords(records, label) {
+  if (!Array.isArray(records) || !records.length) {
+    throw new Error(`signed release manifest has no ${label} records`);
+  }
+  const paths = [];
+  for (const record of records) {
+    if (!record || typeof record.path !== "string" || !isPublicDistPath(record.path) ||
+        !/^[0-9a-f]{64}$/.test(record.sha256 || "") || !Number.isInteger(record.size) || record.size < 0 ||
+        paths.includes(record.path)) {
+      throw new Error(`signed release manifest has an invalid ${label} record`);
+    }
+    paths.push(record.path);
+  }
+  if (!paths.includes("index.html") || JSON.stringify(paths) !== JSON.stringify([...paths].sort())) {
+    throw new Error(`signed release manifest has a non-canonical ${label} record set`);
+  }
+  return records;
+}
 
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -168,6 +196,8 @@ const signedMetadata = new Map(await Promise.all(signedMetadataNames.map(async (
 ])));
 const hasManifest = signedMetadata.get("release-manifest.json") !== null;
 const hasSignature = signedMetadata.get("release-manifest.json.sig") !== null;
+let signedPublicSiteDistRecords = null;
+let signedPublicSiteDistPaths = null;
 if (releaseMode && [...signedMetadata.values()].some((content) => content === null)) {
   throw new Error("release mode requires complete signed release metadata: manifest, detached signature, public key, and fingerprint pin");
 }
@@ -206,8 +236,28 @@ if (hasManifest || hasSignature) {
   } catch {
     throw new Error("signed release manifest is not valid JSON");
   }
-  if (signedManifest.schema_version !== 2 || signedManifest.public_key_fingerprint !== actualFingerprint) {
+  if (![2, 3].includes(signedManifest.schema_version) ||
+      (releaseMode && signedManifest.schema_version !== 3) ||
+      signedManifest.public_key_fingerprint !== actualFingerprint) {
     throw new Error("signed release manifest has an invalid schema or public key fingerprint");
+  }
+  if (signedManifest.schema_version === 3) {
+    const distRecords = validateSignedPublicDistRecords(signedManifest.dist_files, "build dist");
+    signedPublicSiteDistRecords = validateSignedPublicDistRecords(
+      signedManifest.public_site_dist_files,
+      "public site dist"
+    );
+    const normalizeRecords = (records) => records.map(({ path, sha256: hash, size }) => ({ path, sha256: hash, size }));
+    if (JSON.stringify(normalizeRecords(distRecords)) !== JSON.stringify(normalizeRecords(signedPublicSiteDistRecords))) {
+      throw new Error("signed build and public site dist records differ");
+    }
+    signedPublicSiteDistPaths = new Set(signedPublicSiteDistRecords.map((record) => record.path));
+    for (const record of signedPublicSiteDistRecords) {
+      const content = await readFile(join(siteDirectory, ...record.path.split("/"))).catch(() => null);
+      if (!content || content.length !== record.size || sha256(content) !== record.sha256) {
+        throw new Error(`signed public site dist hash mismatch: ${record.path}`);
+      }
+    }
   }
   const deployment = signedManifest.cloudflare?.artifact_deployment;
   if (!deployment || deployment.project !== "codex-home-manager" || deployment.branch !== "main" ||
@@ -306,8 +356,12 @@ for (const file of files) {
   assertSafeExtension(relativePath);
   const assetName = relativePath.startsWith("site/assets/") ? relativePath.slice("site/assets/".length) : null;
   const releaseName = relativePath.startsWith("site/") ? relativePath.slice("site/".length) : null;
+  const signedAssetAllowed = assetName && signedPublicSiteDistPaths?.has(`assets/${assetName}`);
+  const unsignedOrLegacyAssetAllowed = assetName && !signedPublicSiteDistPaths &&
+    (allowedAssetNames.has(assetName) || await isAllowedObsoleteShim(assetName));
   const allowed = exactAllowedPaths.has(relativePath) ||
-    (assetName && (allowedAssetNames.has(assetName) || await isAllowedObsoleteShim(assetName))) ||
+    signedAssetAllowed || unsignedOrLegacyAssetAllowed ||
+    (assetName && readmeReferencedAssets.has(assetName)) ||
     (releaseName && releaseArtifacts.has(releaseName));
   if (!allowed) throw new Error(`public file is not in the public release allowlist: ${relativePath}`);
 
@@ -322,6 +376,17 @@ for (const file of files) {
   }
   if (content.length > 2_000_000) throw new Error(`unexpected large file in public repository: ${relativePath}`);
   if (textExtensions.has(extname(relativePath).toLowerCase())) assertSafeText(relativePath, content.toString("utf8"));
+}
+
+if (signedPublicSiteDistRecords) {
+  const actualManagedDistPaths = files
+    .map((file) => relative(siteDirectory, file).replaceAll("\\", "/"))
+    .filter((path) => isPublicDistPath(path))
+    .sort();
+  const expectedManagedDistPaths = signedPublicSiteDistRecords.map((record) => record.path);
+  if (JSON.stringify(actualManagedDistPaths) !== JSON.stringify(expectedManagedDistPaths)) {
+    throw new Error("signed public site dist file set mismatch");
+  }
 }
 
 for (const artifactName of releaseArtifacts.keys()) {
