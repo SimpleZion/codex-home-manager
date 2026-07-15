@@ -1,0 +1,234 @@
+name: Source CI
+
+on:
+  push:
+    branches: [source]
+  pull_request:
+    branches: [source]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Windows quality gate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Initialize CI evidence
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "source-ci-artifacts"
+          New-Item -ItemType Directory -Force $artifactRoot | Out-Null
+          "not-run" | Set-Content -Encoding utf8 (Join-Path $artifactRoot "quality-gate-status.txt")
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            codex_home_manager/packaging/windows/requirements-connector.txt
+            .github/workflows/requirements-ci.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: codex_home_manager/package-lock.json
+
+      - name: Install locked Python dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r codex_home_manager/packaging/windows/requirements-connector.txt
+          python -m pip install --require-hashes --only-binary=:all: -r .github/workflows/requirements-ci.txt
+
+      - name: Verify exported source integrity
+        run: python .\scripts\export_codex_home_manager_source.py verify --source .
+
+      - name: Install locked Node.js dependencies
+        run: |
+          Push-Location codex_home_manager
+          npm ci --ignore-scripts --no-audit --no-fund
+          Pop-Location
+
+      - name: Install Playwright Chromium
+        working-directory: codex_home_manager
+        run: npx playwright install chromium
+
+      - name: Run tests with JUnit output
+        run: |
+          $junitPath = Join-Path $env:RUNNER_TEMP "source-ci-artifacts\junit.xml"
+          Push-Location codex_home_manager
+          python -m pytest tests --junitxml="$junitPath" --tb=short
+          $testExitCode = $LASTEXITCODE
+          Pop-Location
+          if ($testExitCode -ne 0) { exit $testExitCode }
+
+      - name: Run complete quality gate
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "source-ci-artifacts"
+          $gateLog = Join-Path $artifactRoot "quality-gate.log"
+          Push-Location codex_home_manager
+          python scripts/quality_gate.py 2>&1 | Tee-Object -FilePath $gateLog
+          $gateExitCode = $LASTEXITCODE
+          Pop-Location
+          if ($gateExitCode -ne 0) {
+            "failed" | Set-Content -Encoding utf8 (Join-Path $artifactRoot "quality-gate-status.txt")
+            exit $gateExitCode
+          }
+          "passed" | Set-Content -Encoding utf8 (Join-Path $artifactRoot "quality-gate-status.txt")
+
+      - name: Build test summary
+        if: always()
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "source-ci-artifacts"
+          New-Item -ItemType Directory -Force $artifactRoot | Out-Null
+          $qualityStatusPath = Join-Path $artifactRoot "quality-gate-status.txt"
+          $junitPath = Join-Path $artifactRoot "junit.xml"
+          $summaryPath = Join-Path $artifactRoot "test-summary.md"
+          if (-not (Test-Path -LiteralPath $qualityStatusPath -PathType Leaf)) {
+            "not-run" | Set-Content -Encoding utf8 $qualityStatusPath
+          }
+          @'
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as element_tree
+
+          junit_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          lines = ["# Source CI test summary", ""]
+          if junit_path.is_file():
+              root = element_tree.parse(junit_path).getroot()
+              suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+              totals = {
+                  key: sum(int(suite.attrib.get(key, "0")) for suite in suites)
+                  for key in ("tests", "failures", "errors", "skipped")
+              }
+              elapsed = sum(float(suite.attrib.get("time", "0")) for suite in suites)
+              lines.extend([
+                  f"- Tests: {totals['tests']}",
+                  f"- Failures: {totals['failures']}",
+                  f"- Errors: {totals['errors']}",
+                  f"- Skipped: {totals['skipped']}",
+                  f"- Pytest time: {elapsed:.3f} seconds",
+              ])
+          else:
+              lines.append("- JUnit report was not produced.")
+          summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          '@ | python - $junitPath $summaryPath
+          $gateStatus = (Get-Content $qualityStatusPath -Raw).Trim()
+          "- Complete quality gate: $gateStatus" | Add-Content -Encoding utf8 $summaryPath
+          Get-Content $summaryPath | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload JUnit and quality-gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-ci-results-${{ github.sha }}
+          path: ${{ runner.temp }}/source-ci-artifacts/
+          if-no-files-found: error
+          retention-days: 90
+
+  evidence:
+    name: Attested source evidence
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/source'
+    needs: quality
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Download quality evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: source-ci-results-${{ github.sha }}
+          path: evidence
+
+      - name: Create exact source archive
+        id: source-archive
+        run: |
+          if (-not (Test-Path -LiteralPath SOURCE_COMMITS.json -PathType Leaf)) {
+            throw "SOURCE_COMMITS.json is required on the exported source branch"
+          }
+          $archiveName = "codex-home-manager-source-$env:GITHUB_SHA.zip"
+          $archivePath = Join-Path "evidence" $archiveName
+          git archive --format=zip --output=$archivePath HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+          $sbomRoot = Join-Path $env:RUNNER_TEMP "codex-home-manager-source"
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $sbomRoot
+          "archive-path=$archivePath" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
+          "archive-name=$archiveName" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
+          "sbom-root=$sbomRoot" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Generate CycloneDX SBOM with Syft
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ${{ steps.source-archive.outputs.sbom-root }}
+          output-file: evidence/codex-home-manager-source-${{ github.sha }}.cdx.json
+          format: cyclonedx-json
+          syft-version: v1.44.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Write evidence checksums
+        run: |
+          $lines = Get-ChildItem -LiteralPath evidence -File |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+              "$hash *evidence/$($_.Name)"
+            }
+          $lines | Set-Content -Encoding ascii evidence/SHA256SUMS.txt
+
+      - name: Attest source SBOM
+        id: sbom-attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.source-archive.outputs.archive-path }}
+          sbom-path: evidence/codex-home-manager-source-${{ github.sha }}.cdx.json
+
+      - name: Attest CI evidence provenance
+        id: provenance-attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: evidence/SHA256SUMS.txt
+
+      - name: Preserve Sigstore bundles
+        run: |
+          Copy-Item -LiteralPath '${{ steps.sbom-attestation.outputs.bundle-path }}' -Destination evidence/source-sbom-attestation.sigstore.json
+          Copy-Item -LiteralPath '${{ steps.provenance-attestation.outputs.bundle-path }}' -Destination evidence/source-provenance-attestation.sigstore.json
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-release-evidence-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
