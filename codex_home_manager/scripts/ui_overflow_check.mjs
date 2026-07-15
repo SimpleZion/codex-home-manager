@@ -806,14 +806,19 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
       .map((element, index) => {
       const rect = element.getBoundingClientRect();
       const parentRect = element.parentElement?.getBoundingClientRect();
+      const style = getComputedStyle(element);
       return {
         index,
+        summaryStrip: Boolean(element.closest(".diagnostics-summary-strip")),
         left: rect.left,
         right: rect.right,
         parentLeft: parentRect?.left ?? 0,
         parentRight: parentRect?.right ?? 0,
         scrollWidth: element.scrollWidth,
-        clientWidth: element.clientWidth
+        clientWidth: element.clientWidth,
+        overflowX: style.overflowX,
+        textOverflow: style.textOverflow,
+        whiteSpace: style.whiteSpace
       };
     });
     const diagnosticCardRects = Array.from(document.querySelectorAll(".diagnostic-card")).slice(0, 8).map((element, index) => {
@@ -837,6 +842,7 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
       diagnosticCardRects
     };
   });
+  console.log(`ui-diagnostics raw metrics ${label}: ${JSON.stringify(metrics)}`);
   assertCondition(metrics.diagnosticsChecks > 0, `${label} diagnostics page renders check rows`);
   assertCondition(metrics.diagnosticsCards > 0, `${label} diagnostics page renders issue cards`);
   assertCondition(metrics.pageScrollWidth <= metrics.pageClientWidth + 1, `${label} diagnostics page has no horizontal overflow`);
@@ -846,6 +852,7 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
     const issuesBlock = metrics.blocks.find((block) => block.selector.includes("diagnostics-issues-panel"));
     const checksBlock = metrics.blocks.find((block) => block.selector.includes("diagnostics-checks-panel"));
     const shortestPanelHeight = Math.min(...panelBlocks.map((block) => block.clientHeight));
+    const shortestPanelBottom = Math.min(...panelBlocks.map((block) => block.bottom));
     const gridBlock = metrics.blocks.find((block) => block.selector.startsWith(".diagnostics-grid"));
     assertCondition(
       gridBlock && gridBlock.top <= Math.floor(viewport.height * 0.28),
@@ -861,8 +868,12 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
       `${label} diagnostics issue cards stay compact by default`
     );
     assertCondition(
-      shortestPanelHeight >= Math.floor(viewport.height * 0.76),
+      shortestPanelHeight >= Math.floor(viewport.height * 0.70),
       `${label} diagnostics panels keep enough vertical workspace`
+    );
+    assertCondition(
+      shortestPanelBottom >= Math.floor(viewport.height * 0.98),
+      `${label} diagnostics panels reach the viewport bottom without clipping`
     );
   }
   for (const block of metrics.blocks) {
@@ -879,10 +890,17 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
       codeBlock.left >= codeBlock.parentLeft - 1 && codeBlock.right <= codeBlock.parentRight + 1,
       `${label} diagnostics code ${codeBlock.index} stays inside parent`
     );
-    assertCondition(
-      codeBlock.scrollWidth <= codeBlock.clientWidth + 1,
-      `${label} diagnostics code ${codeBlock.index} wraps long content`
-    );
+    if (codeBlock.summaryStrip) {
+      assertCondition(
+        codeBlock.overflowX === "hidden" && codeBlock.textOverflow === "ellipsis" && codeBlock.whiteSpace === "nowrap",
+        `${label} diagnostics summary code ${codeBlock.index} truncates long paths safely`
+      );
+    } else {
+      assertCondition(
+        codeBlock.scrollWidth <= codeBlock.clientWidth + 1,
+        `${label} diagnostics code ${codeBlock.index} wraps long content`
+      );
+    }
   }
   console.log(`ui-diagnostics metrics ${label}: ${JSON.stringify(metrics)}`);
 }

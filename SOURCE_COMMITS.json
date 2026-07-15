@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-15T06:43:46.928068+00:00",
+  "generatedAt": "2026-07-15T07:43:21.833421+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "b2fec860c9a45c631bd8a627b64fe1d1433991b2",
+      "commit": "44bfc34499e475d1cd366d20675bd67308bb6bff",
       "selection": [
         "**"
       ],
@@ -438,9 +438,9 @@
           "path": "codex_home_manager/scripts/quality_gate.py",
           "sourcePath": "scripts/quality_gate.py",
           "gitMode": "100644",
-          "gitObject": "569b619298598b0186a4ff00f2f2435664a134a9",
-          "bytes": 19486,
-          "sha256": "b56a1f3b2becf5da8354bcc623e07fe745451be8fff8513d28d714c7ea4e139b"
+          "gitObject": "0e1b89dabcfdd3233cdc584814ff224e2b8390cb",
+          "bytes": 30065,
+          "sha256": "c97eeec7cd423b82d314eb863931c25ea888dbe939c963e23f57f59cf5dc2ac3"
         },
         {
           "path": "codex_home_manager/scripts/release_manifest.py",
@@ -470,9 +470,9 @@
           "path": "codex_home_manager/scripts/ui_overflow_check.mjs",
           "sourcePath": "scripts/ui_overflow_check.mjs",
           "gitMode": "100644",
-          "gitObject": "cde8334820e8dc876fec654df3561bfb63b7e7fc",
-          "bytes": 57640,
-          "sha256": "7c18178f4005b5e3b06296e3db3773885dd2efe6feb70b420bea91fa2f31a0fc"
+          "gitObject": "102a271f87c78779dbfa5006955afee9781d2465",
+          "bytes": 58526,
+          "sha256": "f3ec7a254335f2989e5c8eb8de8a545a4526037929a8534254329f5f46e75459"
         },
         {
           "path": "codex_home_manager/src/browserHome.ts",
@@ -625,6 +625,14 @@
           "gitObject": "1fc0136ec52ed861ac06127da69f76db69fc356b",
           "bytes": 6840,
           "sha256": "b049d5a289a54f5bed555d7e20f019b05c8e11a9bb09766c2d279c460a8cfe0e"
+        },
+        {
+          "path": "codex_home_manager/tests/test_quality_gate_fixture.py",
+          "sourcePath": "tests/test_quality_gate_fixture.py",
+          "gitMode": "100644",
+          "gitObject": "68a7bf1242df30f3dd3ebe6240075762f03b10ff",
+          "bytes": 1931,
+          "sha256": "231ae58be67742a3c53c457c33191e168669c4bab02e39c948c768bbba02280e"
         },
         {
           "path": "codex_home_manager/tests/test_release_manifest.py",

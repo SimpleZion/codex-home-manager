@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -17,6 +19,9 @@ project_path = Path(__file__).resolve().parents[1]
 service_port = int(os.environ.get("CODEX_HOME_MANAGER_GATE_PORT", "8876"))
 service_url = os.environ.get("CODEX_HOME_MANAGER_GATE_URL", f"http://127.0.0.1:{service_port}").rstrip("/")
 ui_service_url = f"{service_url}/?api_base={urllib.parse.quote(service_url, safe='')}"
+quality_gate_main_thread_count = 24
+quality_gate_subagent_thread_count = 16
+quality_gate_thread_count = quality_gate_main_thread_count + quality_gate_subagent_thread_count
 
 
 def run_command(command: list[str]) -> None:
@@ -66,7 +71,238 @@ def wait_for_service() -> bool:
     return False
 
 
-def ensure_service() -> subprocess.Popen[bytes] | None:
+def create_quality_gate_codex_home(root_path: Path) -> Path:
+    codex_home_path = root_path / ".codex"
+    sessions_path = codex_home_path / "sessions"
+    project_path = root_path / "quality-gate-project"
+    sessions_path.mkdir(parents=True)
+    project_path.mkdir()
+    for directory_name in ("memories", "skills", "plugins"):
+        (codex_home_path / directory_name).mkdir()
+
+    thread_rows: list[tuple[str, Path, str, int, str]] = []
+    for index in range(quality_gate_thread_count):
+        thread_id = f"quality-gate-thread-{index}"
+        title = f"Quality gate thread {index}"
+        rollout_path = sessions_path / f"rollout-{thread_id}.jsonl"
+        records = [
+            {
+                "timestamp": f"2026-07-15T00:{index:02d}:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": str(project_path),
+                    "model_provider": "openai",
+                    "cli_version": "quality-gate",
+                },
+            },
+            {
+                "timestamp": f"2026-07-15T00:{index:02d}:10Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"Quality gate prompt {index}"}],
+                },
+            },
+            {
+                "timestamp": f"2026-07-15T00:{index:02d}:20Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": f"Quality gate response {index}"}],
+                },
+            },
+            {
+                "timestamp": f"2026-07-15T00:{index:02d}:30Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": f"Quality gate prompt {index}"},
+            },
+            {
+                "timestamp": f"2026-07-15T00:{index:02d}:40Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": f"Quality gate response {index}"},
+            },
+        ]
+        rollout_path.write_text(
+            "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        thread_source = "subagent" if index >= quality_gate_main_thread_count else "cli"
+        thread_rows.append((thread_id, rollout_path, title, index, thread_source))
+
+    database_path = codex_home_path / "state_5.sqlite"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, source TEXT NOT NULL, model_provider TEXT NOT NULL,
+                cwd TEXT NOT NULL, title TEXT NOT NULL, sandbox_policy TEXT NOT NULL,
+                approval_mode TEXT NOT NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
+                has_user_event INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER, git_sha TEXT, git_branch TEXT, git_origin_url TEXT,
+                cli_version TEXT NOT NULL DEFAULT '', first_user_message TEXT NOT NULL DEFAULT '',
+                agent_nickname TEXT, agent_role TEXT, memory_mode TEXT NOT NULL DEFAULT 'enabled',
+                model TEXT, reasoning_effort TEXT, agent_path TEXT, created_at_ms INTEGER,
+                updated_at_ms INTEGER, thread_source TEXT, preview TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE thread_spawn_edges (
+                parent_thread_id TEXT NOT NULL,
+                child_thread_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        for thread_id, rollout_path, title, index, thread_source in thread_rows:
+            timestamp_seconds = 1_752_537_600 + index
+            connection.execute(
+                """
+                INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                    sandbox_policy, approval_mode, tokens_used, has_user_event, archived,
+                    cli_version, first_user_message, memory_mode, model, reasoning_effort,
+                    created_at_ms, updated_at_ms, thread_source, preview
+                ) VALUES (?, ?, ?, ?, ?, 'openai', ?, ?, '{}', 'never', ?, 1, 0,
+                    'quality-gate', ?, 'enabled', 'gpt-5', 'medium', ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    str(rollout_path),
+                    timestamp_seconds,
+                    timestamp_seconds,
+                    thread_source,
+                    str(project_path),
+                    title,
+                    (index + 1) * 1000,
+                    f"Quality gate prompt {index}",
+                    timestamp_seconds * 1000,
+                    timestamp_seconds * 1000,
+                    thread_source,
+                    f"Quality gate preview {index}",
+                ),
+            )
+        connection.executemany(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES (?, ?, ?)",
+            [
+                (thread_rows[0][0], child_thread_id, "completed")
+                for child_thread_id, _rollout_path, _title, _index, thread_source in thread_rows
+                if thread_source == "subagent"
+            ],
+        )
+        connection.commit()
+        quick_check = connection.execute("PRAGMA quick_check").fetchone()
+        if quick_check is None or quick_check[0] != "ok":
+            raise RuntimeError(f"quality gate fixture database failed quick_check: {quick_check}")
+    finally:
+        connection.close()
+
+    log_connection = sqlite3.connect(codex_home_path / "logs_2.sqlite")
+    try:
+        log_connection.execute(
+            """
+            CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                ts_nanos INTEGER NOT NULL,
+                level TEXT NOT NULL,
+                target TEXT NOT NULL,
+                feedback_log_body TEXT,
+                module_path TEXT,
+                file TEXT,
+                line INTEGER,
+                thread_id TEXT,
+                process_uuid TEXT,
+                estimated_bytes INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        log_connection.execute("CREATE INDEX idx_logs_thread_id ON logs(thread_id)")
+        log_connection.execute(
+            "CREATE INDEX idx_logs_thread_id_ts ON logs(thread_id, ts DESC, ts_nanos DESC, id DESC)"
+        )
+        log_rows = []
+        for thread_id, _rollout_path, _title, index, _thread_source in thread_rows:
+            for severity_index, (level, target, body) in enumerate(
+                (
+                    ("INFO", "codex_app_server::thread_state", "app_server.request rpc.method=thread/read success=true"),
+                    ("WARN", "codex_api::endpoint::responses_websocket", "stream_request retry after transient timeout"),
+                    ("ERROR", "codex_api::endpoint::responses", "run_sampling_request failed with HTTP 500 fixture error"),
+                )
+            ):
+                log_rows.append(
+                    (
+                        1_752_537_600 + index,
+                        severity_index,
+                        level,
+                        target,
+                        body,
+                        target,
+                        "quality_gate.rs",
+                        10 + severity_index,
+                        thread_id,
+                        "quality-gate-process",
+                        len(body),
+                    )
+                )
+        log_connection.executemany(
+            """
+            INSERT INTO logs (
+                ts, ts_nanos, level, target, feedback_log_body, module_path,
+                file, line, thread_id, process_uuid, estimated_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            log_rows,
+        )
+        log_connection.commit()
+        log_quick_check = log_connection.execute("PRAGMA quick_check").fetchone()
+        if log_quick_check is None or log_quick_check[0] != "ok":
+            raise RuntimeError(f"quality gate log fixture failed quick_check: {log_quick_check}")
+    finally:
+        log_connection.close()
+
+    (codex_home_path / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "electron-saved-workspace-roots": [str(project_path)],
+                "pinned-thread-ids": [thread_rows[0][0]],
+                "thread-workspace-root-hints": {
+                    thread_id: str(project_path) for thread_id, *_rest in thread_rows
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (codex_home_path / "config.toml").write_text(
+        f"[projects.{json.dumps(str(project_path))}]\ntrusted = true\n",
+        encoding="utf-8",
+    )
+    (codex_home_path / "session_index.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "id": thread_id,
+                    "thread_name": title,
+                    "updated_at": f"2026-07-15T00:{index:02d}:00Z",
+                },
+                ensure_ascii=False,
+            )
+            for thread_id, _rollout_path, title, index, _thread_source in thread_rows
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return codex_home_path
+
+
+def ensure_service(codex_home_path: Path | None = None) -> subprocess.Popen[bytes] | None:
     if os.environ.get("CODEX_HOME_MANAGER_GATE_REUSE_SERVICE") == "1" and wait_for_service():
         return None
     if wait_for_service():
@@ -75,6 +311,10 @@ def ensure_service() -> subprocess.Popen[bytes] | None:
             "Set CODEX_HOME_MANAGER_GATE_PORT to a free port or CODEX_HOME_MANAGER_GATE_REUSE_SERVICE=1 to reuse it."
         )
     process_env = dict(os.environ)
+    if codex_home_path is not None:
+        process_env["CODEX_HOME"] = str(codex_home_path)
+        process_env["CODEX_HOME_MANAGER_BACKUP_ROOT"] = str(codex_home_path.parent / "backups")
+        process_env["CODEX_HOME_MANAGER_EXPORT_ROOT"] = str(codex_home_path.parent / "exports")
     process_env["CODEX_HOME_MANAGER_ALLOWED_ORIGINS"] = ",".join(
         origin
         for origin in [
@@ -374,19 +614,21 @@ def run_api_gate() -> None:
 
 def main() -> int:
     service_process: subprocess.Popen[bytes] | None = None
-    try:
-        run_static_security_gate()
-        run_static_browser_mode_gate()
-        run_command(["npm", "run", "build"])
-        run_command([sys.executable, "-m", "pytest", "tests"])
-        run_command(["npm", "audit", "--audit-level=moderate"])
-        service_process = ensure_service()
-        run_command(["node", "scripts/ui_overflow_check.mjs", ui_service_url])
-        run_api_gate()
-    finally:
-        if service_process is not None:
-            service_process.terminate()
-            service_process.wait(timeout=10)
+    with tempfile.TemporaryDirectory(prefix="codex-home-manager-quality-gate-") as temporary_directory:
+        try:
+            run_static_security_gate()
+            run_static_browser_mode_gate()
+            run_command(["npm", "run", "build"])
+            run_command([sys.executable, "-m", "pytest", "tests"])
+            run_command(["npm", "audit", "--audit-level=moderate"])
+            fixture_codex_home = create_quality_gate_codex_home(Path(temporary_directory))
+            service_process = ensure_service(fixture_codex_home)
+            run_command(["node", "scripts/ui_overflow_check.mjs", ui_service_url])
+            run_api_gate()
+        finally:
+            if service_process is not None:
+                service_process.terminate()
+                service_process.wait(timeout=10)
     print("quality gate PASS")
     return 0
 
