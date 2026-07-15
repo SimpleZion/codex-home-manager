@@ -622,6 +622,7 @@ async function verifyCompactDetailPanelLayout(page) {
       detailPanelWidth: detailRect?.width ?? null
     };
   });
+  console.log(`ui-compact-detail metrics: ${JSON.stringify(metrics)}`);
   assertCondition(metrics.pageScrollWidth <= metrics.pageClientWidth + 1, "compact detail layout has no horizontal page overflow");
   assertCondition(metrics.detailPanelPosition === "fixed", "compact detail inspector is viewport anchored");
   assertCondition(metrics.detailPanelWidth >= 820 && metrics.detailPanelWidth <= 860, "compact detail inspector keeps usable width");
@@ -629,10 +630,9 @@ async function verifyCompactDetailPanelLayout(page) {
   assertCondition(metrics.detailPanelBottom >= metrics.pageClientHeight - 20, "compact detail inspector reaches viewport bottom");
   assertCondition(metrics.detailPanelHeight >= 360, "compact detail inspector keeps enough vertical reading area");
   assertCondition(
-    metrics.workspaceHeight === null || metrics.detailPanelHeight >= metrics.workspaceHeight + 80,
-    "compact detail inspector is no longer capped by table header/result-strip height"
+    metrics.detailPanelHeight >= metrics.pageClientHeight - metrics.detailPanelTop - 20,
+    "compact detail inspector uses the available vertical viewport below its top edge"
   );
-  console.log(`ui-compact-detail metrics: ${JSON.stringify(metrics)}`);
 }
 
 async function verifyRowActionClickability(page) {

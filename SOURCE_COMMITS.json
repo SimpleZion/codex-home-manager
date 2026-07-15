@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-15T07:43:21.833421+00:00",
+  "generatedAt": "2026-07-15T07:51:45.692811+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "44bfc34499e475d1cd366d20675bd67308bb6bff",
+      "commit": "5a85d210187abaa853837d4da873093267758e1e",
       "selection": [
         "**"
       ],
@@ -470,9 +470,9 @@
           "path": "codex_home_manager/scripts/ui_overflow_check.mjs",
           "sourcePath": "scripts/ui_overflow_check.mjs",
           "gitMode": "100644",
-          "gitObject": "102a271f87c78779dbfa5006955afee9781d2465",
-          "bytes": 58526,
-          "sha256": "f3ec7a254335f2989e5c8eb8de8a545a4526037929a8534254329f5f46e75459"
+          "gitObject": "ab93c9327fe8e2dc21e5ad17979dfbfdac58ab84",
+          "bytes": 58516,
+          "sha256": "01a653de483b092c573d183995bd89130bfe999cc3e3f2bd4a1180f3d8da5673"
         },
         {
           "path": "codex_home_manager/src/browserHome.ts",
