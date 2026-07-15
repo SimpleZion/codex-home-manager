@@ -4693,19 +4693,17 @@ function DiagnosticsModule({
     setDiagnosticDetail(null);
   }, [report?.codexHome, report?.generatedAtMs]);
 
-  React.useEffect(() => {
-    if (!repairPromptOpen) return undefined;
-
+  React.useLayoutEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
+      if (!repairPromptRef.current?.open) return;
       const target = event.target as Node | null;
       if (target && repairPromptRef.current?.contains(target)) return;
       setRepairPromptOpen(false);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setRepairPromptOpen(false);
-      }
+      if (event.key !== "Escape" || !repairPromptRef.current?.open) return;
+      setRepairPromptOpen(false);
     };
 
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -4714,7 +4712,7 @@ function DiagnosticsModule({
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [repairPromptOpen]);
+  }, []);
 
   async function handleCopyRepairPrompt(): Promise<void> {
     if (!repairPrompt) return;
