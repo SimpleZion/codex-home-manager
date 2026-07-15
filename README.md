@@ -1,5 +1,7 @@
 # Codex Home Manager
 
+[![Source CI](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml/badge.svg?branch=source)](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource)
+
 The default `source` branch contains the complete open-source Codex Home Manager product. This `main` branch is the deployed static-site and release-artifact boundary.
 
 The hosted page has two operating modes:
@@ -49,7 +51,23 @@ For read-only use, choose `.codex` directly from the hosted page in a Chromium b
 
 For the full local management mode on Windows, download and run the local connector:
 
-<https://github.com/SimpleZion/codex-home-manager/releases/latest/download/codex-home-manager-local-win-x64.exe>
+- [Download the stable Windows connector](https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe)
+- [Open the latest GitHub Release](https://github.com/SimpleZion/codex-home-manager/releases/latest) for release notes and immutable, content-addressed assets.
+
+The website URL is the stable download alias. It redirects to the current content-addressed EXE published by the same release process; GitHub Releases intentionally contains the content-addressed asset name rather than a second mutable `codex-home-manager-local-win-x64.exe` asset.
+
+Before running the connector, compare its SHA-256 with [`SHA256SUMS.txt`](https://codex-home-manager.simplezion.com/SHA256SUMS.txt) or `connector-release.json`. The following PowerShell resolves the current immutable name and fails if the downloaded bytes do not match the published hash:
+
+```powershell
+$release = Invoke-RestMethod https://codex-home-manager.simplezion.com/connector-release.json
+$artifact = $release.artifacts | Where-Object kind -eq "exe" | Select-Object -First 1
+$downloadPath = Join-Path $env:USERPROFILE "Downloads\$($artifact.name)"
+Invoke-WebRequest https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe -OutFile $downloadPath
+$actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadPath).Hash.ToLowerInvariant()
+if ($actualSha256 -ne $artifact.sha256) { throw "Codex Home Manager SHA-256 mismatch" }
+```
+
+For signature verification, validate [`release-manifest.json.sig`](https://codex-home-manager.simplezion.com/release-manifest.json.sig) as an Ed25519 signature over [`release-manifest.json`](https://codex-home-manager.simplezion.com/release-manifest.json) with the published [`release-signing-public-key.pem`](https://codex-home-manager.simplezion.com/release-signing-public-key.pem). Compare the key fingerprint in [`release-signing-public-key.sha256`](https://codex-home-manager.simplezion.com/release-signing-public-key.sha256) with a publisher fingerprint obtained independently. The signed manifest binds the source commits, immutable EXE/ZIP hashes, Cloudflare deployment, and GitHub Release identity.
 
 The connector starts the full local product at `http://127.0.0.1:8765/` and registers the `codex-home-manager://start` browser protocol for the current Windows user.
 
@@ -75,6 +93,18 @@ npx wrangler pages deploy site --project-name codex-home-manager --branch main
 ```
 
 Production custom domain: <https://codex-home-manager.simplezion.com/>.
+
+## Source CI and supply-chain evidence
+
+[`Source CI`](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource) runs on Windows for every push and pull request targeting `source`. It verifies the exported source manifest, installs Python dependencies from hash-locked requirements and Node dependencies with `npm ci`, builds the frontend, runs the complete quality gate, and publishes JUnit plus a readable test summary.
+
+Successful pushes to `source` also publish a CycloneDX JSON SBOM for an exact `git archive` of the source commit. GitHub's artifact attestation service signs both an SBOM attestation and SLSA build provenance for the source archive and CI evidence. Download the `source-release-evidence-<commit>` artifact from the matching workflow run and verify the source archive with:
+
+```powershell
+gh attestation verify .\codex-home-manager-source-<commit>.zip --repo SimpleZion/codex-home-manager
+```
+
+Release publication must select evidence from the exact source commit, verify the attestation before use, and include the SBOM/provenance hashes in the Ed25519-signed release manifest. A passing badge or an unverified workflow artifact alone is not release proof.
 
 ## Signed release proof
 

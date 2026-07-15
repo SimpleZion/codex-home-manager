@@ -29,6 +29,8 @@ const exactAllowedPaths = new Set([
   "site/_redirects",
   "site/app.js",
   "site/connector-release.json",
+  "site/codex-home-manager-source.cdx.json",
+  "site/codex-home-manager-source.zip",
   "site/favicon.svg",
   "site/index.html",
   "site/public-api.json",
@@ -36,6 +38,9 @@ const exactAllowedPaths = new Set([
   "site/release-manifest.json.sig",
   "site/release-signing-public-key.sha256",
   "site/release-signing-public-key.pem",
+  "site/source-ci-test-summary.md",
+  "site/source-provenance-attestation.sigstore.json",
+  "site/source-sbom-attestation.sigstore.json",
   "site/robots.txt",
   "site/sitemap.xml",
   "site/styles.css",
@@ -64,12 +69,20 @@ const alwaysBlockedTextPatterns = [
   /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'<>]+/i,
   /[A-Za-z]:[\\/]+\.codex[\\/]+sessions/i,
   /gho_[A-Za-z0-9_]+/,
-  /CLOUDFLARE_API_TOKEN\s*=/
+  /CLOUDFLARE_API_TOKEN\s*=/,
+  /<(?:user|assistant|system|developer)>\s*/i
 ];
 const textExtensions = new Set([
   ".css", ".html", ".js", ".json", ".md", ".mjs", ".pem", ".ps1", ".svg", ".toml", ".txt", ""
 ]);
 const releaseNamePattern = /^codex-home-manager-local-win-x64-v([0-9]+\.[0-9]+\.[0-9]+)-([0-9a-f]{12})\.(exe|zip)$/;
+const sourceEvidenceNames = new Set([
+  "codex-home-manager-source.zip",
+  "codex-home-manager-source.cdx.json",
+  "source-ci-test-summary.md",
+  "source-provenance-attestation.sigstore.json",
+  "source-sbom-attestation.sigstore.json"
+]);
 const publicDistRootNames = new Set(["favicon.svg", "index.html"]);
 const publicDistAssetExtensions = new Set([".css", ".js", ".wasm"]);
 
@@ -236,12 +249,12 @@ if (hasManifest || hasSignature) {
   } catch {
     throw new Error("signed release manifest is not valid JSON");
   }
-  if (![2, 3].includes(signedManifest.schema_version) ||
-      (releaseMode && signedManifest.schema_version !== 3) ||
+  if (![2, 3, 4].includes(signedManifest.schema_version) ||
+      (releaseMode && signedManifest.schema_version !== 4) ||
       signedManifest.public_key_fingerprint !== actualFingerprint) {
     throw new Error("signed release manifest has an invalid schema or public key fingerprint");
   }
-  if (signedManifest.schema_version === 3) {
+  if ([3, 4].includes(signedManifest.schema_version)) {
     const distRecords = validateSignedPublicDistRecords(signedManifest.dist_files, "build dist");
     signedPublicSiteDistRecords = validateSignedPublicDistRecords(
       signedManifest.public_site_dist_files,
@@ -270,22 +283,65 @@ if (hasManifest || hasSignature) {
     throw new Error("signed release manifest has no public artifacts");
   }
   const github = signedManifest.github;
+  const sourceEvidence = signedManifest.source_evidence;
+  if (signedManifest.schema_version === 4) {
+    const buildSources = signedManifest.sources?.build;
+    const sourceAssets = sourceEvidence?.assets;
+    const sourceAssetNames = new Set(Array.isArray(sourceAssets) ? sourceAssets.map((asset) => asset?.name) : []);
+    if (!sourceEvidence || sourceEvidence.schema_version !== 1 || !/^[0-9a-f]{40}$/.test(sourceEvidence.source_commit || "") ||
+        sourceEvidence.source_ref !== "refs/heads/source" ||
+        sourceEvidence.source_commits?.root !== buildSources?.root?.head ||
+        sourceEvidence.source_commits?.manager !== buildSources?.manager?.head ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(sourceEvidence.repository || "") ||
+        typeof sourceEvidence.signer_workflow !== "string" ||
+        !sourceEvidence.signer_workflow.startsWith(`github.com/${sourceEvidence.repository}/.github/workflows/`) ||
+        !/\.ya?ml$/.test(sourceEvidence.signer_workflow) ||
+        sourceEvidence.attestations?.verifier !== "gh attestation verify" ||
+        sourceEvidence.attestations?.deny_self_hosted_runners !== true ||
+        sourceEvidence.attestations?.sbom_predicate_type !== "https://cyclonedx.org/bom" ||
+        sourceEvidence.attestations?.provenance_predicate_type !== "https://slsa.dev/provenance/v1" ||
+        !Number.isInteger(sourceEvidence.quality?.tests) || sourceEvidence.quality.tests < 1 ||
+        sourceEvidence.quality?.failures !== 0 || sourceEvidence.quality?.errors !== 0 ||
+        sourceAssetNames.size !== sourceEvidenceNames.size ||
+        [...sourceEvidenceNames].some((name) => !sourceAssetNames.has(name))) {
+      throw new Error("signed release manifest has invalid source evidence proof");
+    }
+    for (const asset of sourceAssets) {
+      const content = await readFile(join(siteDirectory, asset.name)).catch(() => null);
+      if (!content || !/^[0-9a-f]{64}$/.test(asset.sha256 || "") || !Number.isInteger(asset.size) ||
+          content.length !== asset.size || sha256(content) !== asset.sha256) {
+        throw new Error(`signed source evidence hash mismatch: ${asset?.name}`);
+      }
+    }
+  }
   if (!github || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(github.repository || "") ||
       typeof github.tag !== "string" || !github.tag || !Number.isInteger(github.release_id) || github.release_id < 1 ||
       github.html_url !== `https://github.com/${github.repository}/releases/tag/${github.tag}` ||
       github.draft_verified_before_signing !== true ||
       JSON.stringify(github.metadata_assets) !== JSON.stringify(signedMetadataNames) ||
-      !Array.isArray(github.artifact_assets) || github.artifact_assets.length !== releaseArtifacts.size) {
+      !Array.isArray(github.artifact_assets) ||
+      github.artifact_assets.length !== releaseArtifacts.size + (signedManifest.schema_version === 4 ? sourceEvidenceNames.size : 0)) {
     throw new Error("signed release manifest has invalid GitHub release proof");
   }
+  if (signedManifest.schema_version === 4 && github.repository !== sourceEvidence.repository) {
+    throw new Error("signed release manifest source evidence repository differs from GitHub release");
+  }
   const githubArtifacts = new Map(github.artifact_assets.map((artifact) => [artifact?.name, artifact]));
-  if (githubArtifacts.size !== releaseArtifacts.size) {
+  if (githubArtifacts.size !== releaseArtifacts.size + (signedManifest.schema_version === 4 ? sourceEvidenceNames.size : 0)) {
     throw new Error("signed release manifest GitHub artifact set mismatch");
   }
   for (const [name, artifact] of releaseArtifacts) {
     const githubArtifact = githubArtifacts.get(name);
     if (!githubArtifact || githubArtifact.sha256 !== artifact.sha256 || githubArtifact.size !== artifact.size) {
       throw new Error(`signed release manifest GitHub artifact mismatch: ${name}`);
+    }
+  }
+  if (signedManifest.schema_version === 4) {
+    for (const sourceAsset of sourceEvidence.assets) {
+      const githubArtifact = githubArtifacts.get(sourceAsset.name);
+      if (!githubArtifact || githubArtifact.sha256 !== sourceAsset.sha256 || githubArtifact.size !== sourceAsset.size) {
+        throw new Error(`signed release manifest GitHub source evidence mismatch: ${sourceAsset.name}`);
+      }
     }
   }
   for (const artifact of signedManifest.public_artifacts) {
@@ -324,9 +380,36 @@ if (releaseMode || hasManifest || hasSignature) {
     }
   }
 }
+for (const sourceEvidenceName of sourceEvidenceNames) {
+  const sourceEvidencePath = join(siteDirectory, sourceEvidenceName);
+  try {
+    await stat(sourceEvidencePath);
+  } catch {
+    continue;
+  }
+  if (!/cache-control:\s*no-store(?:,|$)/i.test(headerBlock(`/${sourceEvidenceName}`)) &&
+      !/cache-control:\s*no-store(?:,|$)/i.test(headerBlock("/source-*-attestation.sigstore.json"))) {
+    throw new Error(`stable source evidence asset must be no-store: /${sourceEvidenceName}`);
+  }
+}
 
 const indexHtml = await readFile(join(siteDirectory, "index.html"), "utf8");
 const readmeMarkdown = await readFile(join(root, "README.md"), "utf8").catch(() => "");
+const forbiddenLatestAssetAlias = /https:\/\/github\.com\/SimpleZion\/codex-home-manager\/releases\/latest\/download\//i;
+if (forbiddenLatestAssetAlias.test(readmeMarkdown)) {
+  throw new Error("README must not use a GitHub latest-download alias for an asset that is not published");
+}
+for (const requiredReleaseUrl of [
+  "https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe",
+  "https://github.com/SimpleZion/codex-home-manager/releases/latest",
+  "https://codex-home-manager.simplezion.com/SHA256SUMS.txt",
+  "https://codex-home-manager.simplezion.com/release-manifest.json.sig",
+  "https://codex-home-manager.simplezion.com/release-signing-public-key.pem"
+]) {
+  if (!readmeMarkdown.includes(requiredReleaseUrl)) {
+    throw new Error(`README is missing required release verification URL: ${requiredReleaseUrl}`);
+  }
+}
 const htmlReferencedAssets = new Set([...indexHtml.matchAll(/\/assets\/([^"'\s>]+)/g)].map((match) => match[1]));
 const readmeReferencedAssets = new Set([...readmeMarkdown.matchAll(/\(site\/assets\/([^\)\s]+)\)/g)].map((match) => match[1]));
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
@@ -367,6 +450,7 @@ for (const file of files) {
 
   const content = await readFile(file);
   const artifact = releaseName ? releaseArtifacts.get(releaseName) : null;
+  const sourceEvidenceFile = releaseName && sourceEvidenceNames.has(releaseName);
   if (artifact) {
     if (artifact.kind === "zip") assertSafeZip(relativePath, content);
     if (artifact.size !== content.length || artifact.sha256 !== sha256(content)) {
@@ -374,6 +458,10 @@ for (const file of files) {
     }
     continue;
   }
+  if (sourceEvidenceFile && content.length > 20_000_000) {
+    throw new Error(`unexpected large source evidence file in public repository: ${relativePath}`);
+  }
+  if (sourceEvidenceFile && releaseName.endsWith(".zip")) continue;
   if (content.length > 2_000_000) throw new Error(`unexpected large file in public repository: ${relativePath}`);
   if (textExtensions.has(extname(relativePath).toLowerCase())) assertSafeText(relativePath, content.toString("utf8"));
 }
