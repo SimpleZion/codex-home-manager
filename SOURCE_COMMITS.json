@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-15T08:18:03.152508+00:00",
+  "generatedAt": "2026-07-15T08:29:16.576910+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "02cf0fe5a17a20959b2f8eada0e407053c862424",
+      "commit": "98e34f380059f868fd41bcc562e037f6774d310d",
       "selection": [
         "**"
       ],
@@ -470,9 +470,9 @@
           "path": "codex_home_manager/scripts/ui_overflow_check.mjs",
           "sourcePath": "scripts/ui_overflow_check.mjs",
           "gitMode": "100644",
-          "gitObject": "ab93c9327fe8e2dc21e5ad17979dfbfdac58ab84",
-          "bytes": 58516,
-          "sha256": "01a653de483b092c573d183995bd89130bfe999cc3e3f2bd4a1180f3d8da5673"
+          "gitObject": "b5f2c3d9a1c52a16bcaf28eac1f605b89965aa0f",
+          "bytes": 58547,
+          "sha256": "ec87a6f0b59e4eefbea3c5523dec9f279febb4beacf7dfc772491a16c45fc402"
         },
         {
           "path": "codex_home_manager/src/browserHome.ts",
@@ -486,9 +486,9 @@
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "89bbd204b38b8f6da1e0b95b2f849250730f375b",
-          "bytes": 316360,
-          "sha256": "5817a42c4c30938f494c155936ccad75d32b600bf7cec2d4c251418199817665"
+          "gitObject": "ea43636d25a0fc3a2fa3dfd5090cec7d4c77cabf",
+          "bytes": 316523,
+          "sha256": "05126ce5aaaf6ffd0118223c51a4180c4465d64800ef8f06d5cc439ee43811b1"
         },
         {
           "path": "codex_home_manager/src/sql-js.d.ts",

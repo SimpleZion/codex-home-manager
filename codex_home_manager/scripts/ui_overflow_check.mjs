@@ -778,6 +778,7 @@ async function verifyDiagnosticsPageLayout(page, viewport, label) {
   await page.waitForFunction(() => !document.querySelector(".diagnostics-prompt-preview")?.hasAttribute("open"));
   await promptSummary.click();
   await page.waitForFunction(() => document.querySelector(".diagnostics-prompt-preview")?.hasAttribute("open"));
+  await promptSummary.focus();
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => !document.querySelector(".diagnostics-prompt-preview")?.hasAttribute("open"));
   await page.waitForTimeout(300);

@@ -4672,6 +4672,10 @@ function DiagnosticsModule({
   const [repairPromptOpen, setRepairPromptOpen] = React.useState(false);
   const [diagnosticDetail, setDiagnosticDetail] = React.useState<DiagnosticDetailTarget | null>(null);
   const repairPromptRef = React.useRef<HTMLDetailsElement | null>(null);
+  const closeRepairPrompt = React.useCallback(() => {
+    if (repairPromptRef.current) repairPromptRef.current.open = false;
+    setRepairPromptOpen(false);
+  }, []);
 
   const criticalIssues = report?.issues.filter((issue) => issue.severity === "critical") ?? [];
   const warningIssues = report?.issues.filter((issue) => issue.severity === "warning") ?? [];
@@ -4698,12 +4702,12 @@ function DiagnosticsModule({
       if (!repairPromptRef.current?.open) return;
       const target = event.target as Node | null;
       if (target && repairPromptRef.current?.contains(target)) return;
-      setRepairPromptOpen(false);
+      closeRepairPrompt();
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || !repairPromptRef.current?.open) return;
-      setRepairPromptOpen(false);
+      closeRepairPrompt();
     };
 
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -4712,7 +4716,7 @@ function DiagnosticsModule({
       document.removeEventListener("pointerdown", handlePointerDown, true);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, []);
+  }, [closeRepairPrompt]);
 
   async function handleCopyRepairPrompt(): Promise<void> {
     if (!repairPrompt) return;
@@ -4762,7 +4766,7 @@ function DiagnosticsModule({
                 onKeyDownCapture={(event) => {
                   if (event.key !== "Escape") return;
                   event.preventDefault();
-                  setRepairPromptOpen(false);
+                  closeRepairPrompt();
                 }}
                 onToggle={(event) => setRepairPromptOpen(event.currentTarget.open)}
               >
