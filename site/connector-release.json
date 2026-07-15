@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "artifacts": [
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.2-d267c3929863.exe",
+      "name": "codex-home-manager-local-win-x64-v1.0.3-5cd2fa860896.exe",
       "kind": "exe",
-      "sha256": "d267c392986358e87b47b0bb6c85d1ae4095c5a64212d620514736d4d07dcb4c",
-      "size": 19143629,
+      "sha256": "5cd2fa860896edee6427677c6d435d7f2f0aa890e16cf5d12046d4bdd5596c02",
+      "size": 19162472,
       "audit": {
         "method": "pyi-archive-viewer+strings",
         "archiveEntryCount": 894,
@@ -14,17 +14,17 @@
         "sensitiveStrings": []
       },
       "authenticode": {
-        "status": "unavailable",
-        "signerThumbprint": null,
-        "signerSubject": null,
+        "status": "valid",
+        "signerThumbprint": "48B7A26A0A8C16EC183E07E657AC73293744EEA0",
+        "signerSubject": "CN=SimpleZion Codex Pagination Patch",
         "detachedSignatureRequired": true
       }
     },
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.2-d0f567216f7b.zip",
+      "name": "codex-home-manager-local-win-x64-v1.0.3-4282e537d5a6.zip",
       "kind": "zip",
-      "sha256": "d0f567216f7b6ee1353d811d8e39581a02bd196cc02bd4617bea5770a1ee247a",
-      "size": 19071748
+      "sha256": "4282e537d5a6607c2d1161137b890c0f220566b1ca531d41b922685a4fd25217",
+      "size": 19082327
     }
   ]
 }

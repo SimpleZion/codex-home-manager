@@ -1,6 +1,6 @@
-d267c392986358e87b47b0bb6c85d1ae4095c5a64212d620514736d4d07dcb4c  codex-home-manager-local-win-x64-v1.0.2-d267c3929863.exe
-d0f567216f7b6ee1353d811d8e39581a02bd196cc02bd4617bea5770a1ee247a  codex-home-manager-local-win-x64-v1.0.2-d0f567216f7b.zip
-6e21917dfcf6e7fc39468d512b05b1d1c9bb7e8a05bb3fdf29bacc554e4d3f6f  connector-release.json
-c5b33b42424533451561f956dfb23764fa27f5899d322e30813619e4444ab75d  verify-codex-home-manager.ps1
+5cd2fa860896edee6427677c6d435d7f2f0aa890e16cf5d12046d4bdd5596c02  codex-home-manager-local-win-x64-v1.0.3-5cd2fa860896.exe
+4282e537d5a6607c2d1161137b890c0f220566b1ca531d41b922685a4fd25217  codex-home-manager-local-win-x64-v1.0.3-4282e537d5a6.zip
+1597cb7c7a96a271f31eefa7c7acbf1f64c6083315755211f9eabf7e26432ff8  connector-release.json
+7d53cd48ecd13466fcdd9b3f43a335426eb55a9b6b3cf4bc1578965195f8a41a  verify-codex-home-manager.ps1
 518ddcfd04fb8afe8d6d71340437758500042a7daebc3d0dcf0e234127350d13  release-signing-public-key.pem
 ea9bc58fb2a2a88ef8b0359daf38414c9f784bb325879ee70eb350382d0a4918  release-signing-public-key.sha256
