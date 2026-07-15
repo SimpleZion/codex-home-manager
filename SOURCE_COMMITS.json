@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-15T07:51:45.692811+00:00",
+  "generatedAt": "2026-07-15T08:07:35.510431+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "5a85d210187abaa853837d4da873093267758e1e",
+      "commit": "2611839010e360a2eeae369210fcaf7d3e04f8ab",
       "selection": [
         "**"
       ],
@@ -486,9 +486,9 @@
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "e6f8bfc699e7b31aa6ec05ec9294686d7863c66b",
-          "bytes": 316128,
-          "sha256": "a8e0778ba9f58f3833daa6f90192b0c881e70cc685defa407664dfb7ecd34327"
+          "gitObject": "030a4eae0cb671f07238dacf862f923f470337a9",
+          "bytes": 316336,
+          "sha256": "3133f823d96e545a1f25d436e5b37b3b83f0f4ff40bdc71fa4933b80ae7061d7"
         },
         {
           "path": "codex_home_manager/src/sql-js.d.ts",

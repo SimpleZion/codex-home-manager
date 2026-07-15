@@ -4761,6 +4761,11 @@ function DiagnosticsModule({
                 ref={repairPromptRef}
                 className="diagnostics-prompt-preview"
                 open={repairPromptOpen}
+                onKeyDownCapture={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  setRepairPromptOpen(false);
+                }}
                 onToggle={(event) => setRepairPromptOpen(event.currentTarget.open)}
               >
                 <summary>{t("展开 prompt")}</summary>
