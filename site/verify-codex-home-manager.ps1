@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$filePath = Join-Path $env:USERPROFILE "Downloads\codex-home-manager-local-win-x64-v1.0.3-5cd2fa860896.exe"
-$expectedSha256 = "5cd2fa860896edee6427677c6d435d7f2f0aa890e16cf5d12046d4bdd5596c02"
+$filePath = Join-Path $env:USERPROFILE "Downloads\codex-home-manager-local-win-x64-v1.0.4-1ba586d6a6df.exe"
+$expectedSha256 = "1ba586d6a6df40ae1cd68759ae6e67bf594e5a9ac52e643a337e1a0f6dea8d10"
 $trustedPublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
 
 if (-not (Test-Path -LiteralPath $filePath)) {

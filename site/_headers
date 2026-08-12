@@ -30,6 +30,18 @@
 /SHA256SUMS.txt
   Cache-Control: no-store, max-age=0
 
+/codex-home-manager-source.zip
+  Cache-Control: no-store, max-age=0
+
+/codex-home-manager-source.cdx.json
+  Cache-Control: no-store, max-age=0
+
+/source-ci-test-summary.md
+  Cache-Control: no-store, max-age=0
+
+/source-*-attestation.sigstore.json
+  Cache-Control: no-store, max-age=0
+
 /release-manifest.json
   Cache-Control: no-store, max-age=0
 

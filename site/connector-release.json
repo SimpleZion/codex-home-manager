@@ -1,30 +1,34 @@
 {
-  "schemaVersion": 1,
-  "version": "1.0.3",
-  "artifacts": [
-    {
-      "name": "codex-home-manager-local-win-x64-v1.0.3-5cd2fa860896.exe",
-      "kind": "exe",
-      "sha256": "5cd2fa860896edee6427677c6d435d7f2f0aa890e16cf5d12046d4bdd5596c02",
-      "size": 19162472,
-      "audit": {
-        "method": "pyi-archive-viewer+strings",
-        "archiveEntryCount": 894,
-        "sourceFiles": [],
-        "sensitiveStrings": []
-      },
-      "authenticode": {
-        "status": "valid",
-        "signerThumbprint": "48B7A26A0A8C16EC183E07E657AC73293744EEA0",
-        "signerSubject": "CN=SimpleZion Codex Pagination Patch",
-        "detachedSignatureRequired": true
-      }
-    },
-    {
-      "name": "codex-home-manager-local-win-x64-v1.0.3-4282e537d5a6.zip",
-      "kind": "zip",
-      "sha256": "4282e537d5a6607c2d1161137b890c0f220566b1ca531d41b922685a4fd25217",
-      "size": 19082327
-    }
-  ]
+    "schemaVersion":  1,
+    "version":  "1.0.4",
+    "artifacts":  [
+                      {
+                          "name":  "codex-home-manager-local-win-x64-v1.0.4-1ba586d6a6df.exe",
+                          "kind":  "exe",
+                          "sha256":  "1ba586d6a6df40ae1cd68759ae6e67bf594e5a9ac52e643a337e1a0f6dea8d10",
+                          "size":  19247984,
+                          "audit":  {
+                                        "method":  "pyi-archive-viewer+strings",
+                                        "archiveEntryCount":  896,
+                                        "sourceFiles":  [
+
+                                                        ],
+                                        "sensitiveStrings":  [
+
+                                                             ]
+                                    },
+                          "authenticode":  {
+                                               "status":  "valid",
+                                               "signerThumbprint":  "48B7A26A0A8C16EC183E07E657AC73293744EEA0",
+                                               "signerSubject":  "CN=SimpleZion Codex Pagination Patch",
+                                               "detachedSignatureRequired":  true
+                                           }
+                      },
+                      {
+                          "name":  "codex-home-manager-local-win-x64-v1.0.4-ccc4b03f8c58.zip",
+                          "kind":  "zip",
+                          "sha256":  "ccc4b03f8c583a7f6c689d88422acc5678c97dfd3a25e8d30d0d3ac098677c65",
+                          "size":  19168382
+                      }
+                  ]
 }
