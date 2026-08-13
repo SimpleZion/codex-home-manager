@@ -3,10 +3,10 @@
   "version": "1.0.8",
   "artifacts": [
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.8-6faf421795fe.exe",
+      "name": "codex-home-manager-local-win-x64-v1.0.8-009faca8464a.exe",
       "kind": "exe",
-      "sha256": "6faf421795feaab5809e340a5cbeab67edfc3b6d15dcec863bc58f21f28a62f3",
-      "size": 18198542,
+      "sha256": "009faca8464a4b593dd43c8fc4f1b41e121b6bb1852a5bf256ee28f332882ae4",
+      "size": 18198541,
       "audit": {
         "method": "pyi-archive-viewer+strings",
         "archiveEntryCount": 895,
@@ -32,9 +32,9 @@
       }
     },
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.8-a72b842ba120.zip",
+      "name": "codex-home-manager-local-win-x64-v1.0.8-90c0a8269eeb.zip",
       "kind": "zip",
-      "sha256": "a72b842ba120202e5ac7c9f9039fdc97ce6272c9c1518a5920c1e264002a4339",
+      "sha256": "90c0a8269eeb16c4f9b955d4475b00137ea8955d906c2cc89e992b5682cf3d4c",
       "size": 18116639
     }
   ]

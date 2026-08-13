@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $trustedPublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
-$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.8-6faf421795fe.exe"
+$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.8-009faca8464a.exe"
 $pythonVerifierSource = @'
 from __future__ import annotations
 
