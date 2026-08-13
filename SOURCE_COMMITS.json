@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T22:19:59.819414+00:00",
+  "generatedAt": "2026-08-13T22:30:40.070311+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "dac46612609fbb58e27fb0675402c3773f05affc",
+      "commit": "31394b291e8017ac6bfd9be2e15ec73836d4999c",
       "selection": [
         "**"
       ],
@@ -190,9 +190,9 @@
           "path": ".github/workflows/codeql.yml",
           "sourcePath": ".github/workflows/codeql.yml",
           "gitMode": "100644",
-          "gitObject": "d8642b6c9744d36ec20a883962c68e777eeeb75a",
-          "bytes": 1160,
-          "sha256": "29f609e392db61cd177f39ff4e4820cbf1c11045e62dfbcbddb7b1f1b11a752d"
+          "gitObject": "ccf08ab6cd99d75a2db2cafc554c0f44ab1bf028",
+          "bytes": 1275,
+          "sha256": "fa520e191fb45f14d55468ceb6c065f2ac189e27d81876c1d8f3322c5f951646"
         },
         {
           "path": ".github/workflows/requirements-ci.txt",
@@ -830,9 +830,9 @@
           "path": "codex_home_manager/tests/test_source_ci_workflow.py",
           "sourcePath": "tests/test_source_ci_workflow.py",
           "gitMode": "100644",
-          "gitObject": "d37e74b7f10e67d57957251983ca6737f0201189",
-          "bytes": 6864,
-          "sha256": "12d4cbaa3d7c69ea4eaf9b74cdd97e3e24e5fae225908d693fb76ccee634f049"
+          "gitObject": "9c330a2cb8f5018a6d36bbe381e20f27c37f282a",
+          "bytes": 6840,
+          "sha256": "687a33455d0383eb9029674e45db214e15c666f48b397b407f1b2230b64f69e6"
         },
         {
           "path": "codex_home_manager/tests/test_source_monorepo_export.py",

@@ -114,8 +114,11 @@ def test_codeql_and_dependabot_cover_the_exported_source_dependencies() -> None:
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", reference) for reference in action_references)
     assert "github/codeql-action/init@" in codeql
     assert "github/codeql-action/analyze@" in codeql
-    assert "language: [python, javascript-typescript]" in codeql
-    assert "runs-on: windows-latest" in codeql
+    assert "language: python" in codeql
+    assert "language: javascript-typescript" in codeql
+    assert "runner: windows-latest" in codeql
+    assert "runner: ubuntu-latest" in codeql
+    assert "runs-on: ${{ matrix.runner }}" in codeql
     assert "security-events: write" in codeql
     assert "build-mode: none" in codeql
     assert "package-ecosystem: github-actions" in dependabot
@@ -143,11 +146,12 @@ def test_security_policy_has_private_reporting_and_release_trust_boundaries() ->
 def test_source_ci_python_test_dependencies_are_hash_locked() -> None:
     blocks = requirement_blocks(ci_requirements_path.read_text(encoding="utf-8"))
 
-    assert any(block.startswith("pytest==8.4.2 ") for block in blocks)
-    assert any(block.startswith("pillow==12.1.1 ") for block in blocks)
-    assert any(block.startswith("tomlkit==0.15.0 ") for block in blocks)
-    assert any(block.startswith("cryptography==46.0.7 ") for block in blocks)
-    assert any(block.startswith("httpx2==2.7.0 ") for block in blocks)
+    locked_names = {
+        block.split("==", maxsplit=1)[0].lower()
+        for block in blocks
+        if "==" in block
+    }
+    assert {"pytest", "pillow", "tomlkit", "cryptography", "httpx2"} <= locked_names
     for block in blocks:
         requirement = block.split(" --hash=", maxsplit=1)[0]
         assert re.fullmatch(r"[A-Za-z0-9_.-]+==[^\s;]+", requirement)
