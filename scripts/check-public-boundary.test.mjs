@@ -531,6 +531,22 @@ test("release mode accepts schema 5 Windows CI binary evidence bound to the sign
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("release mode accepts equivalent binary evidence with canonicalized object keys", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root, null, (manifest) => {
+    manifest.windows_binary_evidence.artifacts = manifest.windows_binary_evidence.artifacts.map((artifact) =>
+      Object.fromEntries(Object.entries(artifact).reverse())
+    );
+  });
+
+  const result = runChecker(root, {
+    CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint,
+    CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE: "1"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("rejects Windows binary SBOM bytes that drift from the signed manifest", async () => {
   const root = await createReleaseFixture();
   const { fingerprint } = await addSignedReleaseMetadata(root);

@@ -126,6 +126,14 @@ function validateSignedPublicDistRecords(records, label) {
   return records;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const results = [];
@@ -375,8 +383,8 @@ if (hasManifest || hasSignature) {
         !Array.isArray(binaryArtifacts) || binaryArtifacts.length !== 2 || releaseArtifacts.size !== 2 ||
         new Set(binaryArtifacts.map((artifact) => artifact.kind)).size !== 2 ||
         !binaryArtifacts.some((artifact) => artifact.kind === "exe") || !binaryArtifacts.some((artifact) => artifact.kind === "zip") ||
-        JSON.stringify([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
-          JSON.stringify([...releaseArtifacts.values()].sort((first, second) => first.name.localeCompare(second.name))) ||
+        canonicalJson([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
+          canonicalJson([...releaseArtifacts.values()].sort((first, second) => first.name.localeCompare(second.name))) ||
         windowsBinaryEvidence.attestations?.verifier !== "gh attestation verify" ||
         windowsBinaryEvidence.attestations?.deny_self_hosted_runners !== true ||
         windowsBinaryEvidence.attestations?.sbom_predicate_type !== "https://cyclonedx.org/bom" ||
@@ -405,8 +413,8 @@ if (hasManifest || hasSignature) {
       throw new Error("published Windows build metadata or binary SBOM is invalid JSON");
     }
     if (buildMetadata.schemaVersion !== 1 || buildMetadata.version !== releaseManifest.version ||
-        JSON.stringify([...buildMetadata.artifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
-          JSON.stringify([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) ||
+        canonicalJson([...buildMetadata.artifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
+          canonicalJson([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) ||
         binarySbom.bomFormat !== "CycloneDX" || typeof binarySbom.specVersion !== "string" ||
         typeof binarySbom.serialNumber !== "string" || !binarySbom.serialNumber.startsWith("urn:uuid:")) {
       throw new Error("published Windows build metadata or binary SBOM differs from signed evidence");
