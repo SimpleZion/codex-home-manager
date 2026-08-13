@@ -5,3 +5,7 @@
 *.jpeg binary
 *.webp binary
 *.gif binary
+
+# The public site is a byte-for-byte release artifact.  Text normalization here
+# would invalidate SHA256SUMS and detached release evidence on Linux runners.
+site/** -text
