@@ -6,8 +6,20 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { zipSync } from "fflate";
 
 const checker = fileURLToPath(new URL("./check-public-boundary.mjs", import.meta.url));
+const baselineHeaderLines = [
+  "/*",
+  "  Cache-Control: no-store",
+  "  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload",
+  "/assets/*.css",
+  "  Cache-Control: public, max-age=31536000, immutable",
+  "/assets/*.js",
+  "  Cache-Control: public, max-age=31536000, immutable",
+  "/assets/*.wasm",
+  "  Cache-Control: public, max-age=31536000, immutable"
+];
 
 async function createReleaseFixture() {
   const root = await mkdtemp(join(tmpdir(), "codex-home-manager-public-"));
@@ -27,7 +39,7 @@ async function createReleaseFixture() {
   await writeFile(join(root, "wrangler.toml"), 'name = "fixture"\n');
   await writeFile(join(root, "site", "index.html"), '<script src="/assets/app-abc123.js"></script>\n');
   await writeFile(join(root, "site", "assets", "app-abc123.js"), "console.info('public');\n");
-  await writeFile(join(root, "site", "_headers"), "/*\n  Cache-Control: no-store\n");
+  await writeFile(join(root, "site", "_headers"), baselineHeaderLines.join("\n") + "\n");
   await writeFile(join(root, "site", "_redirects"), "\n");
   await writeFile(join(root, "site", "SHA256SUMS.txt"), "");
   await writeFile(join(root, "site", "connector-release.json"), JSON.stringify({
@@ -52,9 +64,10 @@ function runChecker(root, environment = {}) {
 
 async function addSignedReleaseMetadata(root, missingName = null, mutateManifest = null) {
   const { name } = await addExecutableRelease(root);
-  const artifactPath = join(root, "site", name);
   const bundlePath = join(root, "site", "connector-release.json");
   const checksumPath = join(root, "site", "SHA256SUMS.txt");
+  const connectorBundle = JSON.parse(await readFile(bundlePath, "utf8"));
+  const connectorArtifacts = [...connectorBundle.artifacts].sort((first, second) => first.name.localeCompare(second.name));
   const sourceEvidenceContent = new Map([
     ["codex-home-manager-source.zip", Buffer.from("public source archive")],
     ["codex-home-manager-source.cdx.json", Buffer.from('{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:test"}\n')],
@@ -65,15 +78,39 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
   for (const [sourceName, content] of sourceEvidenceContent) {
     await writeFile(join(root, "site", sourceName), content);
   }
+  const sourceCommit = "d".repeat(40);
+  const binarySbomName = `codex-home-manager-windows-x64-${sourceCommit}.cdx.json`;
+  const binarySbomContent = Buffer.from('{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:test"}\n');
+  const binarySubjectContent = Buffer.from(connectorArtifacts.map((artifact) => `${artifact.sha256} *${artifact.name}`).join("\n") + "\n");
+  const provenanceSubjects = [
+    ...connectorArtifacts.map((artifact) => [artifact.name, artifact.sha256]),
+    [binarySbomName, createHash("sha256").update(binarySbomContent).digest("hex")]
+  ].sort((first, second) => first[0].localeCompare(second[0]));
+  const windowsEvidenceContent = new Map([
+    ["windows-build-metadata.json", Buffer.from(JSON.stringify({ schemaVersion: 1, version: connectorBundle.version, artifacts: connectorArtifacts }) + "\n")],
+    [binarySbomName, binarySbomContent],
+    ["BINARY-SBOM-SUBJECTS.txt", binarySubjectContent],
+    ["BINARY-PROVENANCE-SUBJECTS.txt", Buffer.from(provenanceSubjects.map(([subjectName, hash]) => `${hash} *${subjectName}`).join("\n") + "\n")],
+    ["windows-sbom-attestation.sigstore.json", Buffer.from('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n')],
+    ["windows-provenance-attestation.sigstore.json", Buffer.from('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n')]
+  ]);
+  for (const [evidenceName, content] of windowsEvidenceContent) {
+    await writeFile(join(root, "site", evidenceName), content);
+  }
   const connectorChecksum = await (await import("node:fs/promises")).readFile(checksumPath, "utf8");
-  const sourceChecksumLines = [...sourceEvidenceContent].map(([sourceName, content]) =>
-    `${createHash("sha256").update(content).digest("hex")}  ${sourceName}`
+  const evidenceChecksumLines = [...sourceEvidenceContent, ...windowsEvidenceContent].map(([evidenceName, content]) =>
+    `${createHash("sha256").update(content).digest("hex")}  ${evidenceName}`
   );
-  await writeFile(checksumPath, connectorChecksum.trimEnd() + "\n" + sourceChecksumLines.join("\n") + "\n");
+  await writeFile(checksumPath, connectorChecksum.trimEnd() + "\n" + evidenceChecksumLines.join("\n") + "\n");
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const fingerprint = `sha256:${createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex")}`;
-  const records = await Promise.all([artifactPath, bundlePath, checksumPath, ...[...sourceEvidenceContent.keys()].map((sourceName) => join(root, "site", sourceName))].map(async (path) => {
+  const records = await Promise.all([
+    ...connectorArtifacts.map((artifact) => join(root, "site", artifact.name)),
+    bundlePath,
+    checksumPath,
+    ...[...sourceEvidenceContent.keys(), ...windowsEvidenceContent.keys()].map((evidenceName) => join(root, "site", evidenceName))
+  ].map(async (path) => {
     const content = await (await import("node:fs/promises")).readFile(path);
     return { path: path.split(/[\\/]/).at(-1), sha256: createHash("sha256").update(content).digest("hex"), size: content.length };
   }));
@@ -89,7 +126,7 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
     };
   }));
   const manifest = {
-    schema_version: 4,
+    schema_version: 5,
     sources: { build: { root: { head: "a".repeat(40), branch: "main", clean: true }, manager: { head: "b".repeat(40), branch: "main", clean: true } }, artifact_public: { head: "c".repeat(40), branch: "main", clean: true } },
     public_key_fingerprint: fingerprint,
     dist_files: publicSiteDistRecords,
@@ -97,7 +134,7 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
     public_artifacts: records,
     source_evidence: {
       schema_version: 1,
-      source_commit: "d".repeat(40),
+      source_commit: sourceCommit,
       source_ref: "refs/heads/source",
       source_commits: { root: "a".repeat(40), manager: "b".repeat(40) },
       repository: "example/project",
@@ -115,6 +152,28 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
         size: content.length
       })).sort((first, second) => first.name.localeCompare(second.name))
     },
+    windows_binary_evidence: {
+      schema_version: 1,
+      source_commit: sourceCommit,
+      source_ref: "refs/heads/source",
+      repository: "example/project",
+      signer_workflow: "github.com/example/project/.github/workflows/source-ci.yml",
+      version: connectorBundle.version,
+      attestations: {
+        verifier: "gh attestation verify",
+        deny_self_hosted_runners: true,
+        sbom_predicate_type: "https://cyclonedx.org/bom",
+        provenance_predicate_type: "https://slsa.dev/provenance/v1",
+        sbom_subjects: connectorArtifacts.map((artifact) => artifact.name).sort(),
+        provenance_subjects: [...connectorArtifacts.map((artifact) => artifact.name), binarySbomName].sort()
+      },
+      artifacts: connectorArtifacts,
+      assets: [...windowsEvidenceContent].map(([evidenceName, content]) => ({
+        name: evidenceName,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        size: content.length
+      })).sort((first, second) => first.name.localeCompare(second.name))
+    },
     cloudflare: { artifact_deployment: { id: "7d7aeac7-23a7-4eca-bc4a-c76c515727c0", project: "codex-home-manager", branch: "main", public_commit: "c".repeat(40), url: "https://artifact.codex-home-manager.pages.dev", status: "success" } },
     github: {
       release_id: 42,
@@ -123,7 +182,7 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
       html_url: "https://github.com/example/project/releases/tag/v1.0.0",
       draft_verified_before_signing: true,
       artifact_assets: [
-        { name, sha256: createHash("sha256").update(await (await import("node:fs/promises")).readFile(artifactPath)).digest("hex"), size: (await (await import("node:fs/promises")).stat(artifactPath)).size },
+        ...connectorArtifacts.map(({ name: artifactName, sha256: hash, size }) => ({ name: artifactName, sha256: hash, size })),
         ...[...sourceEvidenceContent].map(([sourceName, content]) => ({
           name: sourceName,
           sha256: createHash("sha256").update(content).digest("hex"),
@@ -148,7 +207,8 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
   const existingHeaders = await (await import("node:fs/promises")).readFile(headerPath, "utf8");
   const metadataHeaders = [...metadata.keys()].map((name) => `/${name}\n  Cache-Control: no-store, max-age=0`).join("\n");
   const sourceHeaders = [...sourceEvidenceContent.keys()].map((sourceName) => `/${sourceName}\n  Cache-Control: no-store, max-age=0`).join("\n");
-  await writeFile(headerPath, `${existingHeaders.trimEnd()}\n${metadataHeaders}\n${sourceHeaders}\n`);
+  const windowsHeaders = [...windowsEvidenceContent.keys()].map((evidenceName) => `/${evidenceName}\n  Cache-Control: no-store, max-age=0`).join("\n");
+  await writeFile(headerPath, `${existingHeaders.trimEnd()}\n${metadataHeaders}\n${sourceHeaders}\n${windowsHeaders}\n`);
   await writeFile(join(root, "site", "verify-codex-home-manager.ps1"), `$trustedPublicKeyFingerprint = "${fingerprint}"\n`);
   return { fingerprint, name };
 }
@@ -157,7 +217,11 @@ async function addExecutableRelease(root) {
   const content = Buffer.from("fake audited executable");
   const sha256 = createHash("sha256").update(content).digest("hex");
   const name = `codex-home-manager-local-win-x64-v1.0.0-${sha256.slice(0, 12)}.exe`;
+  const archiveContent = Buffer.from(zipSync({ "CodexHomeManagerLocal/app.bin": new Uint8Array([1, 2, 3]) }));
+  const archiveSha256 = createHash("sha256").update(archiveContent).digest("hex");
+  const archiveName = `codex-home-manager-local-win-x64-v1.0.0-${archiveSha256.slice(0, 12)}.zip`;
   await writeFile(join(root, "site", name), content);
+  await writeFile(join(root, "site", archiveName), archiveContent);
   await writeFile(join(root, "site", "connector-release.json"), JSON.stringify({
     schemaVersion: 2,
     version: "1.0.0",
@@ -166,9 +230,22 @@ async function addExecutableRelease(root) {
       kind: "exe",
       sha256,
       size: content.length,
-      audit: { method: "pyi-archive-viewer+strings", archiveEntryCount: 1, sourceFiles: [], sensitiveStrings: [] },
+      audit: {
+        method: "pyi-archive-viewer+strings",
+        archiveEntryCount: 1,
+        sourceFiles: [],
+        sensitiveStrings: [],
+        versionInfo: {
+          FileVersion: "1.0.0",
+          ProductVersion: "1.0.0",
+          CompanyName: "SimpleZion",
+          ProductName: "Codex Home Manager",
+          FileDescription: "Codex Home Manager"
+        }
+      },
       authenticode: {
-        status: "unavailable",
+        status: "not-signed",
+        windowsStatus: "NotSigned",
         trust: "none",
         signerThumbprint: null,
         signerSubject: null,
@@ -176,23 +253,35 @@ async function addExecutableRelease(root) {
         chainTrusted: false,
         detachedSignatureRequired: true
       }
+    }, {
+      name: archiveName,
+      kind: "zip",
+      sha256: archiveSha256,
+      size: archiveContent.length
     }]
   }));
-  await writeFile(join(root, "site", "SHA256SUMS.txt"), `${sha256}  ${name}\n`);
+  await writeFile(join(root, "site", "SHA256SUMS.txt"), `${sha256}  ${name}\n${archiveSha256}  ${archiveName}\n`);
   await writeFile(join(root, "site", "_redirects"), [
     `/codex-home-manager-local-win-x64.exe /${name} 302`,
     `/downloads/latest/windows-x64.exe /${name} 302`,
+    `/codex-home-manager-local-win-x64.zip /${archiveName} 302`,
+    `/downloads/latest/windows-x64.zip /${archiveName} 302`,
     "/* /index.html 200"
   ].join("\n") + "\n");
   await writeFile(join(root, "site", "_headers"), [
+    ...baselineHeaderLines,
     "/codex-home-manager-local-win-x64-v*",
     "  Cache-Control: public, max-age=31536000, immutable",
     "/codex-home-manager-local-win-x64.exe",
     "  Cache-Control: no-store, max-age=0",
     "/downloads/latest/windows-x64.exe",
+    "  Cache-Control: no-store, max-age=0",
+    "/codex-home-manager-local-win-x64.zip",
+    "  Cache-Control: no-store, max-age=0",
+    "/downloads/latest/windows-x64.zip",
     "  Cache-Control: no-store, max-age=0"
   ].join("\n") + "\n");
-  return { name, sha256 };
+  return { name, sha256, archiveName, archiveSha256 };
 }
 
 test("rejects an unlisted file even when its name and content look harmless", async () => {
@@ -289,6 +378,7 @@ test("rejects cache headers that can cache a stable download alias", async () =>
   const root = await createReleaseFixture();
   await addExecutableRelease(root);
   await writeFile(join(root, "site", "_headers"), [
+    ...baselineHeaderLines,
     "/codex-home-manager-local-win-x64-v*",
     "  Cache-Control: public, max-age=31536000, immutable",
     "/codex-home-manager-local-win-x64.exe",
@@ -371,7 +461,7 @@ test("rejects self-signed Authenticode presented as valid public trust", async (
   assert.match(result.stderr, /invalid Authenticode trust evidence/i);
 });
 
-test("accepts explicitly self-signed Authenticode only as untrusted", async () => {
+test("rejects self-signed Authenticode even when labeled untrusted", async () => {
   const root = await createReleaseFixture();
   await addExecutableRelease(root);
   const bundlePath = join(root, "site", "connector-release.json");
@@ -392,7 +482,40 @@ test("accepts explicitly self-signed Authenticode only as untrusted", async () =
 
   const result = runChecker(root);
 
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid Authenticode trust evidence/i);
+});
+
+test("accepts explicit Windows NotSigned evidence with mandatory Ed25519 verification", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+
+  const result = runChecker(root);
+
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects missing HSTS or overlapping broad WASM cache rules", async () => {
+  const withoutHsts = await createReleaseFixture();
+  await writeFile(join(withoutHsts, "site", "_headers"), baselineHeaderLines.filter((line) => !line.includes("Strict-Transport-Security")).join("\n") + "\n");
+  const hstsResult = runChecker(withoutHsts);
+  assert.notEqual(hstsResult.status, 0);
+  assert.match(hstsResult.stderr, /HSTS/i);
+
+  const overlappingWasm = await createReleaseFixture();
+  await writeFile(join(overlappingWasm, "site", "_headers"), [...baselineHeaderLines, "/assets/*", "  Cache-Control: public, max-age=31536000, immutable"].join("\n") + "\n");
+  const wasmResult = runChecker(overlappingWasm);
+  assert.notEqual(wasmResult.status, 0);
+  assert.match(wasmResult.stderr, /overlap.*WASM/i);
+});
+
+test("checked-in README uses dynamic Ed25519 verification and no self-signed claim", async () => {
+  const readme = await readFile(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  assert.match(readme, /connector-release\.json/);
+  assert.match(readme, /release-manifest\.json\.sig/);
+  assert.match(readme, /NotSigned/);
+  assert.doesNotMatch(readme, /v1\.0\.6-/);
+  assert.doesNotMatch(readme, /current Windows build carries a local self-signed/i);
 });
 
 test("validates signed release metadata only against a separately pinned public key fingerprint", async () => {
@@ -402,6 +525,29 @@ test("validates signed release metadata only against a separately pinned public 
   const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("release mode accepts schema 5 Windows CI binary evidence bound to the signed manifest", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+
+  const result = runChecker(root, {
+    CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint,
+    CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE: "1"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects Windows binary SBOM bytes that drift from the signed manifest", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  await writeFile(join(root, "site", `codex-home-manager-windows-x64-${"d".repeat(40)}.cdx.json`), "{}\n");
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Windows binary evidence hash mismatch/i);
 });
 
 test("rejects a tampered signed release manifest", async () => {

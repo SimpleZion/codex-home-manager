@@ -1,8 +1,8 @@
 # Source CI test summary
 
-- Tests: 574
+- Tests: 590
 - Failures: 0
 - Errors: 0
 - Skipped: 0
-- Pytest time: 141.430 seconds
+- Pytest time: 145.402 seconds
 - Complete quality gate: passed

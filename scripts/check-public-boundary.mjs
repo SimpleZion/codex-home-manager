@@ -12,6 +12,7 @@ const assetsDirectory = join(siteDirectory, "assets");
 const releaseMode = process.argv.includes("--release") || process.env.CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE === "1";
 
 const exactAllowedPaths = new Set([
+  ".github/workflows/public-release.yml",
   ".gitattributes",
   ".gitignore",
   "LICENSE",
@@ -29,6 +30,11 @@ const exactAllowedPaths = new Set([
   "site/_redirects",
   "site/app.js",
   "site/connector-release.json",
+  "site/windows-build-metadata.json",
+  "site/BINARY-SBOM-SUBJECTS.txt",
+  "site/BINARY-PROVENANCE-SUBJECTS.txt",
+  "site/windows-sbom-attestation.sigstore.json",
+  "site/windows-provenance-attestation.sigstore.json",
   "site/codex-home-manager-source.cdx.json",
   "site/codex-home-manager-source.zip",
   "site/favicon.svg",
@@ -82,6 +88,14 @@ const sourceEvidenceNames = new Set([
   "source-ci-test-summary.md",
   "source-provenance-attestation.sigstore.json",
   "source-sbom-attestation.sigstore.json"
+]);
+const windowsSbomNamePattern = /^codex-home-manager-windows-x64-([0-9a-f]{40})\.cdx\.json$/;
+const windowsEvidenceStaticNames = new Set([
+  "windows-build-metadata.json",
+  "BINARY-SBOM-SUBJECTS.txt",
+  "BINARY-PROVENANCE-SUBJECTS.txt",
+  "windows-sbom-attestation.sigstore.json",
+  "windows-provenance-attestation.sigstore.json"
 ]);
 const publicDistRootNames = new Set(["favicon.svg", "index.html"]);
 const publicDistAssetExtensions = new Set([".css", ".js", ".wasm"]);
@@ -184,20 +198,25 @@ for (const artifact of releaseManifest.artifacts) {
   if (releaseArtifacts.has(artifact.name)) throw new Error(`duplicate release artifact: ${artifact.name}`);
   if (artifact.kind === "exe") {
     const audit = artifact.audit;
+    const versionInfo = audit?.versionInfo;
     if (audit?.method !== "pyi-archive-viewer+strings" || !Number.isInteger(audit.archiveEntryCount) ||
-        audit.archiveEntryCount < 1 || audit.sourceFiles?.length !== 0 || audit.sensitiveStrings?.length !== 0) {
+        audit.archiveEntryCount < 1 || audit.sourceFiles?.length !== 0 || audit.sensitiveStrings?.length !== 0 ||
+        versionInfo?.FileVersion !== releaseManifest.version || versionInfo?.ProductVersion !== releaseManifest.version ||
+        versionInfo?.CompanyName !== "SimpleZion" || versionInfo?.ProductName !== "Codex Home Manager" ||
+        versionInfo?.FileDescription !== "Codex Home Manager") {
       throw new Error(`EXE lacks passing PyInstaller and strings boundary evidence: ${artifact.name}`);
     }
     const authenticode = artifact.authenticode;
     const hasSigner = /^[0-9A-F]{40}$/.test(authenticode?.signerThumbprint || "") &&
       typeof authenticode?.signerSubject === "string" && Boolean(authenticode.signerSubject.trim());
-    const validPublicChain = authenticode?.status === "valid" && authenticode?.trust === "public-trusted" &&
-      hasSigner && authenticode?.selfSigned === false && authenticode?.chainTrusted === true;
-    const explicitSelfSigned = authenticode?.status === "self-signed" && authenticode?.trust === "untrusted" &&
-      hasSigner && authenticode?.selfSigned === true && authenticode?.chainTrusted === false;
-    const explicitUntrusted = authenticode?.status === "untrusted" && authenticode?.trust === "untrusted" &&
-      hasSigner && authenticode?.selfSigned === false && authenticode?.chainTrusted === false;
-    const explicitlyUnavailable = authenticode?.status === "unavailable" && authenticode?.trust === "none" &&
+    const validPublicChain = authenticode?.status === "valid" && authenticode?.windowsStatus === "Valid" &&
+      authenticode?.trust === "public-trusted" && hasSigner && authenticode?.selfSigned === false &&
+      authenticode?.chainTrusted === true;
+    const explicitlyNotSigned = authenticode?.status === "not-signed" && authenticode?.windowsStatus === "NotSigned" &&
+      authenticode?.trust === "none" && authenticode?.signerThumbprint == null && authenticode?.signerSubject == null &&
+      authenticode?.selfSigned === false && authenticode?.chainTrusted === false;
+    const legacyUnavailable = authenticode?.status === "unavailable" && authenticode?.windowsStatus == null &&
+      authenticode?.trust === "none" &&
       authenticode?.signerThumbprint == null && authenticode?.signerSubject == null &&
       authenticode?.selfSigned === false && authenticode?.chainTrusted === false;
     const legacyEvidence = releaseManifest.schemaVersion === 1 &&
@@ -205,7 +224,7 @@ for (const artifact of releaseManifest.artifacts) {
       ((authenticode?.status === "valid" && hasSigner) ||
         (authenticode?.status === "unavailable" && authenticode?.signerThumbprint == null && authenticode?.signerSubject == null));
     if (authenticode?.detachedSignatureRequired !== true ||
-        (releaseManifest.schemaVersion === 2 && !validPublicChain && !explicitSelfSigned && !explicitUntrusted && !explicitlyUnavailable) ||
+        (releaseManifest.schemaVersion === 2 && !validPublicChain && !explicitlyNotSigned && !legacyUnavailable) ||
         (releaseManifest.schemaVersion === 1 && !legacyEvidence)) {
       throw new Error(`EXE has invalid Authenticode trust evidence or detached signature policy: ${artifact.name}`);
     }
@@ -227,6 +246,7 @@ const hasManifest = signedMetadata.get("release-manifest.json") !== null;
 const hasSignature = signedMetadata.get("release-manifest.json.sig") !== null;
 let signedPublicSiteDistRecords = null;
 let signedPublicSiteDistPaths = null;
+let signedWindowsEvidenceNames = null;
 if (releaseMode && [...signedMetadata.values()].some((content) => content === null)) {
   throw new Error("release mode requires complete signed release metadata: manifest, detached signature, public key, and fingerprint pin");
 }
@@ -272,12 +292,12 @@ if (hasManifest || hasSignature) {
   } catch {
     throw new Error("signed release manifest is not valid JSON");
   }
-  if (![2, 3, 4].includes(signedManifest.schema_version) ||
-      (releaseMode && signedManifest.schema_version !== 4) ||
+  if (![2, 3, 4, 5].includes(signedManifest.schema_version) ||
+      (releaseMode && signedManifest.schema_version !== 5) ||
       signedManifest.public_key_fingerprint !== actualFingerprint) {
     throw new Error("signed release manifest has an invalid schema or public key fingerprint");
   }
-  if ([3, 4].includes(signedManifest.schema_version)) {
+  if ([3, 4, 5].includes(signedManifest.schema_version)) {
     const distRecords = validateSignedPublicDistRecords(signedManifest.dist_files, "build dist");
     signedPublicSiteDistRecords = validateSignedPublicDistRecords(
       signedManifest.public_site_dist_files,
@@ -307,7 +327,7 @@ if (hasManifest || hasSignature) {
   }
   const github = signedManifest.github;
   const sourceEvidence = signedManifest.source_evidence;
-  if (signedManifest.schema_version === 4) {
+  if ([4, 5].includes(signedManifest.schema_version)) {
     const buildSources = signedManifest.sources?.build;
     const sourceAssets = sourceEvidence?.assets;
     const sourceAssetNames = new Set(Array.isArray(sourceAssets) ? sourceAssets.map((asset) => asset?.name) : []);
@@ -337,20 +357,94 @@ if (hasManifest || hasSignature) {
       }
     }
   }
+  const windowsBinaryEvidence = signedManifest.windows_binary_evidence;
+  if (signedManifest.schema_version === 5) {
+    const expectedSbomName = `codex-home-manager-windows-x64-${sourceEvidence.source_commit}.cdx.json`;
+    const expectedEvidenceNames = new Set([...windowsEvidenceStaticNames, expectedSbomName]);
+    const evidenceAssets = windowsBinaryEvidence?.assets;
+    const evidenceNames = new Set(Array.isArray(evidenceAssets) ? evidenceAssets.map((asset) => asset?.name) : []);
+    const binaryArtifacts = windowsBinaryEvidence?.artifacts;
+    const binaryArtifactNames = new Set(Array.isArray(binaryArtifacts) ? binaryArtifacts.map((artifact) => artifact?.name) : []);
+    const expectedProvenanceSubjects = [...binaryArtifactNames, expectedSbomName].sort();
+    if (!windowsBinaryEvidence || windowsBinaryEvidence.schema_version !== 1 ||
+        windowsBinaryEvidence.source_commit !== sourceEvidence.source_commit ||
+        windowsBinaryEvidence.source_ref !== "refs/heads/source" ||
+        windowsBinaryEvidence.repository !== sourceEvidence.repository ||
+        windowsBinaryEvidence.signer_workflow !== sourceEvidence.signer_workflow ||
+        windowsBinaryEvidence.version !== releaseManifest.version ||
+        !Array.isArray(binaryArtifacts) || binaryArtifacts.length !== 2 || releaseArtifacts.size !== 2 ||
+        new Set(binaryArtifacts.map((artifact) => artifact.kind)).size !== 2 ||
+        !binaryArtifacts.some((artifact) => artifact.kind === "exe") || !binaryArtifacts.some((artifact) => artifact.kind === "zip") ||
+        JSON.stringify([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
+          JSON.stringify([...releaseArtifacts.values()].sort((first, second) => first.name.localeCompare(second.name))) ||
+        windowsBinaryEvidence.attestations?.verifier !== "gh attestation verify" ||
+        windowsBinaryEvidence.attestations?.deny_self_hosted_runners !== true ||
+        windowsBinaryEvidence.attestations?.sbom_predicate_type !== "https://cyclonedx.org/bom" ||
+        windowsBinaryEvidence.attestations?.provenance_predicate_type !== "https://slsa.dev/provenance/v1" ||
+        JSON.stringify(windowsBinaryEvidence.attestations?.sbom_subjects) !== JSON.stringify([...binaryArtifactNames].sort()) ||
+        JSON.stringify(windowsBinaryEvidence.attestations?.provenance_subjects) !== JSON.stringify(expectedProvenanceSubjects) ||
+        evidenceNames.size !== expectedEvidenceNames.size ||
+        [...expectedEvidenceNames].some((name) => !evidenceNames.has(name))) {
+      throw new Error("signed release manifest has invalid Windows binary evidence proof");
+    }
+    const evidenceByName = new Map(evidenceAssets.map((asset) => [asset.name, asset]));
+    for (const name of expectedEvidenceNames) {
+      const asset = evidenceByName.get(name);
+      const content = await readFile(join(siteDirectory, name)).catch(() => null);
+      if (!asset || !content || !/^[0-9a-f]{64}$/.test(asset.sha256 || "") ||
+          !Number.isInteger(asset.size) || asset.size < 1 || content.length !== asset.size || sha256(content) !== asset.sha256) {
+        throw new Error(`signed Windows binary evidence hash mismatch: ${name}`);
+      }
+    }
+    let buildMetadata;
+    let binarySbom;
+    try {
+      buildMetadata = JSON.parse((await readFile(join(siteDirectory, "windows-build-metadata.json"))).toString("utf8"));
+      binarySbom = JSON.parse((await readFile(join(siteDirectory, expectedSbomName))).toString("utf8"));
+    } catch {
+      throw new Error("published Windows build metadata or binary SBOM is invalid JSON");
+    }
+    if (buildMetadata.schemaVersion !== 1 || buildMetadata.version !== releaseManifest.version ||
+        JSON.stringify([...buildMetadata.artifacts].sort((first, second) => first.name.localeCompare(second.name))) !==
+          JSON.stringify([...binaryArtifacts].sort((first, second) => first.name.localeCompare(second.name))) ||
+        binarySbom.bomFormat !== "CycloneDX" || typeof binarySbom.specVersion !== "string" ||
+        typeof binarySbom.serialNumber !== "string" || !binarySbom.serialNumber.startsWith("urn:uuid:")) {
+      throw new Error("published Windows build metadata or binary SBOM differs from signed evidence");
+    }
+    const parseSubjects = async (name) => {
+      const lines = (await readFile(join(siteDirectory, name), "ascii")).trim().split(/\r?\n/);
+      const entries = new Map();
+      for (const line of lines) {
+        const match = /^([0-9a-f]{64}) \*([^/\\]+)$/.exec(line);
+        if (!match || entries.has(match[2])) throw new Error(`invalid Windows subject checksum list: ${name}`);
+        entries.set(match[2], match[1]);
+      }
+      return entries;
+    };
+    const expectedBinarySubjects = new Map(binaryArtifacts.map((artifact) => [artifact.name, artifact.sha256]));
+    const sbomSubjects = await parseSubjects("BINARY-SBOM-SUBJECTS.txt");
+    const provenanceSubjects = await parseSubjects("BINARY-PROVENANCE-SUBJECTS.txt");
+    const expectedProvenance = new Map([...expectedBinarySubjects, [expectedSbomName, evidenceByName.get(expectedSbomName).sha256]]);
+    if (JSON.stringify([...sbomSubjects].sort()) !== JSON.stringify([...expectedBinarySubjects].sort()) ||
+        JSON.stringify([...provenanceSubjects].sort()) !== JSON.stringify([...expectedProvenance].sort())) {
+      throw new Error("published Windows attestation subject set differs from signed evidence");
+    }
+    signedWindowsEvidenceNames = expectedEvidenceNames;
+  }
   if (!github || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(github.repository || "") ||
       typeof github.tag !== "string" || !github.tag || !Number.isInteger(github.release_id) || github.release_id < 1 ||
       github.html_url !== `https://github.com/${github.repository}/releases/tag/${github.tag}` ||
       github.draft_verified_before_signing !== true ||
       JSON.stringify(github.metadata_assets) !== JSON.stringify(signedMetadataNames) ||
       !Array.isArray(github.artifact_assets) ||
-      github.artifact_assets.length !== releaseArtifacts.size + (signedManifest.schema_version === 4 ? sourceEvidenceNames.size : 0)) {
+      github.artifact_assets.length !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0)) {
     throw new Error("signed release manifest has invalid GitHub release proof");
   }
-  if (signedManifest.schema_version === 4 && github.repository !== sourceEvidence.repository) {
+  if ([4, 5].includes(signedManifest.schema_version) && github.repository !== sourceEvidence.repository) {
     throw new Error("signed release manifest source evidence repository differs from GitHub release");
   }
   const githubArtifacts = new Map(github.artifact_assets.map((artifact) => [artifact?.name, artifact]));
-  if (githubArtifacts.size !== releaseArtifacts.size + (signedManifest.schema_version === 4 ? sourceEvidenceNames.size : 0)) {
+  if (githubArtifacts.size !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0)) {
     throw new Error("signed release manifest GitHub artifact set mismatch");
   }
   for (const [name, artifact] of releaseArtifacts) {
@@ -359,7 +453,7 @@ if (hasManifest || hasSignature) {
       throw new Error(`signed release manifest GitHub artifact mismatch: ${name}`);
     }
   }
-  if (signedManifest.schema_version === 4) {
+  if ([4, 5].includes(signedManifest.schema_version)) {
     for (const sourceAsset of sourceEvidence.assets) {
       const githubArtifact = githubArtifacts.get(sourceAsset.name);
       if (!githubArtifact || githubArtifact.sha256 !== sourceAsset.sha256 || githubArtifact.size !== sourceAsset.size) {
@@ -396,6 +490,18 @@ function headerBlock(path) {
   return block.join("\n");
 }
 
+if (!/strict-transport-security:\s*max-age=63072000;\s*includesubdomains;\s*preload/i.test(headerBlock("/*"))) {
+  throw new Error("the global public boundary must enforce HSTS with preload");
+}
+const wasmHeaderRules = headerText.match(/^\/assets\/\*\.wasm\s*$/gm) || [];
+if (wasmHeaderRules.length !== 1 ||
+    !/cache-control:.*max-age=31536000.*immutable/i.test(headerBlock("/assets/*.wasm"))) {
+  throw new Error("WASM assets must have exactly one immutable cache rule");
+}
+if (/^\/assets\/\*\s*$/m.test(headerText)) {
+  throw new Error("a broad asset cache rule must not overlap the dedicated WASM rule");
+}
+
 if (releaseMode || hasManifest || hasSignature) {
   for (const metadataName of signedMetadataNames) {
     if (!/cache-control:\s*no-store(?:,|$)/i.test(headerBlock(`/${metadataName}`))) {
@@ -413,6 +519,18 @@ for (const sourceEvidenceName of sourceEvidenceNames) {
   if (!/cache-control:\s*no-store(?:,|$)/i.test(headerBlock(`/${sourceEvidenceName}`)) &&
       !/cache-control:\s*no-store(?:,|$)/i.test(headerBlock("/source-*-attestation.sigstore.json"))) {
     throw new Error(`stable source evidence asset must be no-store: /${sourceEvidenceName}`);
+  }
+}
+if (signedWindowsEvidenceNames) {
+  for (const evidenceName of signedWindowsEvidenceNames) {
+    const wildcardPath = evidenceName.endsWith(".cdx.json") ? "/codex-home-manager-windows-x64-*.cdx.json" :
+      evidenceName.endsWith("-SUBJECTS.txt") ? "/BINARY-*-SUBJECTS.txt" :
+        evidenceName.endsWith("-attestation.sigstore.json") ? "/windows-*-attestation.sigstore.json" : null;
+    const exactNoStore = /cache-control:\s*no-store(?:,|$)/i.test(headerBlock(`/${evidenceName}`));
+    const wildcardNoStore = wildcardPath && /cache-control:\s*no-store(?:,|$)/i.test(headerBlock(wildcardPath));
+    if (!exactNoStore && !wildcardNoStore) {
+      throw new Error(`stable Windows binary evidence asset must be no-store: /${evidenceName}`);
+    }
   }
 }
 
@@ -465,10 +583,14 @@ for (const file of files) {
   const signedAssetAllowed = assetName && signedPublicSiteDistPaths?.has(`assets/${assetName}`);
   const unsignedOrLegacyAssetAllowed = assetName && !signedPublicSiteDistPaths &&
     (allowedAssetNames.has(assetName) || await isAllowedObsoleteShim(assetName));
+  const windowsEvidenceFile = releaseName && (
+    windowsEvidenceStaticNames.has(releaseName) || windowsSbomNamePattern.test(releaseName)
+  );
   const allowed = exactAllowedPaths.has(relativePath) ||
     signedAssetAllowed || unsignedOrLegacyAssetAllowed ||
     (assetName && readmeReferencedAssets.has(assetName)) ||
-    (releaseName && releaseArtifacts.has(releaseName));
+    (releaseName && releaseArtifacts.has(releaseName)) ||
+    (windowsEvidenceFile && (!signedWindowsEvidenceNames || signedWindowsEvidenceNames.has(releaseName)));
   if (!allowed) throw new Error(`public file is not in the public release allowlist: ${relativePath}`);
 
   const content = await readFile(file);
@@ -485,7 +607,12 @@ for (const file of files) {
     throw new Error(`unexpected large source evidence file in public repository: ${relativePath}`);
   }
   if (sourceEvidenceFile && releaseName.endsWith(".zip")) continue;
-  if (content.length > 2_000_000) throw new Error(`unexpected large file in public repository: ${relativePath}`);
+  if (windowsEvidenceFile && content.length > 20_000_000) {
+    throw new Error(`unexpected large Windows binary evidence file in public repository: ${relativePath}`);
+  }
+  if (!sourceEvidenceFile && !windowsEvidenceFile && content.length > 2_000_000) {
+    throw new Error(`unexpected large file in public repository: ${relativePath}`);
+  }
   if (textExtensions.has(extname(relativePath).toLowerCase())) assertSafeText(relativePath, content.toString("utf8"));
 }
 
@@ -539,6 +666,14 @@ for (const [name, expectedSha256] of checksumEntries) {
 for (const artifact of releaseArtifacts.values()) {
   if (checksumEntries.get(artifact.name) !== artifact.sha256) {
     throw new Error(`SHA256SUMS mismatch for ${artifact.name}`);
+  }
+}
+if (signedWindowsEvidenceNames) {
+  for (const name of signedWindowsEvidenceNames) {
+    const content = await readFile(join(siteDirectory, name));
+    if (checksumEntries.get(name) !== sha256(content)) {
+      throw new Error(`SHA256SUMS mismatch for Windows binary evidence ${name}`);
+    }
   }
 }
 

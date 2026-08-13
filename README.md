@@ -59,8 +59,13 @@ The website URL is the stable download alias. It redirects to the current conten
 Before running the connector, use [`verify-codex-home-manager.ps1`](https://codex-home-manager.simplezion.com/verify-codex-home-manager.ps1). The verifier has the independently retained Ed25519 SPKI SHA-256 trust anchor `sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208` embedded in its source. It verifies the downloaded PEM against that fixed fingerprint, verifies `release-manifest.json.sig`, and only then reads the signed EXE or ZIP size and SHA-256 from the manifest:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File .\verify-codex-home-manager.ps1 `
-  -FilePath "$env:USERPROFILE\Downloads\codex-home-manager-local-win-x64-v1.0.6-466d00e0e09e.exe"
+$releaseBase = "https://codex-home-manager.simplezion.com"
+$release = Invoke-RestMethod "$releaseBase/connector-release.json"
+$artifactName = ($release.artifacts | Where-Object kind -eq "exe").name
+$artifactPath = Join-Path "$env:USERPROFILE\Downloads" $artifactName
+Invoke-WebRequest "$releaseBase/$artifactName" -OutFile $artifactPath
+Invoke-WebRequest "$releaseBase/verify-codex-home-manager.ps1" -OutFile .\verify-codex-home-manager.ps1
+PowerShell -NoProfile -ExecutionPolicy Bypass -File .\verify-codex-home-manager.ps1 -FilePath $artifactPath
 ```
 
 Windows PowerShell 5.1 has no native Ed25519 API, so the verifier requires an installed Python 3 interpreter with the audited `cryptography` package. If that dependency is absent, verification stops with an explicit error; it never falls back to `SHA256SUMS.txt`, `connector-release.json`, or another replaceable hash from the same origin. The published [`release-signing-public-key.sha256`](https://codex-home-manager.simplezion.com/release-signing-public-key.sha256) is informational and is not a trust anchor for this verifier.
@@ -69,7 +74,7 @@ The verifier checks [`release-manifest.json.sig`](https://codex-home-manager.sim
 
 The connector starts the full local product at `http://127.0.0.1:8765/` and registers the `codex-home-manager://start` browser protocol for the current Windows user.
 
-The current Windows build carries a local self-signed Authenticode signature. It is untrusted and must not be described as a valid public code-signing chain. Windows SmartScreen may still warn; release authenticity is established by the independently pinned Ed25519 manifest verification above.
+When no publicly trusted code-signing certificate is configured, Windows reports the connector as `NotSigned` and release metadata records `status = "not-signed"` with `trust = "none"`. The project does not create or claim a self-signed Authenticode publisher identity. Windows SmartScreen may still warn; release authenticity is established by the independently pinned Ed25519 manifest verification above.
 
 Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed. That endpoint returns numeric token usage only from auditable `token_count` events. Threads that only have SQLite `tokens_used` are marked with `unknownTokenThreads`; no token value is returned for those unknown records.
 
@@ -94,12 +99,15 @@ Production custom domain: <https://codex-home-manager.simplezion.com/>.
 
 ## Source CI and supply-chain evidence
 
-[`Source CI`](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource) runs on Windows for every push and pull request targeting `source`. It verifies the exported source manifest, installs Python dependencies from hash-locked requirements and Node dependencies with `npm ci`, builds the frontend, runs the complete quality gate, and publishes JUnit plus a readable test summary.
+[`Source CI`](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource) runs on GitHub-hosted Windows runners for every push and pull request targeting `source`. It verifies the exported source manifest, installs Python dependencies from hash-locked requirements and Node dependencies with `npm ci`, builds the frontend, runs the complete quality gate, and builds the final content-addressed Windows EXE and ZIP with the same packaging script used by release preparation.
 
-Successful pushes to `source` also publish a CycloneDX JSON SBOM for an exact `git archive` of the source commit. GitHub's artifact attestation service signs both an SBOM attestation and SLSA build provenance for the source archive and CI evidence. Download the `source-release-evidence-<commit>` artifact from the matching workflow run and verify the source archive with:
+Successful pushes to `source` preserve two independent evidence sets. `source-release-evidence-<commit>` contains the exact source archive, source CycloneDX SBOM, tests, and source attestations. `windows-release-evidence-<commit>` contains the final EXE and ZIP, a binary CycloneDX SBOM generated from those artifacts, an SBOM attestation bound to the EXE and ZIP, and provenance covering the EXE, ZIP, and binary SBOM. Download the artifacts from the matching workflow run and verify each subject with:
 
 ```powershell
 gh attestation verify .\codex-home-manager-source-<commit>.zip --repo SimpleZion/codex-home-manager
+gh attestation verify .\codex-home-manager-local-win-x64-v<version>-<hash>.exe --repo SimpleZion/codex-home-manager
+gh attestation verify .\codex-home-manager-local-win-x64-v<version>-<hash>.zip --repo SimpleZion/codex-home-manager
+gh attestation verify .\codex-home-manager-windows-x64-<commit>.cdx.json --repo SimpleZion/codex-home-manager
 ```
 
 Release publication must select evidence from the exact source commit, verify the attestation before use, and include the SBOM/provenance hashes in the Ed25519-signed release manifest. A passing badge or an unverified workflow artifact alone is not release proof.
@@ -110,7 +118,7 @@ The release manifest signs the immutable artifact deployment, GitHub Release ide
 
 Final publication downloads the EXE, ZIP, manifest, detached signature, and public key independently from Cloudflare Pages and GitHub Release. It requires byte-identical metadata and artifacts, an exact GitHub asset set, valid Cloudflare deployment evidence, valid Ed25519 signing, and stable aliases that resolve to the current content-addressed files.
 
-Authenticode metadata schema 2 separates signature presence from trust. Only a non-self-signed certificate with a validated public trust chain may use `status = "valid"` and `trust = "public-trusted"`. A self-signed signature must use `status = "self-signed"` and `trust = "untrusted"`; another non-validating chain uses `status = "untrusted"`; no signer uses `status = "unavailable"` and `trust = "none"`. The detached Ed25519 signature and independently pinned root remain mandatory in every case.
+Authenticode metadata separates signature presence from trust. Only a certificate with a validated public trust chain may use `status = "valid"` and `trust = "public-trusted"`. Without that certificate, packaging requires the EXE to have Windows status `NotSigned` and records `status = "not-signed"` with `trust = "none"`; it does not create or accept a self-signed release signature. The detached Ed25519 signature and independently pinned root remain mandatory in every case.
 
 ## Privacy stance
 

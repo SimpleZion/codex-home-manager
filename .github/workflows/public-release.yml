@@ -1,0 +1,52 @@
+name: Public release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Public release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out public release
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@6044e13b5c7a69a332e6ea7f7c2123ff10c76c9b # v6.3.0
+        with:
+          node-version: 22.22.0
+          cache: npm
+
+      - name: Recreate locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Audit high-severity dependencies
+        run: npm audit --audit-level=high
+
+      - name: Verify public boundary and release phase
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "site/release-manifest.json") {
+            if (-not (Test-Path -LiteralPath "site/release-manifest.json.sig")) {
+              throw "release-manifest.json exists without its detached signature"
+            }
+            $env:CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE = "1"
+          }
+          elseif (Test-Path -LiteralPath "site/release-manifest.json.sig") {
+            throw "release-manifest.json.sig exists without its signed manifest"
+          }
+          npm run check

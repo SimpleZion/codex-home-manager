@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $trustedPublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
-$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.7-8f6d171c701f.exe"
+$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.8-6faf421795fe.exe"
 $pythonVerifierSource = @'
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def verify_artifact(arguments: argparse.Namespace) -> dict[str, object]:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise VerificationError("signed release manifest is not valid UTF-8 JSON") from error
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 4:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 5:
         raise VerificationError("signed release manifest has an unsupported schema")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise VerificationError("signed release manifest public-key fingerprint does not match the trust anchor")
