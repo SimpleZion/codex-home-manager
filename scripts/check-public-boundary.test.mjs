@@ -320,19 +320,11 @@ test("rejects sensitive backend implementation symbols in public text", async ()
 test("rejects a release ZIP containing backend or source files", async () => {
   const root = await createReleaseFixture();
   const archiveName = "codex-home-manager-local-win-x64-v1.0.0-0123456789ab.zip";
-  const packageRoot = await mkdtemp(join(tmpdir(), "codex-home-manager-package-"));
-  await mkdir(join(packageRoot, "CodexHomeManagerLocal", "backend"), { recursive: true });
-  await writeFile(join(packageRoot, "CodexHomeManagerLocal", "backend", "server.py"), "private source\n");
-  await writeFile(join(packageRoot, "Start Codex Home Manager.cmd"), "start\n");
   const archivePath = join(root, "site", archiveName);
-  const escapedPackagePattern = `${packageRoot}\\*`.replaceAll("'", "''");
-  const escapedArchivePath = archivePath.replaceAll("'", "''");
-  const zipResult = spawnSync(
-    "powershell",
-    ["-NoProfile", "-Command", `Compress-Archive -Path '${escapedPackagePattern}' -DestinationPath '${escapedArchivePath}'`],
-    { encoding: "utf8", windowsHide: true }
-  );
-  assert.equal(zipResult.status, 0, zipResult.stderr);
+  await writeFile(archivePath, zipSync({
+    "CodexHomeManagerLocal/backend/server.py": Buffer.from("private source\n"),
+    "Start Codex Home Manager.cmd": Buffer.from("start\n")
+  }));
   const archiveSize = (await import("node:fs/promises")).stat(archivePath).then((info) => info.size);
   await writeFile(join(root, "site", "connector-release.json"), JSON.stringify({
     schemaVersion: 1,
