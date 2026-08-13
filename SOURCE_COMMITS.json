@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T23:14:20.709118+00:00",
+  "generatedAt": "2026-08-13T23:20:47.993713+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "ef89e7a8d795e478173fcda583acaa431c13ab9d",
+      "commit": "965c0e8ef19023bf11113e9373f4b6e2e9cbb356",
       "selection": [
         "**"
       ],
@@ -438,9 +438,9 @@
           "path": "codex_home_manager/packaging/windows/version_info.txt",
           "sourcePath": "packaging/windows/version_info.txt",
           "gitMode": "100644",
-          "gitObject": "68d22b1c6a44a7e55ab56d334ac1c028124b8e5d",
+          "gitObject": "ef1988b2c99f3fb16725f04a6428e74221c676ff",
           "bytes": 1013,
-          "sha256": "f328d1fb9a5efab1bf4688065e0169ea05a491fc61cc642e41dc98155c3c6610"
+          "sha256": "9ce36042275e7e306d3a770b3df5d0818306527c426fd3ba434e6cec12e9f8a8"
         },
         {
           "path": "codex_home_manager/public/favicon.svg",
