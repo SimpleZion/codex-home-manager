@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T21:46:44.024447+00:00",
+  "generatedAt": "2026-08-13T22:19:59.819414+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "fd222191a2fb0ece5370d9f0ec5af712589e30a3",
+      "commit": "dac46612609fbb58e27fb0675402c3773f05affc",
       "selection": [
         "**"
       ],
@@ -198,9 +198,9 @@
           "path": ".github/workflows/requirements-ci.txt",
           "sourcePath": ".github/workflows/requirements-ci.txt",
           "gitMode": "100644",
-          "gitObject": "5f333057cc2c95c659e7412dd1d4afc1c1862d84",
-          "bytes": 2456,
-          "sha256": "f77a18311cc7058ca3031d72f36ad3a63b6c9fbde9f07020a8fd9cffcbaebef3"
+          "gitObject": "bac4a0da59470ca2078f3df4d56b0ff1bd7f6a13",
+          "bytes": 14389,
+          "sha256": "107b4994b00bde42cce800ea7b2ffe6eaef1c46b3dd5fcac75e0e409b97ea92a"
         },
         {
           "path": ".github/workflows/source-ci.yml",
