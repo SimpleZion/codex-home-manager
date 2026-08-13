@@ -114,7 +114,49 @@ const thread = {
   cliVersion: "test"
 };
 
-function snapshotPayload() {
+const raceThread = {
+  ...thread,
+  id: "thread-2",
+  title: "Fast B prompt thread",
+  sqliteTitle: "Fast B prompt thread",
+  sidebarTitle: "Fast B prompt thread",
+  sessionIndexTitle: "Fast B prompt thread",
+  preview: "Fast prompt response",
+  rolloutPath: "D:/Codex/sessions/thread-2.jsonl",
+  updatedAtMs: thread.updatedAtMs - 1000,
+  fileModifiedAtMs: thread.fileModifiedAtMs - 1000,
+  recentRank: 2,
+  threadListRank: 2,
+  sessionIndexRank: 2
+};
+
+const promptRecords = [
+  { index: 1, lineNumber: 1, timestamp: null, text: "Verify keyboard access", characterCount: 22, sourceType: "user", sourceLabel: "User", visibleByDefault: true, pureText: "Verify keyboard access", pureCharacterCount: 22, hasPureText: true },
+  { index: 2, lineNumber: 2, timestamp: null, text: "<recommended_plugins>\n- Sentry\n</recommended_plugins>\n# AGENTS.md instructions", characterCount: 83, sourceType: "internal", sourceLabel: "推荐插件上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false },
+  ...Array.from({ length: 120 }, (_, offset) => {
+    const index = offset + 3;
+    const pagedMatchNumber = offset === 29 ? 1 : offset === 74 ? 2 : offset === 109 ? 3 : 0;
+    const text = offset === 119
+      ? "<codex_internal_context>顶刊能力建设的尾部搜索目标</codex_internal_context>"
+      : pagedMatchNumber
+        ? `<codex_internal_context>paged-search match ${pagedMatchNumber}</codex_internal_context>`
+        : `<codex_internal_context>运行时内部记录 ${offset + 1}</codex_internal_context>`;
+    return { index, lineNumber: index, timestamp: null, text, characterCount: text.length, sourceType: "internal", sourceLabel: "内部上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false };
+  }),
+  { index: 123, lineNumber: 123, timestamp: null, text: "Turkish capital: İZMİR", characterCount: 22, sourceType: "internal", sourceLabel: "内部上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false },
+  { index: 124, lineNumber: 124, timestamp: null, text: "Combining accent: Cafe\u0301", characterCount: 23, sourceType: "internal", sourceLabel: "内部上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false },
+  { index: 125, lineNumber: 125, timestamp: null, text: "Emoji sequence: 👩‍💻🚀", characterCount: 24, sourceType: "internal", sourceLabel: "内部上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false }
+];
+
+function promptScopeMatches(prompt, scope) {
+  if (scope === "pure") return prompt.hasPureText;
+  if (scope === "visible") return prompt.visibleByDefault !== false;
+  if (scope === "with_agents") return prompt.visibleByDefault !== false || prompt.sourceType === "subagent";
+  if (scope === "automation" || scope === "delegation") return prompt.sourceType === scope;
+  return true;
+}
+
+function snapshotPayload(threads = [thread]) {
   return {
     codexHome: "D:/Codex",
     databasePath: "D:/Codex/state_5.sqlite",
@@ -123,11 +165,11 @@ function snapshotPayload() {
     sidebarLimit: 50,
     generatedAtMs: Date.now(),
     summary: {
-      totalThreads: 1,
-      mainThreads: 1,
+      totalThreads: threads.length,
+      mainThreads: threads.length,
       subagentThreads: 0,
-      eligibleThreads: 1,
-      codexVisibleThreads: 1,
+      eligibleThreads: threads.length,
+      codexVisibleThreads: threads.length,
       hiddenByInitialLimit: 0,
       archivedThreads: 0,
       needsRepairThreads: 0,
@@ -136,30 +178,30 @@ function snapshotPayload() {
       conversationProjects: 0,
       otherProjects: 0,
       emptyProjectsWithHiddenThreads: 0,
-      totalStorageBytes: 4096
+      totalStorageBytes: 4096 * threads.length
     },
-    threads: [thread],
+    threads,
     projects: [{
       path: thread.projectPath,
       label: thread.projectLabel,
       projectKind: "workspace_project",
-      total: 1,
-      mainThreads: 1,
+      total: threads.length,
+      mainThreads: threads.length,
       subagentThreads: 0,
-      active: 1,
-      visible: 1,
+      active: threads.length,
+      visible: threads.length,
       hiddenByInitialLimit: 0,
       archived: 0,
       needsRepair: 0,
-      storageBytes: 4096,
+      storageBytes: 4096 * threads.length,
       emptyButHasHiddenThreads: false
     }]
   };
 }
 
-function detailPayload() {
+function detailPayload(threadRecord = thread) {
   return {
-    thread,
+    thread: threadRecord,
     sqliteRow: {},
     rolloutStats: {
       lineCount: 12,
@@ -274,10 +316,71 @@ function capabilitiesPayload() {
   };
 }
 
-async function installApplicationRoutes(page) {
+async function installApplicationRoutes(page, {
+  includeRaceThread = false,
+  emulateUncancellableSlowPrompt = false,
+  simulateColdIndex = false,
+  promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] }
+} = {}) {
   await page.addInitScript((apiBase) => {
     window.localStorage.setItem("codex-home-manager-api-base-url", apiBase);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text) => { window.__copiedPromptText = text; } }
+    });
   }, applicationUrl);
+  if (emulateUncancellableSlowPrompt) {
+    await page.addInitScript(({ slowThreadId, slowThreadTitle }) => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const requestUrl = new URL(typeof input === "string" ? input : input.url, window.location.href);
+        if (requestUrl.pathname === `/api/threads/${slowThreadId}/prompts/page`) {
+          const requestId = requestUrl.searchParams.get("requestId");
+          const scope = requestUrl.searchParams.get("scope") || "visible";
+          const search = requestUrl.searchParams.get("search") || "";
+          window.__slowPromptRequestStarted = true;
+          init?.signal?.addEventListener("abort", () => {
+            window.__slowPromptAbortObserved = true;
+          }, { once: true });
+          return new Promise((resolve) => window.setTimeout(() => {
+            window.__slowPromptResponseReturned = true;
+            resolve(new Response(JSON.stringify({
+              threadId: slowThreadId,
+              title: slowThreadTitle,
+              rolloutPath: `D:/Codex/sessions/${slowThreadId}.jsonl`,
+              requestId,
+              scope,
+              search,
+              sourceType: null,
+              promptCount: 1,
+              purePromptCount: 1,
+              visiblePromptCount: 1,
+              hiddenPromptCount: 0,
+              sourceCounts: { user: 1 },
+              matchCount: 1,
+              matchCountComplete: true,
+              nextCursor: null,
+              hasMore: false,
+              index: { complete: true, scannedBytes: 100, fileSize: 100 },
+              prompts: [{
+                index: 1,
+                lineNumber: 1,
+                timestamp: null,
+                text: "SLOW A STALE PROMPT",
+                characterCount: 19,
+                sourceType: "user",
+                sourceLabel: "User",
+                visibleByDefault: true,
+                pureText: "SLOW A STALE PROMPT",
+                hasPureText: true
+              }]
+            }), { status: 200, headers: { "Content-Type": "application/json" } }));
+          }, 500));
+        }
+        return nativeFetch(input, init);
+      };
+    }, { slowThreadId: thread.id, slowThreadTitle: thread.title });
+  }
   await page.route("**/*", async (route) => {
     const requestUrl = new URL(route.request().url());
     if (requestUrl.hostname !== "127.0.0.1") {
@@ -294,7 +397,7 @@ async function installApplicationRoutes(page) {
       return;
     }
     if (pathname === "/api/snapshot") {
-      await route.fulfill({ json: snapshotPayload() });
+      await route.fulfill({ json: snapshotPayload(includeRaceThread ? [thread, raceThread] : [thread]) });
       return;
     }
     if (pathname === "/api/home/overview") {
@@ -313,45 +416,98 @@ async function installApplicationRoutes(page) {
       await route.fulfill({ json: detailPayload() });
       return;
     }
-    if (pathname === "/api/threads/thread-1/prompts") {
+    if (pathname === "/api/threads/thread-2") {
+      await route.fulfill({ json: detailPayload(raceThread) });
+      return;
+    }
+    const cancelMatch = pathname.match(/^\/api\/threads\/([^/]+)\/prompts\/requests\/([^/]+)$/);
+    if (cancelMatch && route.request().method() === "DELETE") {
+      promptApiState.cancelRequests.push({ threadId: cancelMatch[1], requestId: decodeURIComponent(cancelMatch[2]) });
+      await route.fulfill({ json: { threadId: cancelMatch[1], requestId: decodeURIComponent(cancelMatch[2]), cancelled: true } });
+      return;
+    }
+    const promptPageMatch = pathname.match(/^\/api\/threads\/(thread-[12])\/prompts\/page$/);
+    if (promptPageMatch) {
+      const threadId = promptPageMatch[1];
+      const requestId = requestUrl.searchParams.get("requestId") || "missing-request-id";
+      const scope = requestUrl.searchParams.get("scope") || "visible";
+      const search = requestUrl.searchParams.get("search") || "";
+      const cursor = requestUrl.searchParams.get("cursor");
+      const scanBudgetMs = Number(requestUrl.searchParams.get("scanBudgetMs") || 0);
+      promptApiState.queryCalls ||= new Map();
+      const queryKey = `${threadId}|${scope}|${search}`;
+      const queryCallCount = cursor ? (promptApiState.queryCalls.get(queryKey) || 1) : (promptApiState.queryCalls.get(queryKey) || 0) + 1;
+      if (!cursor) promptApiState.queryCalls.set(queryKey, queryCallCount);
+      promptApiState.pageRequests.push({ threadId, requestId, scope, search, cursor, scanBudgetMs, queryCallCount });
+      if (simulateColdIndex && !cursor && queryCallCount > 1) await new Promise((resolve) => setTimeout(resolve, 350));
+
+      const sourcePrompts = threadId === raceThread.id
+        ? [{ index: 1, lineNumber: 1, timestamp: null, text: "FAST B CURRENT PROMPT", characterCount: 21, sourceType: "user", sourceLabel: "User", visibleByDefault: true, pureText: "FAST B CURRENT PROMPT", pureCharacterCount: 21, hasPureText: true }]
+        : promptRecords;
+      const normalizedSearch = search.normalize("NFD").toLocaleLowerCase("und").replace(/\p{M}/gu, "");
+      const matchingPrompts = sourcePrompts.filter((prompt) => {
+        if (!promptScopeMatches(prompt, scope)) return false;
+        if (!normalizedSearch) return true;
+        const text = `${prompt.text}\n${prompt.pureText || ""}`.normalize("NFD").toLocaleLowerCase("und").replace(/\p{M}/gu, "");
+        return text.includes(normalizedSearch);
+      });
+      const pageSize = search === "paged-search" ? 2 : Math.min(60, Number(requestUrl.searchParams.get("limit") || 60));
+      const start = cursor ? Number(cursor.replace("cursor-", "")) : 0;
+      const pagePrompts = matchingPrompts.slice(start, start + pageSize);
+      const end = start + pagePrompts.length;
+      const matchCountComplete = !simulateColdIndex || Boolean(cursor) || queryCallCount > 1;
+      const hasMore = end < matchingPrompts.length || !matchCountComplete;
+      const nextCursor = hasMore ? `cursor-${end}` : null;
+      const sourceCounts = sourcePrompts.reduce((counts, prompt) => {
+        const key = prompt.sourceType || "unknown";
+        counts[key] = (counts[key] || 0) + 1;
+        return counts;
+      }, {});
+      try {
+        await route.fulfill({
+          json: {
+            threadId,
+            title: threadId === raceThread.id ? raceThread.title : thread.title,
+            rolloutPath: threadId === raceThread.id ? raceThread.rolloutPath : thread.rolloutPath,
+            requestId,
+            scope,
+            search,
+            sourceType: null,
+            promptCount: sourcePrompts.length,
+            purePromptCount: sourcePrompts.filter((prompt) => prompt.hasPureText).length,
+            visiblePromptCount: sourcePrompts.filter((prompt) => prompt.visibleByDefault !== false).length,
+            hiddenPromptCount: sourcePrompts.filter((prompt) => prompt.visibleByDefault === false).length,
+            sourceCounts,
+            matchCount: matchingPrompts.length,
+            matchCountComplete,
+            prompts: pagePrompts,
+            nextCursor,
+            hasMore,
+            index: { complete: matchCountComplete, scannedBytes: matchCountComplete ? 1000 : 100, fileSize: 1000, elapsedMs: scanBudgetMs }
+          }
+        });
+      } catch {
+        // An aborted Playwright route can finish after the frontend has already issued DELETE.
+      }
+      return;
+    }
+    const promptCopyMatch = pathname.match(/^\/api\/threads\/(thread-[12])\/prompts\/copy$/);
+    if (promptCopyMatch) {
+      const threadId = promptCopyMatch[1];
+      const requestId = requestUrl.searchParams.get("requestId") || "missing-copy-request-id";
+      const scope = requestUrl.searchParams.get("scope") || "pure";
+      const search = requestUrl.searchParams.get("search") || "";
+      const format = requestUrl.searchParams.get("format") || "text";
+      promptApiState.copyRequests.push({ threadId, requestId, scope, search, format });
+      const normalizedSearch = search.toLocaleLowerCase();
+      const matchingPrompts = promptRecords.filter((prompt) => promptScopeMatches(prompt, scope) && (!normalizedSearch || `${prompt.text}\n${prompt.pureText || ""}`.toLocaleLowerCase().includes(normalizedSearch)));
+      const body = format === "jsonl"
+        ? matchingPrompts.map((prompt) => JSON.stringify({ ...prompt, exportText: scope === "pure" ? prompt.pureText : prompt.text })).join("\n") + "\n"
+        : matchingPrompts.map((prompt) => scope === "pure" ? prompt.pureText : prompt.text).join("\n\n");
       await route.fulfill({
-        json: {
-          threadId: thread.id,
-          title: thread.title,
-          rolloutPath: thread.rolloutPath,
-          promptCount: 122,
-          prompts: [
-            { index: 1, lineNumber: 1, timestamp: null, text: "Verify keyboard access", characterCount: 22, sourceType: "user", sourceLabel: "User", visibleByDefault: true },
-            {
-              index: 2,
-              lineNumber: 2,
-              timestamp: null,
-              text: "<recommended_plugins>\n- Sentry\n</recommended_plugins>\n# AGENTS.md instructions",
-              characterCount: 83,
-              sourceType: "user",
-              sourceLabel: "用户输入",
-              visibleByDefault: true,
-              pureText: "<recommended_plugins>\n- Sentry\n</recommended_plugins>\n# AGENTS.md instructions",
-              pureCharacterCount: 83,
-              hasPureText: true
-            },
-            ...Array.from({ length: 120 }, (_, offset) => ({
-              index: offset + 3,
-              lineNumber: offset + 3,
-              timestamp: null,
-              text: offset === 119
-                ? "<codex_internal_context>顶刊能力建设的尾部搜索目标</codex_internal_context>"
-                : `<codex_internal_context>运行时内部记录 ${offset + 1}</codex_internal_context>`,
-              characterCount: 52,
-              sourceType: "internal",
-              sourceLabel: "内部上下文",
-              visibleByDefault: false,
-              pureText: "",
-              pureCharacterCount: 0,
-              hasPureText: false
-            }))
-          ]
-        }
+        body,
+        contentType: format === "jsonl" ? "application/x-ndjson; charset=utf-8" : "text/plain; charset=utf-8",
+        headers: { "X-Prompt-Request-Id": requestId }
       });
       return;
     }
@@ -388,6 +544,29 @@ async function installApplicationRoutes(page) {
           skippedOversizedRecords: 0,
           pageCounts: { user: 1, commentary: 1, reasoning: 2, tool_call: 1, assistant: 1 },
           items: filteredItems
+        }
+      });
+      return;
+    }
+    if (pathname === "/api/threads/thread-2/timeline") {
+      await route.fulfill({
+        json: {
+          threadId: raceThread.id,
+          title: raceThread.title,
+          rolloutPath: raceThread.rolloutPath,
+          fileSize: 1024,
+          beforeByte: null,
+          nextBeforeByte: null,
+          limit: 80,
+          kind: requestUrl.searchParams.get("kind") || "conversation",
+          search: "",
+          hasMore: false,
+          scannedRecords: 0,
+          scannedBytes: 0,
+          scanLimited: false,
+          skippedOversizedRecords: 0,
+          pageCounts: {},
+          items: []
         }
       });
       return;
@@ -496,6 +675,134 @@ async function assertDialogKeyboardContract(page, dialog) {
   assert.ok(await page.locator("[inert]").count() > 0, "dialog must make background content inert");
 }
 
+async function waitForPromptApiState(page, predicate, message, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await page.waitForTimeout(20);
+  }
+  assert.fail(message);
+}
+
+async function runPromptPaginationFlow() {
+  const promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] };
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  try {
+    const page = await context.newPage();
+    await installApplicationRoutes(page, { simulateColdIndex: true, promptApiState });
+    await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
+    const threadRow = page.locator(".thread-table tbody tr", { hasText: thread.title });
+    await threadRow.waitFor();
+    await threadRow.dblclick();
+    const detailDialog = page.locator(".thread-detail-modal");
+    await detailDialog.waitFor();
+    await detailDialog.getByRole("button", { name: "查看线程内容" }).last().click();
+    const promptDialog = page.locator(".prompt-modal");
+    await promptDialog.waitFor();
+    await promptDialog.getByRole("tab", { name: "我的输入" }).click();
+
+    await promptDialog.locator(".prompt-list").getByText("Verify keyboard access", { exact: true }).waitFor();
+    await promptDialog.locator(".prompt-index-scanning", { hasText: "扫描中 · 1" }).waitFor();
+    assert.equal(promptApiState.pageRequests[0].scope, "pure", "pure filter must map to the pure backend scope");
+    assert.ok(promptApiState.pageRequests[0].scanBudgetMs <= 100, "cold indexing must use a small scan budget");
+    assert.equal(promptApiState.pageRequests[0].cursor, null, "the first screen must start without a cursor");
+
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "pure").length >= 2, "cold pure index did not continue scanning");
+    const cancelledPureRequest = promptApiState.pageRequests.filter((request) => request.scope === "pure").at(-1);
+    await promptDialog.getByRole("button", { name: /全部/ }).click();
+    await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledPureRequest.requestId), "changing scope did not DELETE-cancel the prior request");
+
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "").length >= 2, "cold all-scope index did not continue scanning");
+    const cancelledAllRequest = promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "").at(-1);
+    const promptSearch = promptDialog.getByRole("searchbox", { name: "搜索当前筛选的全部内容" });
+    await promptSearch.fill("paged-search");
+    await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledAllRequest.requestId), "changing search did not DELETE-cancel the prior request");
+
+    await promptDialog.getByText("1 / 3 · 扫描中", { exact: true }).waitFor();
+    await promptDialog.getByText("1 / 3 · 完整", { exact: true }).waitFor();
+    assert.equal(await promptDialog.getByText("paged-search match 3", { exact: false }).count(), 0, "a later search page must not be in the DOM before paging");
+    const nextMatch = promptDialog.getByRole("button", { name: "下一个匹配" });
+    await nextMatch.click();
+    await promptDialog.getByText("2 / 3 · 完整", { exact: true }).waitFor();
+    await nextMatch.click();
+    await promptDialog.getByText("3 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByText("paged-search match 3", { exact: false }).waitFor();
+    assert.ok(promptApiState.pageRequests.some((request) => request.search === "paged-search" && request.cursor === "cursor-2"), "next-match navigation must request the next backend page");
+    await promptDialog.getByRole("button", { name: "上一个匹配" }).click();
+    await promptDialog.getByText("2 / 3 · 完整", { exact: true }).waitFor();
+
+    assert.equal(promptApiState.copyRequests.length, 0, "copy content must not be requested before the user clicks copy");
+    await promptDialog.getByRole("button", { name: "复制干净文本" }).click();
+    await promptDialog.getByRole("button", { name: "已复制" }).waitFor();
+    const textCopyRequest = promptApiState.copyRequests.at(-1);
+    assert.equal(textCopyRequest.threadId, thread.id);
+    assert.equal(textCopyRequest.scope, "all", "copy must use the active backend scope");
+    assert.equal(textCopyRequest.search, "paged-search", "copy must use the active backend search");
+    assert.equal(textCopyRequest.format, "text", "clean copy must request streamed text");
+    assert.ok(textCopyRequest.requestId, "copy must provide a cancellable requestId");
+    const copiedText = await page.evaluate(() => window.__copiedPromptText);
+    assert.match(copiedText, /paged-search match 1/);
+    assert.match(copiedText, /paged-search match 3/);
+    await promptDialog.getByRole("button", { name: "带元信息" }).click();
+    await promptDialog.getByRole("button", { name: "复制带元信息" }).click();
+    await promptDialog.getByRole("button", { name: "已复制" }).waitFor();
+    assert.equal(promptApiState.copyRequests.at(-1).format, "jsonl", "metadata copy must request the streamed jsonl format");
+    assert.match(await page.evaluate(() => window.__copiedPromptText), /## Prompt 32/);
+  } finally {
+    void context.close().catch(() => {});
+    void browser.close().catch(() => {});
+  }
+}
+
+async function runPromptRequestRaceFlow() {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  try {
+    const page = await context.newPage();
+    const promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] };
+    await installApplicationRoutes(page, { includeRaceThread: true, emulateUncancellableSlowPrompt: true, promptApiState });
+    await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
+    await page.locator(".thread-table tbody tr").first().waitFor();
+
+    const slowThreadRow = page.locator(".thread-table tbody tr", { hasText: thread.title });
+    await slowThreadRow.dblclick();
+    let detailDialog = page.locator(".thread-detail-modal");
+    await detailDialog.waitFor();
+    await detailDialog.getByRole("button", { name: "查看线程内容" }).last().click();
+    let promptDialog = page.locator(".prompt-modal");
+    await promptDialog.waitFor();
+    await promptDialog.getByRole("tab", { name: "我的输入" }).click();
+    await page.waitForFunction(() => window.__slowPromptRequestStarted === true);
+
+    await promptDialog.getByRole("button", { name: "关闭详情窗口" }).click();
+    await promptDialog.waitFor({ state: "detached" });
+    await page.waitForFunction(() => window.__slowPromptAbortObserved === true);
+    await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.threadId === thread.id), "closing the prompt dialog did not DELETE-cancel slow A");
+    await detailDialog.getByRole("button", { name: "关闭详情窗口" }).first().click();
+    await detailDialog.waitFor({ state: "detached" });
+
+    const fastThreadRow = page.locator(".thread-table tbody tr", { hasText: raceThread.title });
+    await fastThreadRow.dblclick();
+    detailDialog = page.locator(".thread-detail-modal");
+    await detailDialog.waitFor();
+    await detailDialog.getByRole("button", { name: "查看线程内容" }).last().click();
+    promptDialog = page.locator(".prompt-modal");
+    await promptDialog.waitFor();
+    await promptDialog.getByRole("tab", { name: "我的输入" }).click();
+    await promptDialog.getByText("FAST B CURRENT PROMPT", { exact: true }).waitFor();
+    await page.waitForFunction(() => window.__slowPromptResponseReturned === true);
+    await page.waitForTimeout(50);
+
+    assert.equal(await promptDialog.getByRole("heading", { name: raceThread.title }).count(), 1, "fast B must remain the active prompt dialog");
+    assert.equal(await promptDialog.getByText("FAST B CURRENT PROMPT", { exact: true }).count(), 1, "fast B prompt data must remain rendered");
+    assert.equal(await promptDialog.getByText("SLOW A STALE PROMPT", { exact: true }).count(), 0, "slow A response must not overwrite fast B after A returns");
+  } finally {
+    void context.close().catch(() => {});
+    void browser.close().catch(() => {});
+  }
+}
+
 async function runAccessibilityFlow() {
   assert.ok(fs.existsSync(path.join(distPath, "index.html")), "run npm run build before the accessibility test");
   const browser = await chromium.launch({ headless: true });
@@ -575,17 +882,36 @@ async function runAccessibilityFlow() {
     const promptSearch = promptDialog.getByRole("searchbox", { name: "搜索当前筛选的全部内容" });
     assert.equal(await promptSearch.evaluate((element) => document.activeElement === element), true, "Ctrl+F must focus the full-content prompt search instead of browser find");
     await promptSearch.fill("顶刊");
-    await promptDialog.getByText("1 / 1", { exact: true }).waitFor();
+    await promptDialog.getByText("1 / 1 · 完整", { exact: true }).waitFor();
     await promptDialog.getByText("顶刊能力建设的尾部搜索目标", { exact: false }).waitFor();
     assert.equal(await promptDialog.locator(".prompt-entry mark", { hasText: "顶刊" }).count(), 1, "full-content search must highlight matches found outside the rendered window");
     await promptDialog.getByRole("button", { name: "清空搜索" }).click();
     assert.equal(await promptSearch.inputValue(), "", "clear search must restore the unfiltered prompt list");
+    await promptSearch.fill("izmir");
+    await promptDialog.getByText("1 / 1 · 完整", { exact: true }).waitFor();
+    const turkishHighlight = promptDialog.locator(".prompt-entry mark").first();
+    assert.equal(await turkishHighlight.textContent(), "İZMİR", "Turkish dotted capital I must map back to the complete original text");
+    await promptDialog.getByRole("button", { name: "清空搜索" }).click();
+    await promptSearch.fill("CAFÉ");
+    await promptDialog.getByText("1 / 1 · 完整", { exact: true }).waitFor();
+    const combiningHighlight = promptDialog.locator(".prompt-entry mark").first();
+    assert.equal(await combiningHighlight.textContent(), "Cafe\u0301", "canonical-equivalent search must retain the original combining sequence");
+    await promptDialog.getByRole("button", { name: "清空搜索" }).click();
+    await promptDialog.getByText("60 / 125 · 完整", { exact: true }).waitFor();
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileOverflow = await promptDialog.evaluate((element) => element.scrollWidth - element.clientWidth);
     assert.ok(mobileOverflow <= 1, `thread content dialog must not overflow horizontally on mobile: ${mobileOverflow}px`);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await assertAccessibleSurface(page, "prompts dialog");
     await assertDialogKeyboardContract(page, promptDialog);
+    await promptSearch.fill("👩‍💻");
+    await promptDialog.getByText("1 / 1 · 完整", { exact: true }).waitFor();
+    const emojiHighlight = promptDialog.locator(".prompt-entry mark").first();
+    assert.equal(await emojiHighlight.textContent(), "👩‍💻", "emoji grapheme search must highlight the intact original sequence");
+    await page.keyboard.press("Escape");
+    assert.equal(await promptDialog.isVisible(), true, "the first Escape with a non-empty prompt search must keep the dialog open");
+    assert.equal(await promptSearch.inputValue(), "", "the first Escape must clear the prompt search");
+    assert.equal(await promptSearch.evaluate((element) => document.activeElement === element), true, "clearing search with Escape must retain search focus");
     await page.keyboard.press("Escape");
     await promptDialog.waitFor({ state: "detached" });
     assert.equal(await promptTrigger.evaluate((element) => document.activeElement === element), true, "closing prompts must restore its trigger focus");
@@ -650,6 +976,8 @@ async function runAccessibilityFlow() {
 
 let exitCode = 0;
 try {
+  await runPromptPaginationFlow();
+  await runPromptRequestRaceFlow();
   await runAccessibilityFlow();
 } catch (error) {
   exitCode = 1;

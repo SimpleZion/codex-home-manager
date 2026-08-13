@@ -94,6 +94,9 @@ def test_packaging_captures_and_rechecks_immutable_build_sources_and_private_key
     assert "release-build-source.json" in script
     assert "release-signing-public-key.sha256" in script
     assert "--trusted-public-key-fingerprint" in script
+    assert release_manifest.embedded_release_public_key_fingerprint in script
+    assert "write-user-verifier" in script
+    assert "$expectedSha256" not in script
     assert "frontendChecksumPath" not in script
 
 
@@ -202,6 +205,31 @@ def test_packaging_does_not_treat_untrusted_authenticode_as_trust() -> None:
     assert "CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT" in script
     assert "detachedSignatureRequired" in script
     assert "New-SelfSignedCertificate" not in script
+    assert 'status = if ($valid) { "valid" } else { "unavailable" }' not in script
+    assert '"self-signed"' in script
+    assert '"public-trusted"' in script
+    assert '"untrusted"' in script
+    assert "PublicChainTrusted" in script
+    assert "Cert:\\LocalMachine\\AuthRoot" in script
+    assert "Cert:\\CurrentUser\\AuthRoot" in script
+    assert "schemaVersion = 2" in script
+
+
+def test_user_verifier_is_pinned_and_does_not_trust_same_origin_checksums() -> None:
+    verifier = release_manifest.render_powershell_artifact_verifier(
+        default_artifact_name="codex-home-manager-local-win-x64-v1.2.3-0123456789ab.exe",
+        trusted_fingerprint=release_manifest.embedded_release_public_key_fingerprint,
+    )
+
+    assert f'$trustedPublicKeyFingerprint = "{release_manifest.embedded_release_public_key_fingerprint}"' in verifier
+    assert "release-manifest.json.sig" in verifier
+    assert "release-signing-public-key.pem" in verifier
+    assert "DEPENDENCY_UNAVAILABLE" in verifier
+    assert "serialization.PublicFormat.SubjectPublicKeyInfo" in verifier
+    assert "public_key.verify(signature_bytes, manifest_bytes)" in verifier
+    assert verifier.index("public_key.verify(signature_bytes, manifest_bytes)") < verifier.index("json.loads(manifest_bytes")
+    assert "SHA256SUMS.txt" not in verifier
+    assert "connector-release.json" not in verifier
 
 
 def test_release_finalizer_distinguishes_draft_and_published_github_urls() -> None:

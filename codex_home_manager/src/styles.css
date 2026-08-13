@@ -3334,6 +3334,14 @@ body:has(.modal-backdrop),
   font-weight: 800;
 }
 
+.prompt-modal-toolbar .prompt-index-scanning {
+  color: #9a5b08;
+}
+
+.prompt-modal-toolbar .prompt-index-complete {
+  color: #16734a;
+}
+
 .prompt-modal-toolbar code {
   min-width: 0;
   max-width: 56vw;
@@ -3592,6 +3600,35 @@ body:has(.modal-backdrop),
 .prompt-virtual-canvas {
   width: 100%;
   position: relative;
+}
+
+.prompt-page-footer {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.prompt-page-footer button {
+  min-width: 132px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-weight: 850;
+}
+
+.prompt-page-footer button:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.prompt-page-footer button:disabled {
+  cursor: wait;
+  opacity: .58;
 }
 
 .prompt-entry-wrap {

@@ -25,6 +25,7 @@ const bundle = await build({
 });
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`;
 const {
+  exportBrowserThreadPrompts,
   readBrowserThreadDailyTokenUsage,
   readBrowserThreadDetail,
   readBrowserThreadLogs,
@@ -77,6 +78,36 @@ assert.equal(prompts.promptCount, 1);
 assert.equal(prompts.prompts[0].text, "streamed user prompt");
 assert.equal(prompts.aggregationExact, true);
 assert.equal(largestSlice, 512 * 1024);
+
+let downloadedPromptBlob = null;
+let downloadedPromptFilename = "";
+const originalDocument = globalThis.document;
+const originalCreateObjectUrl = URL.createObjectURL;
+const originalRevokeObjectUrl = URL.revokeObjectURL;
+URL.createObjectURL = (blob) => {
+  downloadedPromptBlob = blob;
+  return "blob:browser-prompt-export";
+};
+URL.revokeObjectURL = () => {};
+globalThis.document = {
+  body: { appendChild() {} },
+  createElement: () => ({
+    href: "",
+    set download(value) { downloadedPromptFilename = value; },
+    click() {},
+    remove() {}
+  })
+};
+try {
+  const browserExport = await exportBrowserThreadPrompts(workspace, "thread-stream");
+  assert.equal(browserExport.promptCount, 1);
+  assert.equal(downloadedPromptFilename, "codex-thread-prompts-thread-stream.md");
+  assert.match(await downloadedPromptBlob.text(), /streamed user prompt/);
+} finally {
+  globalThis.document = originalDocument;
+  URL.createObjectURL = originalCreateObjectUrl;
+  URL.revokeObjectURL = originalRevokeObjectUrl;
+}
 
 function promptWorkspace(threadId, file) {
   return {

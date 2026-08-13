@@ -36,6 +36,7 @@ $verifyScriptPath = Join-Path $releaseRoot "verify-codex-home-manager.ps1"
 $releasePublicKeyPath = Join-Path $releaseRoot "release-signing-public-key.pem"
 $privateKeyPath = "D:\Backup\codex_home_manager\release-signing\release-signing-key.pem"
 $trustedPublicKeyFingerprintPath = "D:\Backup\codex_home_manager\release-signing\release-signing-public-key.sha256"
+$embeddedReleasePublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
 $releaseManifestScript = Join-Path $PSScriptRoot "release_manifest.py"
 $buildSourceSnapshotPath = Join-Path $buildRoot "release-build-source.json"
 $sourceEvidenceProofPath = Join-Path $buildRoot "source-release-evidence.json"
@@ -456,7 +457,7 @@ ZIP fallback:
 2. Run "Install browser launch protocol.cmd" only when the browser protocol is not registered.
 3. Set CODEX_HOME before starting the connector if your .codex directory is not in a common location.
 
-Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. Authenticode is reported only when a trusted Windows code-signing certificate is available.
+Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. Authenticode is valid only for a non-self-signed certificate whose public trust chain validates; self-signed and other untrusted signatures are labeled untrusted.
 '@ | Set-Content -LiteralPath (Join-Path $PackageDirectory "README.txt") -Encoding UTF8
 }
 
@@ -522,6 +523,33 @@ function Invoke-IsolatedConnectorBuild {
     }
 }
 
+function Get-CertificateChainEvidence {
+    param([Parameter(Mandatory = $true)]$Certificate)
+    $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+    try {
+        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+        $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+        $chainBuilt = $chain.Build($Certificate)
+        $chainElements = @($chain.ChainElements)
+        $selfSigned = $Certificate.Subject -eq $Certificate.Issuer -or
+            ($chainElements.Count -eq 1 -and $chainElements[0].Certificate.Thumbprint -eq $Certificate.Thumbprint)
+        $rootThumbprint = if ($chainElements.Count) { $chainElements[-1].Certificate.Thumbprint } else { $null }
+        $publicAuthRoot = $false
+        if ($rootThumbprint) {
+            $publicAuthRoot = @(Get-ChildItem Cert:\LocalMachine\AuthRoot, Cert:\CurrentUser\AuthRoot -ErrorAction SilentlyContinue | Where-Object {
+                $_.Thumbprint -eq $rootThumbprint
+            }).Count -gt 0
+        }
+        return [pscustomobject]@{
+            SelfSigned = $selfSigned
+            PublicChainTrusted = $chainBuilt -and -not $selfSigned -and $chainElements.Count -ge 2 -and $publicAuthRoot
+        }
+    }
+    finally {
+        $chain.Dispose()
+    }
+}
+
 function Get-TrustedCodeSigningCertificate {
     $requestedThumbprint = ($env:CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT -replace '\s', '').ToUpperInvariant()
     $candidates = @(Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object {
@@ -529,21 +557,13 @@ function Get-TrustedCodeSigningCertificate {
         @($_.EnhancedKeyUsageList | ForEach-Object ObjectId) -contains "1.3.6.1.5.5.7.3.3" -and
         (-not $requestedThumbprint -or $_.Thumbprint.ToUpperInvariant() -eq $requestedThumbprint)
     } | Where-Object {
-        $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
-        try {
-            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
-            $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
-            $chain.Build($_)
-        }
-        finally {
-            $chain.Dispose()
-        }
+        (Get-CertificateChainEvidence -Certificate $_).PublicChainTrusted
     })
     if ($requestedThumbprint -and $candidates.Count -ne 1) {
-        throw "CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT does not identify one trusted code-signing certificate with a private key"
+        throw "CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT does not identify one publicly trusted code-signing certificate with a private key"
     }
     if (-not $requestedThumbprint -and $candidates.Count -gt 1) {
-        throw "Multiple trusted code-signing certificates are available; set CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT explicitly"
+        throw "Multiple publicly trusted code-signing certificates are available; set CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT explicitly"
     }
     return $candidates | Select-Object -First 1
 }
@@ -559,11 +579,29 @@ function Invoke-AuthenticodePolicy {
         }
     }
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    $valid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+    $certificate = $signature.SignerCertificate
+    if ($null -eq $certificate) {
+        return [ordered]@{
+            status = "unavailable"
+            trust = "none"
+            signerThumbprint = $null
+            signerSubject = $null
+            selfSigned = $false
+            chainTrusted = $false
+            detachedSignatureRequired = $true
+        }
+    }
+    $chainEvidence = Get-CertificateChainEvidence -Certificate $certificate
+    $validPublicChain = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid -and
+        $chainEvidence.PublicChainTrusted
+    $status = if ($chainEvidence.SelfSigned) { "self-signed" } elseif ($validPublicChain) { "valid" } else { "untrusted" }
     return [ordered]@{
-        status = if ($valid) { "valid" } else { "unavailable" }
-        signerThumbprint = if ($valid) { $signature.SignerCertificate.Thumbprint } else { $null }
-        signerSubject = if ($valid) { $signature.SignerCertificate.Subject } else { $null }
+        status = $status
+        trust = if ($validPublicChain) { "public-trusted" } else { "untrusted" }
+        signerThumbprint = $certificate.Thumbprint
+        signerSubject = $certificate.Subject
+        selfSigned = [bool]$chainEvidence.SelfSigned
+        chainTrusted = [bool]$validPublicChain
         detachedSignatureRequired = $true
     }
 }
@@ -675,32 +713,16 @@ try {
         throw "Failed to prepare the private-root Ed25519 release signing trust"
     }
     $trustedPublicKeyFingerprint = (Get-Content -LiteralPath $trustedPublicKeyFingerprintPath -Raw).Trim()
-    $verifyScriptText = @"
-`$ErrorActionPreference = "Stop"
-
-`$filePath = Join-Path `$env:USERPROFILE "Downloads\$publicExecutableName"
-`$expectedSha256 = "$directExecutableHash"
-`$trustedPublicKeyFingerprint = "$trustedPublicKeyFingerprint"
-
-if (-not (Test-Path -LiteralPath `$filePath)) {
-    Write-Host "File not found: `$filePath"
-    Write-Host "Move this script next to the downloaded EXE or edit `$filePath, then run it again."
-    exit 2
-}
-
-`$actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath `$filePath).Hash.ToLowerInvariant()
-if (`$actualSha256 -eq `$expectedSha256) {
-    Write-Host "OK: checksum matches the release artifact."
-    Write-Host "Pinned Ed25519 public key fingerprint: `$trustedPublicKeyFingerprint"
-    exit 0
-}
-
-Write-Host "FAILED: checksum mismatch. Do not run this file."
-Write-Host "Expected: `$expectedSha256"
-Write-Host "Actual:   `$actualSha256"
-exit 1
-"@
-    [System.IO.File]::WriteAllText($verifyScriptPath, $verifyScriptText, [System.Text.UTF8Encoding]::new($false))
+    if ($trustedPublicKeyFingerprint -cne $embeddedReleasePublicKeyFingerprint) {
+        throw "Release signing key rotation requires an explicit review and update of the verifier's independent trust anchor"
+    }
+    & python $releaseManifestScript write-user-verifier `
+        --output $verifyScriptPath `
+        --default-artifact-name $publicExecutableName `
+        --trusted-public-key-fingerprint $embeddedReleasePublicKeyFingerprint
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to generate the independently pinned user artifact verifier"
+    }
     if (-not (Test-Path -LiteralPath $verifyScriptPath)) {
         throw "Verification script was not created: $verifyScriptPath"
     }
@@ -724,7 +746,7 @@ exit 1
     )
 
     $releaseMetadata = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         version = $releaseVersion
         artifacts = @(
             [ordered]@{

@@ -66,6 +66,12 @@ function nodeText(node) {
 
 const englishTextInitializer = findVariableInitializer("englishText");
 assert.ok(ts.isObjectLiteralExpression(englishTextInitializer), "englishText must remain a statically inspectable object literal");
+const mcpAuthCallText = nodeText(findVariableInitializer("mcpAuthCall"));
+const mcpPreviewCallText = nodeText(findVariableInitializer("mcpPreviewCall"));
+const apiModuleText = nodeText(findFunction("ApiModule"));
+assert.match(mcpAuthCallText, /name:\s*["']codex_auth_token["']/, "the API guide must begin MCP access with codex_auth_token");
+assert.match(mcpPreviewCallText, /apiToken:\s*["']LOCAL_TOKEN["']/, "the MCP preview example must pass the short-lived apiToken");
+assert.match(apiModuleText, /\$\{mcpAuthCall\}[\s\S]*\$\{mcpPreviewCall\}/, "the API guide must show authentication before the preview call");
 const translatedKeys = new Set(
   englishTextInitializer.properties
     .filter(ts.isPropertyAssignment)

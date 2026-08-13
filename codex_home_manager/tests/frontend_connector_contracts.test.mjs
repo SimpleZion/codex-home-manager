@@ -55,6 +55,13 @@ const mainSource = fs.readFileSync(path.join(projectRoot, "src", "main.tsx"), "u
 assert.match(mainSource, /"思考过程": "Progress updates"/);
 assert.doesNotMatch(mainSource, /"思考过程": "Progress reasoning"/);
 assert.match(mainSource, /useState<TimelineFilter>\("conversation"\)/, "main content must remain the default timeline filter");
+assert.match(mainSource, /\/prompts\/page\?\$\{params\.toString\(\)\}/, "local prompt reads must use the paged backend endpoint");
+assert.doesNotMatch(mainSource, /fetchThreadPromptsFromLocalApi/, "the frontend must not retain the legacy full prompt loader");
+assert.match(mainSource, /readBrowserThreadPrompts\(browserWorkspace, threadId\)/, "browser folder mode must retain its in-memory prompt reader");
+assert.match(mainSource, /if \(isBrowserPromptMode\)[\s\S]{0,300}copyTextToClipboard\(allPromptText\)/, "browser folder copy must remain in memory");
+assert.match(mainSource, /response\.body\.getReader\(\)/, "connector copy must consume the streaming response body");
+assert.match(mainSource, /if \(filterMode === "focused"\) return "visible"/);
+assert.match(mainSource, /if \(filterMode === "withAgents"\) return "with_agents"/);
 const validCapabilities = {
   service: "codex-home-manager",
   version: packageVersion,

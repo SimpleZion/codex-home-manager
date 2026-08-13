@@ -7761,6 +7761,8 @@ def test_capabilities_support_chinese_and_default_english() -> None:
     assert chinese_payload["capabilities"][0]["purpose"].startswith("获取写入接口")
     assert chinese_payload["commonQueryParameters"]["lang"].startswith("用于指定能力说明语言")
     assert chinese_payload["safetyModel"]["deleteBehavior"].startswith("线程删除默认实现为归档")
+    assert "codex_auth_token" in english_payload["safetyModel"]["mcp"]
+    assert "codex_auth_token" in chinese_payload["safetyModel"]["mcp"]
 
 
 def test_product_version_is_consistent_across_package_openapi_capabilities_and_mcp() -> None:
@@ -8252,99 +8254,116 @@ def test_preview_ticket_allows_only_one_concurrent_success(tmp_path: Path) -> No
     assert status_codes == [200, 428]
 
 
-def test_mcp_write_tools_require_token_and_preview(tmp_path: Path) -> None:
+def test_mcp_metadata_driven_client_requires_token_and_preview(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     client = TestClient(server.app)
 
-    public_token_payload = client.post(
-        "/mcp",
-        headers={"Origin": "https://codex-home-manager.simplezion.com"},
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "codex_auth_token", "arguments": {}},
+    metadata = client.get("/mcp").json()
+    authentication = metadata["security"]["authentication"]
+    preview_binding = metadata["security"]["previewBoundWrites"]
+    auth_tool_name = authentication["bootstrapTool"]
+    token_argument = authentication["tokenArgument"]
+    token_result_field = authentication["tokenResultField"]
+    preview_arguments = preview_binding["requiredArguments"]
+
+    assert authentication["required"] is True
+    assert authentication["requiredFor"] == "all tools except codex_auth_token"
+    assert authentication["exemptTools"] == [auth_tool_name]
+    assert authentication["expiresAfterMs"] == server.authorization_ttl_ms
+    assert preview_arguments == ["operationPreviewId", "inputHash"]
+    assert preview_binding["expiresAfterMs"] == server.preview_ttl_ms
+
+    initialize_payload = mcp_call(client, 1, "initialize")
+    instructions = initialize_payload["result"]["instructions"]
+    assert auth_tool_name in instructions
+    assert token_argument in instructions
+    assert all(argument in instructions for argument in preview_arguments)
+
+    tools_payload = mcp_call(client, 2, "tools/list")
+    tools_by_name = {tool["name"]: tool for tool in tools_payload["result"]["tools"]}
+    for tool_name, tool in tools_by_name.items():
+        properties = tool["inputSchema"]["properties"]
+        required = tool["inputSchema"]["required"]
+        if tool_name in authentication["exemptTools"]:
+            assert token_argument not in properties
+            assert token_argument not in required
+        else:
+            assert token_argument in properties
+            assert token_argument in required
+
+    unauthenticated_read = mcp_call(
+        client,
+        3,
+        "tools/call",
+        {
+            "name": "codex_snapshot",
+            "arguments": {"codexHome": str(codex_home_path), "sidebarLimit": 50},
         },
-    ).json()
-    assert public_token_payload["result"]["isError"] is True
-    assert public_token_payload["result"]["structuredContent"]["status"] == 403
+    )
+    assert unauthenticated_read["result"]["isError"] is True
+    assert unauthenticated_read["result"]["structuredContent"]["status"] == 401
 
     token_payload = mcp_call(
         client,
-        2,
+        4,
         "tools/call",
-        {"name": "codex_auth_token", "arguments": {"codexHome": str(codex_home_path)}},
+        {"name": auth_tool_name, "arguments": {"codexHome": str(codex_home_path)}},
     )
-    api_token = token_payload["result"]["structuredContent"]["token"]
+    api_token = token_payload["result"]["structuredContent"][token_result_field]
+
+    authenticated_read = mcp_call(
+        client,
+        5,
+        "tools/call",
+        {
+            "name": "codex_snapshot",
+            "arguments": {
+                "codexHome": str(codex_home_path),
+                token_argument: api_token,
+                "sidebarLimit": 50,
+            },
+        },
+    )
+    assert authenticated_read["result"].get("isError") is not True
+    assert authenticated_read["result"]["structuredContent"]["summary"]["totalThreads"] == 3
+
+    write_arguments = {
+        "codexHome": str(codex_home_path),
+        token_argument: api_token,
+        "threadId": "thread-0",
+        "acknowledgeCodexRunningRisk": True,
+    }
+    missing_preview_payload = mcp_call(
+        client,
+        6,
+        "tools/call",
+        {"name": "codex_show_thread", "arguments": write_arguments},
+    )
+    assert missing_preview_payload["result"]["isError"] is True
+    assert missing_preview_payload["result"]["structuredContent"]["status"] == 428
 
     preview_payload = mcp_call(
         client,
-        3,
+        7,
         "tools/call",
         {
             "name": "codex_preview_thread_action",
             "arguments": {
                 "codexHome": str(codex_home_path),
-                "apiToken": api_token,
+                token_argument: api_token,
                 "threadId": "thread-0",
                 "action": "show",
             },
         },
     )
     preview = preview_payload["result"]["structuredContent"]
-
-    missing_token_payload = mcp_call(
-        client,
-        4,
-        "tools/call",
-        {
-            "name": "codex_show_thread",
-            "arguments": {
-                "codexHome": str(codex_home_path),
-                "threadId": "thread-0",
-                "operationPreviewId": preview["operationPreviewId"],
-                "inputHash": preview["inputHash"],
-                "acknowledgeCodexRunningRisk": True,
-            },
-        },
-    )
-    assert missing_token_payload["result"]["isError"] is True
-    assert missing_token_payload["result"]["structuredContent"]["status"] == 401
-
-    wrong_hash_payload = mcp_call(
-        client,
-        5,
-        "tools/call",
-        {
-            "name": "codex_show_thread",
-            "arguments": {
-                "codexHome": str(codex_home_path),
-                "threadId": "thread-0",
-                "apiToken": api_token,
-                "operationPreviewId": preview["operationPreviewId"],
-                "inputHash": "bad-hash",
-                "acknowledgeCodexRunningRisk": True,
-            },
-        },
-    )
-    assert wrong_hash_payload["result"]["isError"] is True
-    assert wrong_hash_payload["result"]["structuredContent"]["status"] == 428
+    write_arguments.update({argument: preview[argument] for argument in preview_arguments})
 
     success_payload = mcp_call(
         client,
-        6,
+        8,
         "tools/call",
-        {
-            "name": "codex_show_thread",
-            "arguments": {
-                "codexHome": str(codex_home_path),
-                "threadId": "thread-0",
-                "apiToken": api_token,
-                "operationPreviewId": preview["operationPreviewId"],
-                "inputHash": preview["inputHash"],
-                "acknowledgeCodexRunningRisk": True,
-            },
-        },
+        {"name": "codex_show_thread", "arguments": write_arguments},
     )
     assert success_payload["result"].get("isError") is not True
     assert success_payload["result"]["structuredContent"]["backup"]["backupId"]

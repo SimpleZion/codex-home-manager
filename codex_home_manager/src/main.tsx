@@ -289,9 +289,11 @@ type ThreadLogs = {
 type PromptRecord = {
   index: number;
   lineNumber: number;
+  byteOffset?: number;
   timestamp: string | null;
   text: string;
   characterCount: number;
+  protocol?: string;
   sourceType?: string;
   sourceLabel?: string;
   visibleByDefault?: boolean;
@@ -310,6 +312,29 @@ type ThreadPrompts = {
   hiddenPromptCount?: number;
   sourceCounts?: Record<string, number>;
   prompts: PromptRecord[];
+};
+
+type ThreadPromptPage = ThreadPrompts & {
+  requestId: string;
+  scope: string;
+  search: string;
+  sourceType?: string | null;
+  purePromptCount: number;
+  visiblePromptCount: number;
+  hiddenPromptCount: number;
+  sourceCounts: Record<string, number>;
+  matchCount: number;
+  matchCountComplete: boolean;
+  nextCursor?: string | null;
+  hasMore: boolean;
+  index: {
+    complete: boolean;
+    scannedBytes?: number;
+    scannedLines?: number;
+    fileSize?: number;
+    elapsedMs?: number;
+    [key: string]: unknown;
+  };
 };
 
 type ResourceRecord = {
@@ -656,13 +681,19 @@ function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {
   ));
 }
 
-function useModalAccessibility(isOpen: boolean, onClose: () => void): React.RefObject<HTMLElement | null> {
+function useModalAccessibility(
+  isOpen: boolean,
+  onClose: () => void,
+  onEscape?: () => boolean
+): React.RefObject<HTMLElement | null> {
   const dialogRef = React.useRef<HTMLElement>(null);
   const onCloseRef = React.useRef(onClose);
+  const onEscapeRef = React.useRef(onEscape);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     onCloseRef.current = onClose;
-  }, [onClose]);
+    onEscapeRef.current = onEscape;
+  }, [onClose, onEscape]);
 
   React.useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -693,29 +724,25 @@ function useModalAccessibility(isOpen: boolean, onClose: () => void): React.RefO
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
+        if (onEscapeRef.current?.()) return;
         onCloseRef.current();
         return;
       }
       if (event.key !== "Tab") return;
       const focusableElements = dialogFocusableElements(dialog);
+      event.preventDefault();
       if (!focusableElements.length) {
-        event.preventDefault();
         dialog.focus();
         return;
       }
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements[focusableElements.length - 1];
       const activeElement = document.activeElement;
-      if (!dialog.contains(activeElement)) {
-        event.preventDefault();
-        (event.shiftKey ? lastElement : firstElement).focus();
-      } else if (event.shiftKey && activeElement === firstElement) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
-      }
+      const activeIndex = activeElement instanceof HTMLElement
+        ? focusableElements.indexOf(activeElement)
+        : -1;
+      const nextIndex = event.shiftKey
+        ? activeIndex <= 0 ? focusableElements.length - 1 : activeIndex - 1
+        : activeIndex < 0 || activeIndex === focusableElements.length - 1 ? 0 : activeIndex + 1;
+      focusableElements[nextIndex].focus();
     };
     const handleFocusIn = (event: FocusEvent) => {
       if (activeDialogStack.at(-1) === dialog && event.target instanceof Node && !dialog.contains(event.target)) {
@@ -1307,7 +1334,7 @@ const englishText: Record<string, string> = {
   "复制资源": "Copy resource",
   "给新 agent 直接调用的稳定本地 API": "Stable local API for new agents",
   "MCP 优先接入": "Prefer MCP for agents",
-  "把本地连接器作为 streamable HTTP MCP server 注册。agent 先 tools/list，再按工具 schema 调用；写入前先用对应 preview 工具取得 operationPreviewId 和 inputHash。": "Register the local connector as a streamable HTTP MCP server. Agents call tools/list first, then call tools by schema; before writing, call the matching preview tool to get operationPreviewId and inputHash.",
+  "把本地连接器作为 streamable HTTP MCP server 注册。agent 可先 tools/list 发现能力；调用任何数据工具前，先调用 codex_auth_token，并把返回的短期 token 作为 apiToken 传给其他工具。": "Register the local connector as a streamable HTTP MCP server. Agents may use tools/list for discovery; before calling any data tool, call codex_auth_token and pass its short-lived token as apiToken to every other tool.",
   "MCP 配置": "MCP config",
   "MCP 工具调用": "MCP tool call",
   "REST/OpenAPI 兜底": "REST/OpenAPI fallback",
@@ -1317,9 +1344,9 @@ const englishText: Record<string, string> = {
   "公开 API 说明": "Public API guide",
   "当前未连接本机连接器，下面展示公开接入说明；tools/list、OpenAPI JSON 和真实写入能力需要先启动 http://127.0.0.1:8765。": "The local connector is not connected. This page still shows the public integration guide; tools/list, OpenAPI JSON, and real write capabilities require http://127.0.0.1:8765 to be running first.",
   "写入安全模型": "Write safety model",
-  "MCP 写工具同样需要 apiToken、operationPreviewId、inputHash；Codex 正在运行时还需要 acknowledgeCodexRunningRisk=true。": "MCP write tools also require apiToken, operationPreviewId and inputHash; while Codex is running they also require acknowledgeCodexRunningRisk=true.",
+  "除 codex_auth_token 外，所有 MCP 工具都需要短期 apiToken。预览绑定的写工具还需要 operationPreviewId 和 inputHash；Codex 正在运行时还需要 acknowledgeCodexRunningRisk=true。": "Every MCP tool except codex_auth_token requires a short-lived apiToken. Preview-bound write tools also require operationPreviewId and inputHash; while Codex is running they also require acknowledgeCodexRunningRisk=true.",
   "先预览再写入": "Preview before write",
-  "示例先预览显示线程，再把返回的 operationPreviewId 和 inputHash 传给写工具。": "Preview showing a thread first, then pass the returned operationPreviewId and inputHash to the write tool.",
+  "示例先获取短期 apiToken，再用它预览显示线程，最后把返回的 operationPreviewId 和 inputHash 传给写工具。": "First obtain a short-lived apiToken, use it to preview showing a thread, then pass the returned operationPreviewId and inputHash to the write tool.",
   "能力列表": "Capability list",
   "能力发现": "Capability discovery",
   "新 agent 先请求 `/api/capabilities`，再按返回的 method/path/required/bodyExample 调用对应能力；严格 schema 可直接读取 `/openapi.json`。": "A new agent should first call `/api/capabilities`, then call each capability using the returned method/path/required/bodyExample. Strict schemas are available at `/openapi.json`.",
@@ -1574,6 +1601,15 @@ const englishText: Record<string, string> = {
   "开发者上下文": "Developer context",
   "系统上下文": "System context",
   "读取 prompts...": "Loading prompts...",
+  "正在扫描索引...": "Scanning the prompt index...",
+  "扫描中": "Scanning",
+  "完整": "Complete",
+  "匹配数完整": "Match count complete",
+  "加载更多": "Load more",
+  "正在加载更多...": "Loading more...",
+  "正在流式读取...": "Reading stream...",
+  "prompt 响应属于其他线程，已丢弃。": "The prompt response belongs to another thread and was discarded.",
+  "prompt 响应与当前线程或筛选条件不一致，已丢弃。": "The prompt response does not match the active thread or filters and was discarded.",
   "没有 prompt": "No prompts",
   "复制全部": "Copy all",
   "复制当前筛选": "Copy current filter",
@@ -2047,49 +2083,6 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function collectTextParts(value: unknown): string[] {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) return value.flatMap((item) => collectTextParts(item));
-  if (!isObjectRecord(value)) return [];
-
-  const directText = value.text;
-  if (typeof directText === "string") return [directText];
-
-  const content = value.content ?? value.parts ?? value.input ?? value.message;
-  return collectTextParts(content);
-}
-
-function extractPromptTextFromPayload(value: unknown): string {
-  return collectTextParts(value).join("\n").trim();
-}
-
-function extractPromptTextFromLogEntry(entry: ThreadLogEntry): string {
-  if (entry.rawLine && !entry.rawLineTruncated) {
-    try {
-      const parsed = JSON.parse(entry.rawLine) as unknown;
-      if (isObjectRecord(parsed)) {
-        const payload = parsed.payload;
-        const entryType = typeof parsed.type === "string" ? parsed.type : "";
-        if (entryType === "user_message") {
-          const promptText = extractPromptTextFromPayload(payload);
-          if (promptText) return promptText;
-        }
-        if (entryType === "response_item" && isObjectRecord(payload) && payload.role === "user") {
-          const promptText = extractPromptTextFromPayload(payload.content ?? payload);
-          if (promptText) return promptText;
-        }
-        if (parsed.role === "user") {
-          const promptText = extractPromptTextFromPayload(parsed.content ?? parsed);
-          if (promptText) return promptText;
-        }
-      }
-    } catch {
-      // Old connectors may truncate raw JSONL. Fall back to the parsed preview below.
-    }
-  }
-  return (entry.message || "").trim();
-}
-
 function normalizePromptRecord(prompt: PromptRecord): PromptRecord {
   const classification = classifyPromptText(prompt.text);
   const correctStaleRuntimeClassification = isCodexRuntimeContextPrompt(prompt.text);
@@ -2130,6 +2123,12 @@ function promptMatchesFilter(prompt: PromptRecord, filterMode: PromptFilterMode)
   return prompt.visibleByDefault !== false;
 }
 
+function promptScopeForFilter(filterMode: PromptFilterMode): string {
+  if (filterMode === "focused") return "visible";
+  if (filterMode === "withAgents") return "with_agents";
+  return filterMode;
+}
+
 function promptTextForFilter(prompt: PromptRecord, filterMode: PromptFilterMode): string {
   return filterMode === "pure" ? (prompt.pureText || "").trim() : prompt.text;
 }
@@ -2147,83 +2146,103 @@ function removeBlankLines(text: string): string {
     .trim();
 }
 
-function threadPromptsFromLogs(thread: ThreadRecord, logs: ThreadLogs, entries: ThreadLogEntry[]): ThreadPrompts {
-  const prompts = entries
-    .map((entry, index) => ({
-      index: index + 1,
-      lineNumber: entry.lineNumber ?? 0,
-      timestamp: entry.timestamp,
-      text: extractPromptTextFromLogEntry(entry),
-      characterCount: 0
-    }))
-    .filter((prompt) => prompt.text.length > 0)
-    .map((prompt, index) => ({
-      ...prompt,
-      index: index + 1,
-      characterCount: prompt.text.length,
-      ...classifyPromptText(prompt.text)
-    }));
-  const visiblePromptCount = prompts.filter((prompt) => prompt.visibleByDefault !== false).length;
-  const purePromptCount = prompts.filter((prompt) => prompt.hasPureText).length;
-
-  return {
-    threadId: thread.id,
-    title: thread.title,
-    rolloutPath: logs.rolloutPath || thread.rolloutPath,
-    promptCount: prompts.length,
-    purePromptCount,
-    visiblePromptCount,
-    hiddenPromptCount: prompts.length - visiblePromptCount,
-    sourceCounts: promptSourceCounts(prompts),
-    prompts
-  };
+async function fetchThreadPromptPageFromLocalApi(
+  thread: ThreadRecord,
+  codexHome: string,
+  options: {
+    cursor?: string | null;
+    limit: number;
+    search: string;
+    scope: string;
+    sourceType?: string | null;
+    scanBudgetMs: number;
+    requestId: string;
+  },
+  signal: AbortSignal
+): Promise<ThreadPromptPage> {
+  const params = new URLSearchParams({
+    codex_home: codexHome,
+    limit: String(options.limit),
+    search: options.search,
+    scope: options.scope,
+    scanBudgetMs: String(options.scanBudgetMs),
+    requestId: options.requestId
+  });
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.sourceType) params.set("sourceType", options.sourceType);
+  return await fetchJson<ThreadPromptPage>(`/api/threads/${thread.id}/prompts/page?${params.toString()}`, {
+    cache: "no-store",
+    signal
+  });
 }
 
-async function fetchThreadPromptsFromLogs(thread: ThreadRecord, codexHome: string): Promise<ThreadPrompts> {
-  const allEntries: ThreadLogEntry[] = [];
-  let latestLogs: ThreadLogs | null = null;
-  let offset = 0;
-  const limit = 500;
-
-  for (let page = 0; page < 20; page += 1) {
-    const params = new URLSearchParams({
-      codex_home: codexHome,
-      offset: String(offset),
-      limit: String(limit),
-      kind: "user",
-      source: "rollout",
-      search: ""
-    });
-    const logs = await fetchJson<ThreadLogs>(`/api/threads/${thread.id}/logs?${params.toString()}`);
-    latestLogs = logs;
-    allEntries.push(...logs.entries);
-    if (!logs.hasMore) break;
-    offset += limit;
-  }
-
-  if (!latestLogs) {
-    throw new ApiError("No prompt log entries were returned by the local connector.", 404);
-  }
-
-  return threadPromptsFromLogs(thread, latestLogs, allEntries);
+function createPromptRequestId(kind: "page" | "copy", threadId: string, sequence: number): string {
+  const randomId = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${kind}-${threadId}-${sequence}-${randomId}`;
 }
 
-async function fetchThreadPromptsFromLocalApi(thread: ThreadRecord, codexHome: string, language: Language): Promise<ThreadPrompts> {
+async function cancelThreadPromptRequest(threadId: string, requestId: string, codexHome: string): Promise<void> {
   const params = new URLSearchParams({ codex_home: codexHome });
+  const path = `/api/threads/${encodeURIComponent(threadId)}/prompts/requests/${encodeURIComponent(requestId)}?${params.toString()}`;
+  const resolvedUrl = resolveApiUrl(path);
+  await fetch(resolvedUrl, apiRequestOptions(resolvedUrl, {
+    method: "DELETE",
+    cache: "no-store",
+    keepalive: true
+  })).catch(() => undefined);
+}
+
+async function fetchThreadPromptCopyStream(
+  thread: ThreadRecord,
+  codexHome: string,
+  options: {
+    scope: string;
+    search: string;
+    sourceType?: string | null;
+    format: "text" | "jsonl";
+    requestId: string;
+  },
+  signal: AbortSignal
+): Promise<Response> {
+  const params = new URLSearchParams({
+    codex_home: codexHome,
+    scope: options.scope,
+    search: options.search,
+    format: options.format,
+    requestId: options.requestId
+  });
+  if (options.sourceType) params.set("sourceType", options.sourceType);
+  const path = `/api/threads/${thread.id}/prompts/copy?${params.toString()}`;
+  const resolvedUrl = resolveApiUrl(path);
+  const response = await fetch(resolvedUrl, apiRequestOptions(resolvedUrl, {
+    cache: "no-store",
+    signal
+  }));
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new ApiError(payload.detail || response.statusText, response.status);
+  }
+  return response;
+}
+
+async function readPromptCopyStream(response: Response, signal: AbortSignal): Promise<string> {
+  if (!response.body) return await response.text();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
   try {
-    return await fetchJson<ThreadPrompts>(`/api/threads/${thread.id}/prompts?${params.toString()}`);
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 404) throw error;
-    try {
-      return await fetchThreadPromptsFromLogs(thread, codexHome);
-    } catch {
-      throw new ApiError(
-        language === "en"
-          ? "The running local connector is too old to expose thread prompts. Restart or download the latest Codex Home Manager local connector, then try again."
-          : "当前运行的本机连接器版本过旧，未暴露线程 prompts 接口。请重启或下载最新 Codex Home Manager 本机连接器后再试。",
-        404
-      );
+    while (true) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
     }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -5305,13 +5324,23 @@ function ApiModule({ capabilities }: { capabilities: CapabilityResponse | null }
       }
     }
   }, null, 2);
-  const mcpPreviewCall = JSON.stringify({
+  const mcpAuthCall = JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
     params: {
+      name: "codex_auth_token",
+      arguments: {}
+    }
+  }, null, 2);
+  const mcpPreviewCall = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
       name: "codex_preview_thread_action",
       arguments: {
+        apiToken: "LOCAL_TOKEN",
         threadId: "THREAD_ID",
         action: "show"
       }
@@ -5319,7 +5348,7 @@ function ApiModule({ capabilities }: { capabilities: CapabilityResponse | null }
   }, null, 2);
   const mcpWriteCall = JSON.stringify({
     jsonrpc: "2.0",
-    id: 2,
+    id: 3,
     method: "tools/call",
     params: {
       name: "codex_show_thread",
@@ -5359,7 +5388,7 @@ function ApiModule({ capabilities }: { capabilities: CapabilityResponse | null }
         <div>
           <Code2 size={22} />
           <h3>{t("MCP 优先接入")}</h3>
-          <p>{t("把本地连接器作为 streamable HTTP MCP server 注册。agent 先 tools/list，再按工具 schema 调用；写入前先用对应 preview 工具取得 operationPreviewId 和 inputHash。")}</p>
+          <p>{t("把本地连接器作为 streamable HTTP MCP server 注册。agent 可先 tools/list 发现能力；调用任何数据工具前，先调用 codex_auth_token，并把返回的短期 token 作为 apiToken 传给其他工具。")}</p>
         </div>
         <section className="api-code-block">
           <h3>{t("MCP 配置")}</h3>
@@ -5370,7 +5399,8 @@ function ApiModule({ capabilities }: { capabilities: CapabilityResponse | null }
       <div className="api-safety">
         <section>
           <h3>{t("写入安全模型")}</h3>
-          <p>{writeGate || t("MCP 写工具同样需要 apiToken、operationPreviewId、inputHash；Codex 正在运行时还需要 acknowledgeCodexRunningRisk=true。")}</p>
+          <p>{t("除 codex_auth_token 外，所有 MCP 工具都需要短期 apiToken。预览绑定的写工具还需要 operationPreviewId 和 inputHash；Codex 正在运行时还需要 acknowledgeCodexRunningRisk=true。")}</p>
+          {writeGate ? <p>{writeGate}</p> : null}
           <code>acknowledgeCodexRunningRisk=true</code>
         </section>
         <section>
@@ -5382,11 +5412,11 @@ function ApiModule({ capabilities }: { capabilities: CapabilityResponse | null }
       <div className="api-examples">
         <section>
           <h3>{t("MCP 工具调用")}</h3>
-          <pre>{`POST ${mcpUrl}\n\n${mcpPreviewCall}`}</pre>
+          <pre>{`POST ${mcpUrl}\n\n${mcpAuthCall}\n\n${mcpPreviewCall}`}</pre>
         </section>
         <section>
           <h3>{t("先预览再写入")}</h3>
-          <p>{t("示例先预览显示线程，再把返回的 operationPreviewId 和 inputHash 传给写工具。")}</p>
+          <p>{t("示例先获取短期 apiToken，再用它预览显示线程，最后把返回的 operationPreviewId 和 inputHash 传给写工具。")}</p>
           <pre>{mcpWriteCall}</pre>
         </section>
         <section>
@@ -5782,33 +5812,94 @@ function ThreadTimelinePanel({
   );
 }
 
+type PromptSearchMatch = { start: number; end: number };
+
+const promptSearchSegmenter = new Intl.Segmenter("und", { granularity: "grapheme" });
+
+function foldPromptSearchText(text: string): string {
+  return Array.from(promptSearchSegmenter.segment(text), ({ segment }) => (
+    segment.normalize("NFD").toLocaleLowerCase("und").replace(/\p{M}/gu, "")
+  )).join("");
+}
+
+function findPromptSearchMatches(text: string, query: string): PromptSearchMatch[] {
+  const foldedQuery = foldPromptSearchText(query.trim());
+  if (!foldedQuery) return [];
+
+  const ranges: Array<{ foldedStart: number; foldedEnd: number; originalStart: number; originalEnd: number }> = [];
+  let foldedText = "";
+  for (const { segment, index } of promptSearchSegmenter.segment(text)) {
+    const foldedSegment = foldPromptSearchText(segment);
+    if (!foldedSegment) continue;
+    const foldedStart = foldedText.length;
+    foldedText += foldedSegment;
+    ranges.push({
+      foldedStart,
+      foldedEnd: foldedText.length,
+      originalStart: index,
+      originalEnd: index + segment.length
+    });
+  }
+
+  const matches: PromptSearchMatch[] = [];
+  let searchFrom = 0;
+  let foldedMatchIndex = foldedText.indexOf(foldedQuery, searchFrom);
+  while (foldedMatchIndex >= 0) {
+    const foldedMatchEnd = foldedMatchIndex + foldedQuery.length;
+    const firstRange = ranges.find((range) => range.foldedEnd > foldedMatchIndex);
+    let lastRange: (typeof ranges)[number] | undefined;
+    for (let rangeIndex = ranges.length - 1; rangeIndex >= 0; rangeIndex -= 1) {
+      if (ranges[rangeIndex].foldedStart < foldedMatchEnd) {
+        lastRange = ranges[rangeIndex];
+        break;
+      }
+    }
+    if (firstRange && lastRange) {
+      matches.push({ start: firstRange.originalStart, end: lastRange.originalEnd });
+    }
+    searchFrom = foldedMatchEnd;
+    foldedMatchIndex = foldedText.indexOf(foldedQuery, searchFrom);
+  }
+  return matches;
+}
+
 function highlightPromptSearchMatch(text: string, query: string): React.ReactNode {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return text;
-  const normalizedText = text.toLocaleLowerCase();
+  const matches = findPromptSearchMatches(text, query);
+  if (!matches.length) return text;
   const fragments: React.ReactNode[] = [];
   let cursor = 0;
-  let matchIndex = normalizedText.indexOf(normalizedQuery);
-  while (matchIndex >= 0) {
-    if (matchIndex > cursor) fragments.push(text.slice(cursor, matchIndex));
-    fragments.push(<mark key={`${matchIndex}-${fragments.length}`}>{text.slice(matchIndex, matchIndex + normalizedQuery.length)}</mark>);
-    cursor = matchIndex + normalizedQuery.length;
-    matchIndex = normalizedText.indexOf(normalizedQuery, cursor);
+  for (const match of matches) {
+    if (match.start > cursor) fragments.push(text.slice(cursor, match.start));
+    fragments.push(<mark key={`${match.start}-${match.end}`}>{text.slice(match.start, match.end)}</mark>);
+    cursor = match.end;
   }
   if (cursor < text.length) fragments.push(text.slice(cursor));
-  return fragments.length ? fragments : text;
+  return fragments;
+}
+
+function mergePromptRecords(current: PromptRecord[], incoming: PromptRecord[], replace: boolean): PromptRecord[] {
+  if (replace) return incoming.map((prompt) => normalizePromptRecord(prompt));
+  const recordsByIndex = new Map(current.map((prompt) => [prompt.index, prompt]));
+  for (const prompt of incoming) recordsByIndex.set(prompt.index, normalizePromptRecord(prompt));
+  return Array.from(recordsByIndex.values()).sort((left, right) => left.index - right.index);
 }
 
 function PromptVirtualList({
   prompts,
   filterMode,
   searchQuery,
-  activeSearchIndex
+  activeSearchIndex,
+  hasMore,
+  isLoadingMore,
+  onLoadMore
 }: {
   prompts: PromptRecord[];
   filterMode: PromptFilterMode;
   searchQuery: string;
   activeSearchIndex: number;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
 }) {
   const { t } = useI18n();
   const parentRef = React.useRef<HTMLDivElement>(null);
@@ -5824,7 +5915,16 @@ function PromptVirtualList({
     virtualizer.scrollToIndex(activeSearchIndex, { align: "center" });
   }, [activeSearchIndex, prompts.length, virtualizer]);
   return (
-    <div ref={parentRef} className="prompt-list" tabIndex={0} aria-label={t("Prompt 内容列表")}>
+    <div
+      ref={parentRef}
+      className="prompt-list"
+      tabIndex={0}
+      aria-label={t("Prompt 内容列表")}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        if (hasMore && !isLoadingMore && element.scrollHeight - element.scrollTop - element.clientHeight < 480) onLoadMore();
+      }}
+    >
       <div className="prompt-virtual-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const prompt = prompts[virtualRow.index];
@@ -5845,31 +5945,29 @@ function PromptVirtualList({
           );
         })}
       </div>
+      {hasMore || isLoadingMore ? (
+        <div className="prompt-page-footer" role="status" aria-live="polite">
+          <button type="button" onClick={onLoadMore} disabled={isLoadingMore}>
+            {isLoadingMore ? t("正在加载更多...") : t("加载更多")}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function ThreadPromptModal({
   thread,
-  prompts,
-  isLoading,
-  error,
   codexHome,
   browserWorkspace,
-  onLoadPrompts,
   onClose
 }: {
   thread: ThreadRecord | null;
-  prompts: ThreadPrompts | null;
-  isLoading: boolean;
-  error: string;
   codexHome: string;
   browserWorkspace: BrowserCodexWorkspace | null;
-  onLoadPrompts: () => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const dialogRef = useModalAccessibility(Boolean(thread), onClose);
   const [copied, setCopied] = React.useState(false);
   const [filterMode, setFilterMode] = React.useState<PromptFilterMode>("pure");
   const [copyMode, setCopyMode] = React.useState<PromptCopyMode>("clean");
@@ -5878,11 +5976,67 @@ function ThreadPromptModal({
   const [promptSearchText, setPromptSearchText] = React.useState("");
   const [promptSearchQuery, setPromptSearchQuery] = React.useState("");
   const [activePromptSearchIndex, setActivePromptSearchIndex] = React.useState(-1);
+  const [browserPrompts, setBrowserPrompts] = React.useState<ThreadPrompts | null>(null);
+  const [localPromptPage, setLocalPromptPage] = React.useState<ThreadPromptPage | null>(null);
+  const [localNextCursor, setLocalNextCursor] = React.useState<string | null>(null);
+  const [promptsLoading, setPromptsLoading] = React.useState(false);
+  const [promptsLoadingMore, setPromptsLoadingMore] = React.useState(false);
+  const [promptsError, setPromptsError] = React.useState("");
+  const [copyingPrompts, setCopyingPrompts] = React.useState(false);
   const promptSearchInputRef = React.useRef<HTMLInputElement>(null);
+  const browserPromptSequenceRef = React.useRef(0);
+  const promptPageSequenceRef = React.useRef(0);
+  const promptPageRequestRef = React.useRef<{
+    sequence: number;
+    threadId: string;
+    requestId: string;
+    controller: AbortController;
+  } | null>(null);
+  const promptCopySequenceRef = React.useRef(0);
+  const promptCopyRequestRef = React.useRef<{
+    sequence: number;
+    threadId: string;
+    requestId: string;
+    controller: AbortController;
+  } | null>(null);
+  const promptScanTimerRef = React.useRef<number | null>(null);
+  const promptNextCursorRef = React.useRef<string | null>(null);
+  const promptLoadedAdditionalPagesRef = React.useRef(false);
+  const promptLoadingMoreRef = React.useRef(false);
+  const loadedPromptsRef = React.useRef<PromptRecord[]>([]);
+  const loadMorePromptsRef = React.useRef<() => Promise<number>>(async () => 0);
+  const clearSearchOnEscape = React.useCallback(() => {
+    if (!promptSearchText) return false;
+    setPromptSearchText("");
+    setPromptSearchQuery("");
+    setActivePromptSearchIndex(-1);
+    window.requestAnimationFrame(() => promptSearchInputRef.current?.focus());
+    return true;
+  }, [promptSearchText]);
+  const dialogRef = useModalAccessibility(Boolean(thread), onClose, clearSearchOnEscape);
+  const currentBrowserPrompts = browserPrompts?.threadId === thread?.id ? browserPrompts : null;
+  const isBrowserPromptMode = Boolean(browserWorkspace);
+
+  const cancelActivePageRequest = React.useCallback(() => {
+    const request = promptPageRequestRef.current;
+    if (!request) return;
+    promptPageRequestRef.current = null;
+    request.controller.abort();
+    void cancelThreadPromptRequest(request.threadId, request.requestId, codexHome);
+  }, [codexHome]);
+
+  const cancelActiveCopyRequest = React.useCallback(() => {
+    const request = promptCopyRequestRef.current;
+    if (!request) return;
+    promptCopyRequestRef.current = null;
+    request.controller.abort();
+    setCopyingPrompts(false);
+    void cancelThreadPromptRequest(request.threadId, request.requestId, codexHome);
+  }, [codexHome]);
 
   React.useEffect(() => {
     setCopied(false);
-  }, [thread?.id, prompts?.promptCount]);
+  }, [thread?.id, currentBrowserPrompts?.promptCount, localPromptPage?.matchCount]);
 
   React.useEffect(() => {
     setFilterMode("pure");
@@ -5892,6 +6046,12 @@ function ThreadPromptModal({
     setPromptSearchText("");
     setPromptSearchQuery("");
     setActivePromptSearchIndex(-1);
+    setBrowserPrompts(null);
+    loadedPromptsRef.current = [];
+    setLocalPromptPage(null);
+    setLocalNextCursor(null);
+    promptNextCursorRef.current = null;
+    setPromptsError("");
   }, [thread?.id]);
 
   React.useEffect(() => {
@@ -5915,37 +6075,214 @@ function ThreadPromptModal({
     setCopied(false);
   }, [copyMode, copySpacingMode, filterMode]);
 
+  const activePromptScope = promptScopeForFilter(filterMode);
+
+  React.useEffect(() => {
+    if (!thread || !browserWorkspace || contentMode !== "prompts") return undefined;
+    const sequence = browserPromptSequenceRef.current + 1;
+    browserPromptSequenceRef.current = sequence;
+    const controller = new AbortController();
+    const threadId = thread.id;
+    setPromptsLoading(true);
+    setPromptsError("");
+    void readBrowserThreadPrompts(browserWorkspace, threadId)
+      .then((result) => {
+        if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return;
+        const prompts = result as ThreadPrompts;
+        if (prompts.threadId !== threadId) throw new Error(t("prompt 响应属于其他线程，已丢弃。"));
+        setBrowserPrompts(prompts);
+      })
+      .catch((loadError) => {
+        if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return;
+        setPromptsError(loadError instanceof Error ? loadError.message : String(loadError));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && browserPromptSequenceRef.current === sequence) setPromptsLoading(false);
+      });
+    return () => {
+      controller.abort();
+      if (browserPromptSequenceRef.current === sequence) browserPromptSequenceRef.current += 1;
+    };
+  }, [browserWorkspace, contentMode, t, thread]);
+
+  React.useEffect(() => {
+    if (!thread || browserWorkspace || contentMode !== "prompts") return undefined;
+    const threadId = thread.id;
+    const search = promptSearchQuery;
+    const scope = activePromptScope;
+    const querySequence = promptPageSequenceRef.current + 1;
+    promptPageSequenceRef.current = querySequence;
+    let disposed = false;
+    promptLoadedAdditionalPagesRef.current = false;
+    promptNextCursorRef.current = null;
+    loadedPromptsRef.current = [];
+    setLocalPromptPage(null);
+    setLocalNextCursor(null);
+    setPromptsError("");
+    setPromptsLoading(true);
+    setPromptsLoadingMore(false);
+
+    const ownsQuery = () => !disposed && promptPageSequenceRef.current === querySequence;
+
+    const applyPage = (page: ThreadPromptPage, mode: "initial" | "scan" | "more"): number => {
+      const beforeCount = loadedPromptsRef.current.length;
+      const merged = mergePromptRecords(loadedPromptsRef.current, page.prompts, mode === "initial");
+      loadedPromptsRef.current = merged;
+      setLocalPromptPage({ ...page, prompts: merged });
+      if (mode === "more") {
+        promptLoadedAdditionalPagesRef.current = true;
+        promptNextCursorRef.current = page.nextCursor || null;
+        setLocalNextCursor(page.nextCursor || null);
+      } else if (!promptLoadedAdditionalPagesRef.current) {
+        promptNextCursorRef.current = page.nextCursor || null;
+        setLocalNextCursor(page.nextCursor || null);
+      }
+      return Math.max(0, merged.length - beforeCount);
+    };
+
+    const requestPage = async (cursor: string | null, mode: "initial" | "scan" | "more"): Promise<{ page: ThreadPromptPage; added: number } | null> => {
+      if (!ownsQuery()) return null;
+      cancelActivePageRequest();
+      const controller = new AbortController();
+      const requestId = createPromptRequestId("page", threadId, querySequence);
+      const request = { sequence: querySequence, threadId, requestId, controller };
+      promptPageRequestRef.current = request;
+      if (mode === "more") {
+        promptLoadingMoreRef.current = true;
+        setPromptsLoadingMore(true);
+      }
+      try {
+        const page = await fetchThreadPromptPageFromLocalApi(thread, codexHome, {
+          cursor,
+          limit: 60,
+          search,
+          scope,
+          scanBudgetMs: 75,
+          requestId
+        }, controller.signal);
+        const ownsRequest = ownsQuery() && !controller.signal.aborted && promptPageRequestRef.current === request;
+        if (!ownsRequest) return null;
+        if (page.threadId !== threadId || page.requestId !== requestId || page.scope !== scope || page.search !== search) {
+          throw new Error(t("prompt 响应与当前线程或筛选条件不一致，已丢弃。"));
+        }
+        return { page, added: applyPage(page, mode) };
+      } catch (loadError) {
+        const ownsRequest = ownsQuery() && promptPageRequestRef.current === request;
+        if (ownsRequest && !controller.signal.aborted && !(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setPromptsError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+        return null;
+      } finally {
+        if (promptPageRequestRef.current === request) {
+          promptPageRequestRef.current = null;
+          if (mode === "more") {
+            promptLoadingMoreRef.current = false;
+            setPromptsLoadingMore(false);
+          }
+          if (mode === "initial") setPromptsLoading(false);
+        }
+      }
+    };
+
+    function scheduleIndexScan() {
+      if (!ownsQuery()) return;
+      if (promptScanTimerRef.current !== null) window.clearTimeout(promptScanTimerRef.current);
+      promptScanTimerRef.current = window.setTimeout(() => {
+        promptScanTimerRef.current = null;
+        void continueIndexScan(false);
+      }, 35);
+    }
+
+    async function continueIndexScan(initial: boolean) {
+      const result = await requestPage(null, initial ? "initial" : "scan");
+      if (result && !result.page.matchCountComplete) scheduleIndexScan();
+    }
+
+    loadMorePromptsRef.current = async () => {
+      if (!ownsQuery() || promptLoadingMoreRef.current) return 0;
+      if (promptScanTimerRef.current !== null) {
+        window.clearTimeout(promptScanTimerRef.current);
+        promptScanTimerRef.current = null;
+      }
+      const cursor = promptNextCursorRef.current;
+      if (!cursor) return 0;
+      const result = await requestPage(cursor, "more");
+      if (result && !result.page.matchCountComplete) scheduleIndexScan();
+      return result?.added || 0;
+    };
+
+    void continueIndexScan(true);
+    return () => {
+      disposed = true;
+      promptPageSequenceRef.current += 1;
+      if (promptScanTimerRef.current !== null) {
+        window.clearTimeout(promptScanTimerRef.current);
+        promptScanTimerRef.current = null;
+      }
+      cancelActivePageRequest();
+      promptLoadingMoreRef.current = false;
+      setPromptsLoading(false);
+      setPromptsLoadingMore(false);
+      loadMorePromptsRef.current = async () => 0;
+    };
+  }, [activePromptScope, browserWorkspace, cancelActivePageRequest, codexHome, contentMode, promptSearchQuery, t, thread]);
+
+  React.useEffect(() => () => cancelActiveCopyRequest(), [activePromptScope, cancelActiveCopyRequest, promptSearchQuery, thread?.id]);
+
   function showPrompts() {
     setContentMode("prompts");
-    if (!prompts && !isLoading) onLoadPrompts();
   }
 
+  const currentLocalPage = localPromptPage
+    && localPromptPage.threadId === thread?.id
+    && localPromptPage.scope === activePromptScope
+    && localPromptPage.search === promptSearchQuery
+    ? localPromptPage
+    : null;
   const normalizedPrompts = React.useMemo(
-    () => (prompts?.prompts || []).map((prompt) => normalizePromptRecord(prompt)),
-    [prompts]
+    () => ((isBrowserPromptMode ? currentBrowserPrompts?.prompts : currentLocalPage?.prompts) || []).map((prompt) => normalizePromptRecord(prompt)),
+    [currentBrowserPrompts, currentLocalPage, isBrowserPromptMode]
   );
-  const purePromptCount = prompts?.purePromptCount ?? normalizedPrompts.filter((prompt) => prompt.hasPureText).length;
-  const visiblePromptCount = normalizedPrompts.filter((prompt) => prompt.visibleByDefault !== false).length;
-  const subagentPromptCount = normalizedPrompts.filter((prompt) => prompt.sourceType === "subagent").length;
-  const automationPromptCount = normalizedPrompts.filter((prompt) => prompt.sourceType === "automation").length;
-  const delegationPromptCount = normalizedPrompts.filter((prompt) => prompt.sourceType === "delegation").length;
-  const internalPromptCount = normalizedPrompts.filter((prompt) => prompt.sourceType === "internal").length;
-  const goalPromptCount = normalizedPrompts.filter((prompt) => prompt.sourceType === "goal").length;
-  const sourceCounts = prompts?.sourceCounts || promptSourceCounts(normalizedPrompts);
+  const purePromptCount = isBrowserPromptMode
+    ? currentBrowserPrompts?.purePromptCount ?? normalizedPrompts.filter((prompt) => prompt.hasPureText).length
+    : currentLocalPage?.purePromptCount || 0;
+  const visiblePromptCount = isBrowserPromptMode
+    ? currentBrowserPrompts?.visiblePromptCount ?? normalizedPrompts.filter((prompt) => prompt.visibleByDefault !== false).length
+    : currentLocalPage?.visiblePromptCount || 0;
+  const sourceCounts = (isBrowserPromptMode ? currentBrowserPrompts?.sourceCounts : currentLocalPage?.sourceCounts) || promptSourceCounts(normalizedPrompts);
+  const subagentPromptCount = sourceCounts.subagent || 0;
+  const automationPromptCount = sourceCounts.automation || 0;
+  const delegationPromptCount = sourceCounts.delegation || 0;
+  const internalPromptCount = sourceCounts.internal || 0;
+  const goalPromptCount = sourceCounts.goal || 0;
   const filteredPrompts = React.useMemo(
-    () => normalizedPrompts.filter((prompt) => promptMatchesFilter(prompt, filterMode)),
-    [filterMode, normalizedPrompts]
+    () => isBrowserPromptMode ? normalizedPrompts.filter((prompt) => promptMatchesFilter(prompt, filterMode)) : normalizedPrompts,
+    [filterMode, isBrowserPromptMode, normalizedPrompts]
   );
   const searchedPrompts = React.useMemo(() => {
-    const normalizedQuery = promptSearchQuery.toLocaleLowerCase();
-    if (!normalizedQuery) return filteredPrompts;
-    return filteredPrompts.filter((prompt) => promptTextForFilter(prompt, filterMode).toLocaleLowerCase().includes(normalizedQuery));
-  }, [filterMode, filteredPrompts, promptSearchQuery]);
-  const hiddenByFilterCount = Math.max(0, normalizedPrompts.length - filteredPrompts.length);
+    if (!isBrowserPromptMode) return filteredPrompts;
+    if (!foldPromptSearchText(promptSearchQuery)) return filteredPrompts;
+    return filteredPrompts.filter((prompt) => findPromptSearchMatches(promptTextForFilter(prompt, filterMode), promptSearchQuery).length > 0);
+  }, [filterMode, filteredPrompts, isBrowserPromptMode, promptSearchQuery]);
+  const promptMatchCount = isBrowserPromptMode ? searchedPrompts.length : currentLocalPage?.matchCount || 0;
+  const promptMatchCountComplete = isBrowserPromptMode || Boolean(currentLocalPage?.matchCountComplete);
+  const promptsHaveMore = !isBrowserPromptMode && Boolean(currentLocalPage?.hasMore && localNextCursor);
+  const promptDataReady = isBrowserPromptMode ? Boolean(currentBrowserPrompts) : Boolean(currentLocalPage);
+  const hiddenByFilterCount = isBrowserPromptMode
+    ? Math.max(0, normalizedPrompts.length - filteredPrompts.length)
+    : Math.max(0, (currentLocalPage?.promptCount || 0) - promptMatchCount);
 
   React.useEffect(() => {
     setActivePromptSearchIndex(promptSearchQuery && searchedPrompts.length ? 0 : -1);
-  }, [filterMode, promptSearchQuery, searchedPrompts.length]);
+  }, [filterMode, promptSearchQuery, thread?.id]);
+
+  React.useEffect(() => {
+    setActivePromptSearchIndex((current) => {
+      if (!promptSearchQuery || !searchedPrompts.length) return -1;
+      if (current < 0) return 0;
+      return Math.min(current, searchedPrompts.length - 1);
+    });
+  }, [promptSearchQuery, searchedPrompts.length]);
   const filterOptions: Array<{ value: PromptFilterMode; label: string; count: number; description: string }> = [
     {
       value: "pure",
@@ -5980,7 +6317,7 @@ function ThreadPromptModal({
     {
       value: "all",
       label: t("全部"),
-      count: normalizedPrompts.length,
+      count: isBrowserPromptMode ? normalizedPrompts.length : currentLocalPage?.promptCount || 0,
       description: t("显示所有用户角色记录")
     }
   ];
@@ -6003,13 +6340,12 @@ function ThreadPromptModal({
       const next = current === "timeline"
         ? (direction > 0 ? "prompts" : "prompts")
         : (direction > 0 ? "timeline" : "timeline");
-      if (next === "prompts" && !prompts && !isLoading) onLoadPrompts();
       window.requestAnimationFrame(() => document.getElementById(`thread-content-tab-${next}`)?.focus());
       return next;
     });
   }
 
-  const allPromptText = filteredPrompts.map((prompt) => {
+  const allPromptText = searchedPrompts.map((prompt) => {
     const rawPromptText = copyMode === "clean" ? promptTextForCleanCopy(prompt) : promptTextForFilter(prompt, filterMode).trim();
     const promptText = copySpacingMode === "compact" ? removeBlankLines(rawPromptText) : rawPromptText;
     if (!promptText) return "";
@@ -6025,18 +6361,86 @@ function ThreadPromptModal({
   ) || "";
 
   async function copyAllPrompts() {
-    if (!allPromptText) return;
+    if (isBrowserPromptMode) {
+      if (!allPromptText) return;
+      try {
+        await copyTextToClipboard(allPromptText);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1600);
+      } catch {
+        setCopied(false);
+      }
+      return;
+    }
+    if (!thread) return;
+    cancelActiveCopyRequest();
+    const sequence = promptCopySequenceRef.current + 1;
+    promptCopySequenceRef.current = sequence;
+    const controller = new AbortController();
+    const requestId = createPromptRequestId("copy", thread.id, sequence);
+    const request = { sequence, threadId: thread.id, requestId, controller };
+    promptCopyRequestRef.current = request;
+    setCopyingPrompts(true);
+    setPromptsError("");
     try {
-      await copyTextToClipboard(allPromptText);
+      const format = copyMode === "metadata" ? "jsonl" : "text";
+      const response = await fetchThreadPromptCopyStream(thread, codexHome, {
+        scope: activePromptScope,
+        search: promptSearchQuery,
+        format,
+        requestId
+      }, controller.signal);
+      const streamedText = await readPromptCopyStream(response, controller.signal);
+      if (controller.signal.aborted || promptCopyRequestRef.current !== request || promptCopySequenceRef.current !== sequence) return;
+      let clipboardText = streamedText;
+      if (copyMode === "metadata") {
+        const records = streamedText.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as PromptRecord & { exportText?: string });
+        clipboardText = records.map((prompt) => {
+          const rawPromptText = typeof prompt.exportText === "string" ? prompt.exportText : prompt.text;
+          const promptText = copySpacingMode === "compact" ? removeBlankLines(rawPromptText) : rawPromptText;
+          return (
+            `## Prompt ${prompt.index}\n\n` +
+            `${t("行")} ${prompt.lineNumber}${prompt.timestamp ? ` | ${prompt.timestamp}` : ""}` +
+            `${prompt.sourceLabel ? ` | ${prompt.sourceLabel}` : ""}\n\n` +
+            promptText
+          );
+        }).join(copySpacingMode === "compact" ? "\n---\n" : "\n\n---\n\n");
+      } else if (copySpacingMode === "compact") {
+        clipboardText = removeBlankLines(streamedText);
+      }
+      if (!clipboardText) return;
+      await copyTextToClipboard(clipboardText);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
-    } catch {
+    } catch (copyError) {
+      if (!controller.signal.aborted && promptCopyRequestRef.current === request) {
+        setPromptsError(copyError instanceof Error ? copyError.message : String(copyError));
+      }
       setCopied(false);
+    } finally {
+      if (promptCopyRequestRef.current === request) {
+        promptCopyRequestRef.current = null;
+        setCopyingPrompts(false);
+      }
     }
   }
 
-  function selectPromptSearchResult(direction: -1 | 1) {
-    if (!searchedPrompts.length) return;
+  async function selectPromptSearchResult(direction: -1 | 1) {
+    if (!searchedPrompts.length) {
+      if (direction > 0 && promptsHaveMore) {
+        const added = await loadMorePromptsRef.current();
+        if (added > 0) setActivePromptSearchIndex(0);
+      }
+      return;
+    }
+    const currentIndex = activePromptSearchIndex < 0 ? 0 : activePromptSearchIndex;
+    if (direction > 0 && currentIndex >= searchedPrompts.length - 1 && promptsHaveMore) {
+      const previousLength = searchedPrompts.length;
+      const added = await loadMorePromptsRef.current();
+      if (added > 0) setActivePromptSearchIndex(previousLength);
+      return;
+    }
+    if (direction < 0 && currentIndex === 0 && promptsHaveMore) return;
     setActivePromptSearchIndex((current) => {
       if (current < 0) return direction > 0 ? 0 : searchedPrompts.length - 1;
       return (current + direction + searchedPrompts.length) % searchedPrompts.length;
@@ -6080,11 +6484,17 @@ function ThreadPromptModal({
 
         <div id="thread-content-panel-prompts" role="tabpanel" aria-labelledby="thread-content-tab-prompts" hidden={contentMode !== "prompts"} className="prompt-view"><div className="prompt-modal-toolbar">
           <div className="prompt-modal-summary">
-            <strong>{formatCount(filteredPrompts.length)}</strong>
-            <span>{t("当前显示")}</span>
-            <span>{t("总计")} {formatCount(normalizedPrompts.length)}</span>
+            <strong>{formatCount(searchedPrompts.length)}</strong>
+            <span>{t("条已加载")}</span>
+            <span className={promptMatchCountComplete ? "prompt-index-complete" : "prompt-index-scanning"}>
+              {promptMatchCountComplete ? t("匹配数完整") : t("扫描中")} · {formatCount(promptMatchCount)}
+            </span>
             {hiddenByFilterCount ? <span>{t("已隐藏")} {formatCount(hiddenByFilterCount)}</span> : null}
-            {prompts?.rolloutPath ? <code title={prompts.rolloutPath}>{prompts.rolloutPath}</code> : null}
+            {(currentBrowserPrompts?.rolloutPath || currentLocalPage?.rolloutPath) ? (
+              <code title={currentBrowserPrompts?.rolloutPath || currentLocalPage?.rolloutPath}>
+                {currentBrowserPrompts?.rolloutPath || currentLocalPage?.rolloutPath}
+              </code>
+            ) : null}
           </div>
           <div className="prompt-copy-actions">
             <div className="prompt-copy-mode" role="group" aria-label={t("复制格式")}>
@@ -6125,9 +6535,14 @@ function ThreadPromptModal({
                 {t("无空行")}
               </button>
             </div>
-            <button className="prompt-copy-button" onClick={() => void copyAllPrompts()} disabled={!allPromptText || isLoading} type="button">
+            <button
+              className="prompt-copy-button"
+              onClick={() => void copyAllPrompts()}
+              disabled={copyingPrompts || (isBrowserPromptMode && !allPromptText)}
+              type="button"
+            >
               <Copy size={15} />
-              {copied ? t("已复制") : copyMode === "metadata" ? t("复制带元信息") : t("复制干净文本")}
+              {copyingPrompts ? t("正在流式读取...") : copied ? t("已复制") : copyMode === "metadata" ? t("复制带元信息") : t("复制干净文本")}
             </button>
           </div>
         </div>
@@ -6161,11 +6576,7 @@ function ThreadPromptModal({
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
-                selectPromptSearchResult(event.shiftKey ? -1 : 1);
-              } else if (event.key === "Escape" && promptSearchText) {
-                event.preventDefault();
-                event.stopPropagation();
-                clearPromptSearch();
+                void selectPromptSearchResult(event.shiftKey ? -1 : 1);
               }
             }}
             placeholder={t("搜索当前筛选的全部内容")}
@@ -6175,22 +6586,22 @@ function ThreadPromptModal({
           <span className="prompt-search-count" role="status" aria-live="polite">
             {promptSearchQuery
               ? searchedPrompts.length
-                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(searchedPrompts.length)}`
-                : t("没有匹配内容")
-              : `${formatCount(filteredPrompts.length)} ${t("条可搜索")}`}
+                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(promptMatchCount)} · ${promptMatchCountComplete ? t("完整") : t("扫描中")}`
+                : promptMatchCountComplete ? t("没有匹配内容") : `${t("扫描中")} · 0`
+              : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${promptMatchCountComplete ? t("完整") : t("扫描中")}`}
           </span>
-          <button onClick={() => selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
-          <button onClick={() => selectPromptSearchResult(1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={16} /></button>
+          <button onClick={() => void selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
+          <button onClick={() => void selectPromptSearchResult(1)} disabled={!promptSearchQuery || (!searchedPrompts.length && !promptsHaveMore)} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={16} /></button>
           <button onClick={clearPromptSearch} disabled={!promptSearchText} title={t("清空搜索")} aria-label={t("清空搜索")} type="button"><X size={16} /></button>
         </div>
 
         <div className="prompt-modal-content">
-          {error ? <div className="inline-error" role="alert">{error}</div> : null}
-          {isLoading ? <div className="panel-loading" role="status" aria-live="polite">{t("读取 prompts...")}</div> : null}
-          {!isLoading && prompts ? (
+          {promptsError ? <div className="inline-error" role="alert">{promptsError}</div> : null}
+          {promptsLoading && !promptDataReady ? <div className="panel-loading" role="status" aria-live="polite">{t("读取 prompts...")}</div> : null}
+          {promptDataReady ? (
             searchedPrompts.length
-              ? <PromptVirtualList prompts={searchedPrompts} filterMode={filterMode} searchQuery={promptSearchQuery} activeSearchIndex={activePromptSearchIndex} />
-              : <div className="empty-state">{promptSearchQuery ? t("没有匹配内容") : normalizedPrompts.length ? t("当前筛选没有 prompt") : t("没有 prompt")}</div>
+              ? <PromptVirtualList prompts={searchedPrompts} filterMode={filterMode} searchQuery={promptSearchQuery} activeSearchIndex={activePromptSearchIndex} hasMore={promptsHaveMore} isLoadingMore={promptsLoadingMore} onLoadMore={() => void loadMorePromptsRef.current()} />
+              : <div className="empty-state">{promptMatchCountComplete ? promptSearchQuery ? t("没有匹配内容") : t("当前筛选没有 prompt") : t("正在扫描索引...")}</div>
           ) : null}
         </div></div>
         <div id="thread-content-panel-timeline" role="tabpanel" aria-labelledby="thread-content-tab-timeline" hidden={contentMode !== "timeline"} className="thread-timeline-view">
@@ -6436,9 +6847,6 @@ function App() {
   const logLimit = 80;
   const logRequestSequenceRef = React.useRef(0);
   const [promptThread, setPromptThread] = React.useState<ThreadRecord | null>(null);
-  const [threadPrompts, setThreadPrompts] = React.useState<ThreadPrompts | null>(null);
-  const [promptsLoading, setPromptsLoading] = React.useState(false);
-  const [promptsError, setPromptsError] = React.useState("");
 
   const [selectedResourcePath, setSelectedResourcePath] = React.useState("");
   const [resourceRead, setResourceRead] = React.useState<ResourceRead | null>(null);
@@ -6955,24 +7363,10 @@ function App() {
 
   async function handleViewPrompts(thread: ThreadRecord) {
     setPromptThread(thread);
-    setThreadPrompts(null);
-    setPromptsError("");
-    setPromptsLoading(false);
   }
 
-  async function loadPromptContent(thread: ThreadRecord) {
-    if (promptsLoading || threadPrompts?.threadId === thread.id) return;
-    setPromptsLoading(true);
-    try {
-      const result = browserWorkspace
-        ? await readBrowserThreadPrompts(browserWorkspace, thread.id) as ThreadPrompts
-        : await fetchThreadPromptsFromLocalApi(thread, codexHome, language);
-      setThreadPrompts(result);
-    } catch (error) {
-      setPromptsError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPromptsLoading(false);
-    }
+  function closePromptModal() {
+    setPromptThread(null);
   }
 
   async function handleDuplicate(thread: ThreadRecord) {
@@ -7516,13 +7910,9 @@ function App() {
         />
         <ThreadPromptModal
           thread={promptThread}
-          prompts={threadPrompts}
-          isLoading={promptsLoading}
-          error={promptsError}
           codexHome={codexHome}
           browserWorkspace={browserWorkspace}
-          onLoadPrompts={() => { if (promptThread) void loadPromptContent(promptThread); }}
-          onClose={() => { setPromptThread(null); setThreadPrompts(null); setPromptsError(""); }}
+          onClose={closePromptModal}
         />
       </section>
     </main>

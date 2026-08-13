@@ -6,7 +6,6 @@ import copy
 import hashlib
 import hmac
 import json
-import mmap
 import os
 import re
 import shutil
@@ -19,7 +18,7 @@ from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 try:
     from cryptography.exceptions import InvalidSignature, InvalidTag
@@ -32,6 +31,12 @@ except ImportError:  # pragma: no cover - exercised only by an incomplete runtim
     serialization = Ed25519PrivateKey = Ed25519PublicKey = AESGCM = Scrypt = None  # type: ignore[assignment]
 
 from .hidden_process import run_hidden_command
+from .prompt_index import (
+    iter_prompt_records,
+    prompt_index_database_path,
+    read_prompt_page,
+    update_prompt_index,
+)
 from .process_utils import list_windows_processes
 
 
@@ -5624,8 +5629,6 @@ def replace_paths_in_jsonl(path: Path, replacements: list[tuple[str, str]]) -> d
     return {"status": "applied" if replacement_count else "no_change", "replacementCount": replacement_count}
 
 
-prompt_index_cache: OrderedDict[tuple[str, int, int], list[dict[str, Any]]] = OrderedDict()
-prompt_index_cache_limit = 8
 prompt_candidate_pattern = re.compile(rb'"(?:type|role)"\s*:\s*"(?:user_message|user)"')
 
 
@@ -5669,74 +5672,147 @@ def prompt_is_cross_protocol_duplicate(
     return False
 
 
-def extract_user_prompts_from_rollout(rollout_path_text: str) -> list[dict[str, Any]]:
+def ensure_rollout_prompt_index(
+    codex_home_path: Path,
+    rollout_path: Path,
+    *,
+    max_scan_ms: int | None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    database_path = prompt_index_database_path(codex_home_path)
+    index_state = update_prompt_index(
+        database_path,
+        rollout_path,
+        candidate_check=lambda raw_line: prompt_candidate_pattern.search(raw_line) is not None,
+        extract_prompt=prompt_text_from_item,
+        classify_prompt=classify_prompt_record,
+        timestamp_to_ms=prompt_timestamp_ms,
+        is_duplicate=prompt_is_cross_protocol_duplicate,
+        max_scan_ms=max_scan_ms,
+        cancel_check=cancel_check,
+    )
+    return database_path, index_state
+
+
+def extract_user_prompts_from_rollout(
+    rollout_path_text: str,
+    codex_home_text: str | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> list[dict[str, Any]]:
     normalized_path = normalize_path_text(rollout_path_text)
-    prompts: list[dict[str, Any]] = []
     if not normalized_path or not Path(normalized_path).exists():
-        return prompts
-
+        return []
     rollout_path = Path(normalized_path)
-    stat = rollout_path.stat()
-    if stat.st_size == 0:
-        return prompts
-    cache_key = (str(rollout_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
-    cached_prompts = prompt_index_cache.get(cache_key)
-    if cached_prompts is not None:
-        prompt_index_cache.move_to_end(cache_key)
-        return copy.deepcopy(cached_prompts)
+    codex_home_path = (
+        resolve_codex_paths(codex_home_text).codex_home_path
+        if codex_home_text is not None
+        else rollout_path.parent
+    )
+    database_path, _ = ensure_rollout_prompt_index(
+        codex_home_path,
+        rollout_path,
+        max_scan_ms=None,
+        cancel_check=cancel_check,
+    )
+    return list(
+        iter_prompt_records(
+            database_path,
+            rollout_path,
+            scope="all",
+            cancel_check=cancel_check,
+        )
+    )
 
-    recent_prompts: list[tuple[str, int | None, str, int]] = []
-    with rollout_path.open("rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mapped_file:
-        candidate_line_starts: list[int] = []
-        seen_line_starts: set[int] = set()
-        for match in prompt_candidate_pattern.finditer(mapped_file):
-            line_start = mapped_file.rfind(b"\n", 0, match.start()) + 1
-            if line_start not in seen_line_starts:
-                seen_line_starts.add(line_start)
-                candidate_line_starts.append(line_start)
-        newline_position = mapped_file.find(b"\n")
-        line_number = 1
-        for line_start in candidate_line_starts:
-            while 0 <= newline_position < line_start:
-                line_number += 1
-                newline_position = mapped_file.find(b"\n", newline_position + 1)
-            line_end = mapped_file.find(b"\n", line_start)
-            if line_end < 0:
-                line_end = len(mapped_file)
-            raw_line = mapped_file[line_start:line_end]
-            try:
-                item = json.loads(raw_line)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            timestamp = item.get("timestamp")
-            extracted = prompt_text_from_item(item)
-            if extracted is None:
-                continue
-            text, protocol = extracted
-            text = text.strip()
-            if text:
-                if prompt_is_cross_protocol_duplicate(text, timestamp, protocol, line_number, recent_prompts):
-                    continue
-                prompt_classification = classify_prompt_record(text)
-                prompts.append(
-                    {
-                        "index": len(prompts) + 1,
-                        "lineNumber": line_number,
-                        "timestamp": timestamp,
-                        "text": text,
-                        "characterCount": len(text),
-                        "protocol": protocol,
-                        **prompt_classification,
-                    }
-                )
-                recent_prompts.append((text, prompt_timestamp_ms(timestamp), protocol, line_number))
-    current_stat = rollout_path.stat()
-    if current_stat.st_size == stat.st_size and current_stat.st_mtime_ns == stat.st_mtime_ns:
-        prompt_index_cache[cache_key] = copy.deepcopy(prompts)
-        prompt_index_cache.move_to_end(cache_key)
-        while len(prompt_index_cache) > prompt_index_cache_limit:
-            prompt_index_cache.popitem(last=False)
-    return prompts
+
+def read_thread_prompt_page(
+    codex_home_text: str | None,
+    thread_id: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 100,
+    search: str = "",
+    scope: str = "visible",
+    source_type: str | None = None,
+    scan_budget_ms: int = 250,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    paths = resolve_codex_paths(codex_home_text)
+    row = fetch_thread_row(paths, thread_id)
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_path = Path(normalize_path_text(row.get("rollout_path")))
+    if not rollout_path.is_file():
+        raise FileNotFoundError(str(rollout_path))
+    database_path, index_state = ensure_rollout_prompt_index(
+        paths.codex_home_path,
+        rollout_path,
+        max_scan_ms=max(1, min(5_000, int(scan_budget_ms))),
+        cancel_check=cancel_check,
+    )
+    page = read_prompt_page(
+        database_path,
+        rollout_path,
+        scope=scope,
+        search=search,
+        source_type=source_type,
+        cursor=cursor,
+        limit=limit,
+        index_state=index_state,
+    )
+    return {
+        "threadId": thread_id,
+        "title": row.get("title"),
+        "rolloutPath": str(rollout_path),
+        "scope": scope,
+        "search": search,
+        "sourceType": source_type,
+        **page,
+    }
+
+
+def stream_thread_prompt_copy(
+    codex_home_text: str | None,
+    thread_id: str,
+    *,
+    scope: str = "pure",
+    search: str = "",
+    source_type: str | None = None,
+    output_format: str = "text",
+    cancel_check: Callable[[], bool] | None = None,
+) -> Iterator[str]:
+    paths = resolve_codex_paths(codex_home_text)
+    row = fetch_thread_row(paths, thread_id)
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_path = Path(normalize_path_text(row.get("rollout_path")))
+    if not rollout_path.is_file():
+        raise FileNotFoundError(str(rollout_path))
+    database_path, _ = ensure_rollout_prompt_index(
+        paths.codex_home_path,
+        rollout_path,
+        max_scan_ms=None,
+        cancel_check=cancel_check,
+    )
+    normalized_format = output_format.strip().lower()
+    if normalized_format not in {"text", "jsonl"}:
+        raise ValueError(f"unsupported prompt copy format: {output_format}")
+    first_prompt = True
+    for prompt in iter_prompt_records(
+        database_path,
+        rollout_path,
+        scope=scope,
+        search=search,
+        source_type=source_type,
+        cancel_check=cancel_check,
+    ):
+        export_text = prompt_text_for_scope(prompt, scope)
+        if normalized_format == "jsonl":
+            yield json.dumps({**prompt, "exportText": export_text}, ensure_ascii=False, separators=(",", ":")) + "\n"
+            continue
+        if not first_prompt:
+            yield "\n\n"
+        yield export_text
+        first_prompt = False
 
 
 def read_thread_prompts(codex_home_text: str | None, thread_id: str) -> dict[str, Any]:
@@ -5744,7 +5820,7 @@ def read_thread_prompts(codex_home_text: str | None, thread_id: str) -> dict[str
     row = fetch_thread_row(paths, thread_id)
     if row is None:
         raise KeyError(thread_id)
-    prompts = extract_user_prompts_from_rollout(row.get("rollout_path"))
+    prompts = extract_user_prompts_from_rollout(row.get("rollout_path"), codex_home_text=codex_home_text)
     visible_prompt_count = len(filter_prompts_for_scope(prompts, "visible"))
     pure_prompt_count = len(filter_prompts_for_scope(prompts, "pure"))
     return {
@@ -5782,9 +5858,21 @@ def export_thread_prompts(
     row = fetch_thread_row(paths, thread_id)
     if row is None:
         raise KeyError(thread_id)
-    all_prompts = extract_user_prompts_from_rollout(row.get("rollout_path"))
-    prompts = filter_prompts_for_scope(all_prompts, scope)
-    source_counts = prompt_source_counts(all_prompts)
+    rollout_path = Path(normalize_path_text(row.get("rollout_path")))
+    database_path, index_state = ensure_rollout_prompt_index(paths.codex_home_path, rollout_path, max_scan_ms=None)
+    summary = read_prompt_page(
+        database_path,
+        rollout_path,
+        scope=scope,
+        search="",
+        source_type=None,
+        cursor=None,
+        limit=1,
+        index_state=index_state,
+    )
+    prompt_count = int(summary["matchCount"])
+    all_prompt_count = int(summary["promptCount"])
+    source_counts = dict(summary["sourceCounts"])
     timestamp_text = datetime_module.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_directory = export_root_path()
     export_directory.mkdir(parents=True, exist_ok=True)
@@ -5792,23 +5880,36 @@ def export_thread_prompts(
 
     if output_format == "json":
         output_path = export_directory / f"{filename_base}.json"
-        output_payload = {
-            "threadId": thread_id,
-            "title": row.get("title"),
-            "rolloutPath": normalize_path_text(row.get("rollout_path")),
-            "promptCount": len(prompts),
-            "allPromptCount": len(all_prompts),
-            "filterScope": scope,
-            "sourceCounts": source_counts,
-            "prompts": [
-                {
-                    **prompt,
-                    "exportText": prompt_text_for_scope(prompt, scope),
-                }
-                for prompt in prompts
-            ],
-        }
-        output_path.write_text(json.dumps(output_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        with output_path.open("w", encoding="utf-8", newline="\n") as output:
+            output.write("{\n")
+            metadata = {
+                "threadId": thread_id,
+                "title": row.get("title"),
+                "rolloutPath": normalize_path_text(row.get("rollout_path")),
+                "promptCount": prompt_count,
+                "allPromptCount": all_prompt_count,
+                "filterScope": scope,
+                "sourceCounts": source_counts,
+            }
+            metadata_text = json.dumps(metadata, ensure_ascii=False, indent=2)
+            output.write(metadata_text[1:-1].rstrip())
+            output.write(',\n  "prompts": [')
+            first_prompt = True
+            for prompt in iter_prompt_records(database_path, rollout_path, scope=scope):
+                if not first_prompt:
+                    output.write(",")
+                output.write("\n    ")
+                output.write(
+                    json.dumps(
+                        {**prompt, "exportText": prompt_text_for_scope(prompt, scope)},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                first_prompt = False
+            if not first_prompt:
+                output.write("\n  ")
+            output.write("]\n}\n")
     else:
         output_path = export_directory / f"{filename_base}.md"
         lines = [
@@ -5816,34 +5917,39 @@ def export_thread_prompts(
             "",
             f"- Thread ID: `{thread_id}`",
             f"- Rollout path: `{normalize_path_text(row.get('rollout_path'))}`",
-            f"- Prompt count: {len(prompts)}",
-            f"- All prompt-like records: {len(all_prompts)}",
+            f"- Prompt count: {prompt_count}",
+            f"- All prompt-like records: {all_prompt_count}",
             f"- Filter scope: `{scope}`",
             f"- Source counts: `{json.dumps(source_counts, ensure_ascii=False)}`",
             "",
         ]
-        for prompt in prompts:
-            export_text = prompt_text_for_scope(prompt, scope)
-            lines.extend(
-                [
-                    f"## Prompt {prompt['index']}",
-                    "",
-                    f"- Timestamp: `{prompt.get('timestamp') or '-'}`",
-                    f"- JSONL line: `{prompt['lineNumber']}`",
-                    f"- Source: `{prompt.get('sourceLabel') or prompt.get('sourceType') or '-'}`",
-                    "",
-                    "```text",
-                    export_text,
-                    "```",
-                    "",
-                ]
-            )
-        output_path.write_text("\n".join(lines), encoding="utf-8")
+        with output_path.open("w", encoding="utf-8", newline="\n") as output:
+            output.write("\n".join(lines))
+            output.write("\n")
+            for prompt in iter_prompt_records(database_path, rollout_path, scope=scope):
+                export_text = prompt_text_for_scope(prompt, scope)
+                output.write(
+                    "\n".join(
+                        [
+                            f"## Prompt {prompt['index']}",
+                            "",
+                            f"- Timestamp: `{prompt.get('timestamp') or '-'}`",
+                            f"- JSONL line: `{prompt['lineNumber']}`",
+                            f"- Source: `{prompt.get('sourceLabel') or prompt.get('sourceType') or '-'}`",
+                            "",
+                            "```text",
+                            export_text,
+                            "```",
+                            "",
+                        ]
+                    )
+                )
+                output.write("\n")
 
     return {
         "threadId": thread_id,
-        "promptCount": len(prompts),
-        "allPromptCount": len(all_prompts),
+        "promptCount": prompt_count,
+        "allPromptCount": all_prompt_count,
         "filterScope": scope,
         "sourceCounts": source_counts,
         "outputPath": str(output_path),

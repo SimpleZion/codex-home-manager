@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ from typing import Any, Iterator
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -50,6 +51,7 @@ from .codex_data import (
     preview_slim_thread,
     read_codex_resource,
     read_thread_prompts,
+    read_thread_prompt_page,
     read_thread_logs,
     read_thread_timeline,
     read_thread_timeline_item,
@@ -61,13 +63,20 @@ from .codex_data import (
     restore_backup,
     show_thread_in_sidebar,
     slim_thread,
+    stream_thread_prompt_copy,
     validate_environment,
     write_codex_resource,
 )
 from .diagnostics import clear_diagnostics_runtime_caches, run_codex_diagnostics
+from .prompt_index import (
+    PromptIndexCancelled,
+    begin_prompt_index_request,
+    cancel_prompt_index_request,
+    finish_prompt_index_request,
+)
 
 
-packaged_product_version = "1.0.6"
+packaged_product_version = "1.0.7"
 
 
 def load_product_version() -> str:
@@ -671,6 +680,8 @@ class PromptRecord(BaseModel):
     timestamp: str | None = None
     text: str
     characterCount: int
+    byteOffset: int | None = None
+    protocol: str | None = None
     sourceType: str | None = None
     sourceLabel: str | None = None
     visibleByDefault: bool | None = None
@@ -689,6 +700,27 @@ class ThreadPromptsResponse(BaseModel):
     hiddenPromptCount: int | None = None
     sourceCounts: dict[str, int] | None = None
     prompts: list[PromptRecord]
+
+
+class ThreadPromptPageResponse(BaseModel):
+    threadId: str
+    title: str | None = None
+    rolloutPath: str
+    requestId: str
+    scope: str
+    search: str
+    sourceType: str | None = None
+    promptCount: int
+    purePromptCount: int
+    visiblePromptCount: int
+    hiddenPromptCount: int
+    sourceCounts: dict[str, int]
+    matchCount: int
+    matchCountComplete: bool
+    prompts: list[PromptRecord]
+    nextCursor: str | None = None
+    hasMore: bool
+    index: dict[str, Any]
 
 
 class SlimPreviewResponse(BaseModel):
@@ -1435,7 +1467,7 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
         "concurrencyWarning": "Write endpoints include warnings when Codex-related processes are running.",
         "authorization": f"Write endpoints require {api_token_header_name}. Browser clients can fetch the token from GET /api/auth/token only from the loopback same-origin local UI.",
         "csrfProtection": "Unsafe methods reject browser requests outside the loopback same-origin local UI and require a custom token header.",
-        "mcp": "MCP tools are available at /mcp. Write tools use the same local token, preview ticket, input hash, acknowledgement and operation lock model as REST write endpoints.",
+        "mcp": "MCP tools are available at /mcp. Call codex_auth_token before every other tool and pass its short-lived token as apiToken. Preview-bound writes also require the matching operationPreviewId and inputHash.",
         "previewBinding": "Dangerous writes require operationPreviewId and inputHash returned by the matching preview endpoint within 10 minutes.",
         "runningCodexWriteGate": "When Codex-related processes are running, write endpoints fail with HTTP 409 unless acknowledgeCodexRunningRisk=true is supplied in the query string or JSON body after token and preview validation.",
         "optionalBackups": "Automatic backups are enabled by default. Pass createBackup=false for one write when you intentionally do not want rollback material.",
@@ -1458,6 +1490,7 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             "concurrencyWarning": "当检测到 Codex 相关进程正在运行时，写入接口会返回风险提示。",
             "authorization": f"写入接口需要 {api_token_header_name}。调用本地写入 API 前，先通过 GET /api/auth/token 获取 token。",
             "csrfProtection": "非安全方法会拒绝不可信浏览器 Origin，并要求自定义 token header，因此跨站表单或 fetch 不能执行写入。",
+            "mcp": "MCP 工具位于 /mcp。调用任何其他工具前，先调用 codex_auth_token，并把返回的短期 token 作为 apiToken 传入；预览绑定的写工具还需要匹配的 operationPreviewId 和 inputHash。",
             "previewBinding": "危险写入需要携带匹配预览接口在 10 分钟内返回的 operationPreviewId 和 inputHash。",
             "runningCodexWriteGate": "Codex 相关进程运行中时，写入接口会返回 HTTP 409；只有在 token 和预览校验后显式提供 acknowledgeCodexRunningRisk=true 才继续执行。",
             "optionalBackups": "自动备份默认开启。若本次写入明确不需要回滚材料，可传 createBackup=false。",
@@ -1490,6 +1523,9 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("get_thread_detail", "GET", "/api/threads/{thread_id}", "Read SQLite row, JSONL stats, file locations and backups for one thread. Use include_daily_tokens=false for a faster details shell, then call daily_token_usage when the timeline is opened.", ["thread_id"], "read-only", success_fields=["thread", "sqliteRow", "rolloutStats", "dailyTokenUsage", "backups"]),
             item("daily_token_usage", "GET", "/api/threads/{thread_id}/daily-tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", ["thread_id"], "read-only", success_fields=["summary", "days"]),
             item("read_thread_prompts", "GET", "/api/threads/{thread_id}/prompts", "Read classified prompt-like user role records from one thread without writing an export file. pureText contains only the user's typed/request text with file lists, image tags and internal contexts stripped.", ["thread_id"], "read-only", success_fields=["threadId", "title", "rolloutPath", "promptCount", "purePromptCount", "visiblePromptCount", "hiddenPromptCount", "sourceCounts", "prompts"]),
+            item("read_thread_prompt_page", "GET", "/api/threads/{thread_id}/prompts/page", "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "prompts", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
+            item("cancel_thread_prompt_request", "DELETE", "/api/threads/{thread_id}/prompts/requests/{request_id}", "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
+            item("copy_thread_prompts", "GET", "/api/threads/{thread_id}/prompts/copy", "Stream filtered prompt text or NDJSON without materializing the complete result in process memory.", ["thread_id"], "read-only persistent cache", success_fields=[]),
             item("read_thread_timeline", "GET", "/api/threads/{thread_id}/timeline", "Read a semantic timeline from the JSONL tail without loading the complete rollout. Supports user input, assistant replies, readable reasoning, encrypted-reasoning markers, tool activity, search and byte-cursor pagination.", ["thread_id"], "read-only", success_fields=["threadId", "title", "items", "nextBeforeByte", "hasMore", "scannedRecords", "fileSize"]),
             item("read_thread_timeline_item", "GET", "/api/threads/{thread_id}/timeline/item", "Read the complete semantic content for one timeline record selected by its byteOffset.", ["thread_id", "byte_offset"], "read-only", success_fields=["id", "kind", "text", "byteOffset"]),
             item("preview_thread_action", "GET", "/api/threads/{thread_id}/action-preview", "Preview show, hide, repair, archive or duplicate before writing. Duplicate preview requires targetProjectPath.", ["thread_id", "action"], "read-only", success_fields=["operationPreviewId", "inputHash", "threadId", "warnings"]),
@@ -1881,6 +1917,120 @@ def thread_prompts_endpoint(
         raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.get("/api/threads/{thread_id}/prompts/page", response_model=ThreadPromptPageResponse)
+async def thread_prompt_page_endpoint(
+    thread_id: str,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    search: str = Query(default="", max_length=20_000),
+    scope: str = Query(default="visible", pattern="^(pure|visible|all|with_agents|automation|heartbeat|delegation)$"),
+    source_type: str | None = Query(default=None, alias="sourceType", max_length=80),
+    scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
+    request_id: str | None = Query(default=None, alias="requestId", max_length=128),
+) -> dict[str, Any]:
+    active_request_id = ""
+    try:
+        active_request_id, cancel_event = begin_prompt_index_request(thread_id, request_id)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                read_thread_prompt_page,
+                codex_home,
+                thread_id,
+                cursor=cursor,
+                limit=limit,
+                search=search,
+                scope=scope,
+                source_type=source_type,
+                scan_budget_ms=scan_budget_ms,
+                cancel_check=cancel_event.is_set,
+            )
+        )
+        while not worker.done():
+            await asyncio.wait({worker}, timeout=0.05)
+            if not worker.done() and await http_request.is_disconnected():
+                cancel_event.set()
+        result = await worker
+        result["requestId"] = active_request_id
+        return result
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PromptIndexCancelled as error:
+        raise HTTPException(status_code=499, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    finally:
+        if active_request_id:
+            finish_prompt_index_request(active_request_id)
+
+
+@app.delete("/api/threads/{thread_id}/prompts/requests/{request_id}")
+def cancel_thread_prompt_request_endpoint(
+    thread_id: str,
+    request_id: str,
+    _codex_home: str | None = Query(default=None, alias="codex_home"),
+) -> dict[str, Any]:
+    return {
+        "threadId": thread_id,
+        "requestId": request_id,
+        "cancelled": cancel_prompt_index_request(thread_id, request_id),
+    }
+
+
+@app.get("/api/threads/{thread_id}/prompts/copy")
+def copy_thread_prompts_endpoint(
+    thread_id: str,
+    codex_home: str | None = Query(default=None),
+    scope: str = Query(default="pure", pattern="^(pure|visible|all|with_agents|automation|heartbeat|delegation)$"),
+    search: str = Query(default="", max_length=20_000),
+    source_type: str | None = Query(default=None, alias="sourceType", max_length=80),
+    format: str = Query(default="text", pattern="^(text|jsonl)$"),
+    request_id: str | None = Query(default=None, alias="requestId", max_length=128),
+) -> StreamingResponse:
+    try:
+        source = get_thread_action_preview_record(codex_home, thread_id)
+        if not source["fileExists"]:
+            raise FileNotFoundError(source["rolloutPath"])
+        active_request_id, cancel_event = begin_prompt_index_request(thread_id, request_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    def content_iterator() -> Iterator[str]:
+        try:
+            yield from stream_thread_prompt_copy(
+                codex_home,
+                thread_id,
+                scope=scope,
+                search=search,
+                source_type=source_type,
+                output_format=format,
+                cancel_check=cancel_event.is_set,
+            )
+        finally:
+            cancel_event.set()
+            finish_prompt_index_request(active_request_id)
+
+    media_type = "application/x-ndjson" if format == "jsonl" else "text/plain"
+    filename = f"{thread_id}-prompts.{format if format == 'jsonl' else 'txt'}"
+    return StreamingResponse(
+        content_iterator(),
+        media_type=f"{media_type}; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Prompt-Request-Id": active_request_id,
+        },
+    )
 
 
 @app.get("/api/threads/{thread_id}/action-preview", response_model=ThreadActionPreviewResponse)
@@ -2727,18 +2877,31 @@ def mcp_schema(properties: dict[str, Any] | None = None, required: list[str] | N
     }
 
 
-def mcp_tool(name: str, description: str, properties: dict[str, Any] | None = None, required: list[str] | None = None) -> dict[str, Any]:
+def mcp_tool(
+    name: str,
+    description: str,
+    properties: dict[str, Any] | None = None,
+    required: list[str] | None = None,
+    *,
+    requires_auth: bool = True,
+) -> dict[str, Any]:
+    tool_properties = dict(properties or {})
+    required_properties = list(required or [])
+    if requires_auth:
+        tool_properties.setdefault("apiToken", api_token_schema)
+        if "apiToken" not in required_properties:
+            required_properties.append("apiToken")
     return {
         "name": name,
         "description": description,
-        "inputSchema": mcp_schema(properties, required),
+        "inputSchema": mcp_schema(tool_properties, required_properties),
     }
 
 
 string_schema = {"type": "string"}
 optional_codex_home_schema = {"type": "string", "description": "Optional CODEX_HOME path. Empty uses the local default."}
 sidebar_limit_schema = {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50}
-api_token_schema = {"type": "string", "description": f"Local write token from /api/auth/token or the MCP codex_auth_token tool."}
+api_token_schema = {"type": "string", "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."}
 preview_id_schema = {"type": "string", "description": "operationPreviewId returned by the matching preview tool."}
 input_hash_schema = {"type": "string", "description": "inputHash returned by the matching preview tool."}
 ack_schema = {"type": "boolean", "default": False, "description": "Set true after reviewing runtime warnings when Codex is running."}
@@ -2786,7 +2949,7 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
     source_home = {"sourceCodexHome": {"type": "string", "description": "Source .codex root directory."}}
     return [
         mcp_tool("codex_health", "Read the local connector health and runtime write warnings.", mcp_base_properties()),
-        mcp_tool("codex_auth_token", "Return a short-lived local token bound to one real Codex Home.", {"codexHome": optional_codex_home_schema}),
+        mcp_tool("codex_auth_token", "Return a short-lived local token bound to one real Codex Home.", {"codexHome": optional_codex_home_schema}, requires_auth=False),
         mcp_tool("codex_diagnostics", "Run the read-only Codex Home health check and return a repairPrompt handoff for another Codex agent.", {**mcp_base_properties(), "sidebarLimit": sidebar_limit_schema, "language": {"type": "string", "enum": ["zh", "en"], "default": "zh"}, "refresh": {"type": "boolean", "default": False, "description": "Bypass the short-lived report cache and run a fresh full scan."}}),
         mcp_tool("codex_preview_official_thread_tools_repair", "Preview fallback shadowing, registry position drift, and incomplete initial rollout metadata that can hide official codex_app tools.", mcp_preview_properties()),
         mcp_tool("codex_repair_official_thread_tools", "Repair initial rollout tool metadata with prompt-preservation verification, disable the legacy fallback, and normalize registry positions. SQLite normalization requires Codex Desktop to be fully closed.", mcp_write_properties(), ["apiToken", "operationPreviewId", "inputHash"]),
@@ -3232,7 +3395,7 @@ def mcp_handle_rpc(payload: dict[str, Any], request: Request) -> dict[str, Any] 
             "protocolVersion": mcp_protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "codex-home-manager", "version": app.version},
-            "instructions": "Use tools/list, then call read and preview tools before any write tool. Write tools require apiToken, operationPreviewId and inputHash.",
+            "instructions": "Use tools/list for discovery. Before calling any data tool, call codex_auth_token and pass its short-lived token as apiToken to every other tool. Preview-bound writes additionally require operationPreviewId and inputHash from the matching preview tool.",
         })
     if method == "notifications/initialized":
         return None if request_id is None else mcp_rpc_response(request_id, {})
@@ -3260,8 +3423,22 @@ def mcp_metadata() -> dict[str, Any]:
         "endpoint": "/mcp",
         "tools": [tool["name"] for tool in mcp_tool_definitions()],
         "security": {
-            "readTools": "No token required.",
-            "writeTools": f"Require apiToken matching {api_token_header_name}; dangerous writes also require a matching preview ticket and inputHash.",
+            "authentication": {
+                "required": True,
+                "requiredFor": "all tools except codex_auth_token",
+                "exemptTools": ["codex_auth_token"],
+                "bootstrapTool": "codex_auth_token",
+                "tokenArgument": "apiToken",
+                "tokenResultField": "token",
+                "expiresAfterMs": authorization_ttl_ms,
+                "scope": "one resolved Codex Home",
+            },
+            "previewBoundWrites": {
+                "requiredArguments": ["operationPreviewId", "inputHash"],
+                "expiresAfterMs": preview_ttl_ms,
+            },
+            "readTools": "Require the short-lived apiToken returned by codex_auth_token.",
+            "writeTools": f"Require the same short-lived apiToken; preview-bound writes also require operationPreviewId and inputHash. REST writes use {api_token_header_name}.",
         },
     }
 

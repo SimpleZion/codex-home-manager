@@ -4,9 +4,12 @@ import base64
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scripts import release_manifest
 
@@ -38,6 +41,23 @@ def test_download_bytes_uses_github_release_api_media_type(monkeypatch: pytest.M
     ) == b"{}"
     assert captured_headers["Accept"] == "application/vnd.github+json"
     assert captured_headers["X-github-api-version"] == "2022-11-28"
+
+
+def test_authenticode_evidence_never_treats_self_signed_as_public_trust() -> None:
+    self_signed = {
+        "status": "self-signed",
+        "trust": "untrusted",
+        "signerThumbprint": "A" * 40,
+        "signerSubject": "CN=Self-Signed Test",
+        "selfSigned": True,
+        "chainTrusted": False,
+        "detachedSignatureRequired": True,
+    }
+    release_manifest.validate_authenticode_evidence(self_signed)
+
+    forged_public_trust = {**self_signed, "status": "valid", "trust": "public-trusted", "chainTrusted": True}
+    with pytest.raises(release_manifest.ReleaseManifestError, match="inconsistent Authenticode"):
+        release_manifest.validate_authenticode_evidence(forged_public_trust)
 
 
 def run_git(repository: Path, *arguments: str) -> str:
@@ -72,7 +92,7 @@ def write_public_bundle(site_directory: Path, executable: Path, archive: Path) -
     bundle.write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "version": "1.0.0",
                 "artifacts": [
                     {
@@ -85,6 +105,15 @@ def write_public_bundle(site_directory: Path, executable: Path, archive: Path) -
                             "archiveEntryCount": 1,
                             "sourceFiles": [],
                             "sensitiveStrings": [],
+                        },
+                        "authenticode": {
+                            "status": "unavailable",
+                            "trust": "none",
+                            "signerThumbprint": None,
+                            "signerSubject": None,
+                            "selfSigned": False,
+                            "chainTrusted": False,
+                            "detachedSignatureRequired": True,
                         },
                     },
                     {
@@ -335,6 +364,79 @@ def verify_release(release_fixture: dict[str, Path | str], **overrides: object) 
     }
     arguments.update(overrides)
     release_manifest.verify_release(**arguments)
+
+
+def test_user_artifact_verifier_rejects_manifest_signature_pem_and_artifact_tampering(
+    release_fixture: dict[str, Path | str], tmp_path: Path
+) -> None:
+    verifier_path = tmp_path / "verify_release_artifact.py"
+    verifier_path.write_text(release_manifest.user_artifact_verifier_source, encoding="utf-8")
+    manifest = json.loads(Path(release_fixture["manifest"]).read_text(encoding="utf-8"))
+    executable_record = next(
+        record
+        for record in manifest["public_artifacts"]
+        if record["path"].startswith("codex-home-manager-local-win-x64-v") and record["path"].endswith(".exe")
+    )
+    paths = {
+        "manifest": tmp_path / "release-manifest.json",
+        "signature": tmp_path / "release-manifest.json.sig",
+        "public_key": tmp_path / "release-signing-public-key.pem",
+        "artifact": tmp_path / executable_record["path"],
+    }
+    originals = {
+        "manifest": Path(release_fixture["manifest"]).read_bytes(),
+        "signature": Path(release_fixture["signature"]).read_bytes(),
+        "public_key": Path(release_fixture["public_key"]).read_bytes(),
+        "artifact": (Path(release_fixture["site_directory"]) / executable_record["path"]).read_bytes(),
+    }
+    trusted_fingerprint = Path(release_fixture["trusted_fingerprint"]).read_text(encoding="ascii").strip()
+
+    def run_verifier() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(verifier_path),
+                "--manifest",
+                str(paths["manifest"]),
+                "--signature",
+                str(paths["signature"]),
+                "--public-key",
+                str(paths["public_key"]),
+                "--trusted-public-key-fingerprint",
+                trusted_fingerprint,
+                "--artifact-kind",
+                "exe",
+                "--artifact",
+                str(paths["artifact"]),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    for name, content in originals.items():
+        paths[name].write_bytes(content)
+    assert run_verifier().returncode == 0
+
+    tampered_signature = bytearray(base64.b64decode(originals["signature"].strip(), validate=True))
+    tampered_signature[0] ^= 1
+    replacement_public_key = Ed25519PrivateKey.generate().public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    cases = (
+        ("manifest", originals["manifest"] + b" ", "signature verification failed"),
+        ("signature", base64.b64encode(bytes(tampered_signature)) + b"\n", "signature verification failed"),
+        ("public_key", replacement_public_key, "SPKI SHA-256"),
+        ("artifact", originals["artifact"] + b"tampered", "artifact size mismatch"),
+    )
+    for target, tampered_content, expected_error in cases:
+        for name, content in originals.items():
+            paths[name].write_bytes(content)
+        paths[target].write_bytes(tampered_content)
+        result = run_verifier()
+        assert result.returncode != 0, target
+        assert expected_error in result.stderr, result.stderr
 
 
 def test_signed_manifest_binds_prebuild_sources_public_artifacts_and_first_deployment(
