@@ -53,7 +53,8 @@ def test_authenticode_evidence_never_treats_self_signed_as_public_trust() -> Non
         "chainTrusted": False,
         "detachedSignatureRequired": True,
     }
-    release_manifest.validate_authenticode_evidence(self_signed)
+    with pytest.raises(release_manifest.ReleaseManifestError, match="inconsistent Authenticode"):
+        release_manifest.validate_authenticode_evidence(self_signed)
 
     forged_public_trust = {**self_signed, "status": "valid", "trust": "public-trusted", "chainTrusted": True}
     with pytest.raises(release_manifest.ReleaseManifestError, match="inconsistent Authenticode"):
@@ -105,9 +106,17 @@ def write_public_bundle(site_directory: Path, executable: Path, archive: Path) -
                             "archiveEntryCount": 1,
                             "sourceFiles": [],
                             "sensitiveStrings": [],
+                            "versionInfo": {
+                                "FileVersion": "1.0.0",
+                                "ProductVersion": "1.0.0",
+                                "CompanyName": "SimpleZion",
+                                "ProductName": "Codex Home Manager",
+                                "FileDescription": "Codex Home Manager",
+                            },
                         },
                         "authenticode": {
-                            "status": "unavailable",
+                            "status": "not-signed",
+                            "windowsStatus": "NotSigned",
                             "trust": "none",
                             "signerThumbprint": None,
                             "signerSubject": None,
@@ -188,6 +197,67 @@ def write_source_evidence_assets(
     return proof_path, proof
 
 
+def write_windows_binary_evidence_assets(
+    release_directory: Path,
+    site_directory: Path,
+    checksum_path: Path,
+    bundle_path: Path,
+) -> tuple[Path, dict[str, object]]:
+    public_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    artifacts = sorted(public_bundle["artifacts"], key=lambda artifact: artifact["name"])
+    sbom_name = f"codex-home-manager-windows-x64-{'d' * 40}.cdx.json"
+    metadata = {"schemaVersion": 1, "version": public_bundle["version"], "artifacts": artifacts}
+    contents = {
+        release_manifest.windows_build_metadata_name: (json.dumps(metadata) + "\n").encode(),
+        sbom_name: b'{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:test"}\n',
+        release_manifest.windows_sbom_subjects_name: "".join(
+            f"{artifact['sha256']} *{artifact['name']}\n" for artifact in artifacts
+        ).encode("ascii"),
+        release_manifest.windows_sbom_attestation_name: b'{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n',
+        release_manifest.windows_provenance_attestation_name: b'{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n',
+    }
+    provenance_subjects = {
+        **{artifact["name"]: artifact["sha256"] for artifact in artifacts},
+        sbom_name: release_manifest.sha256_bytes(contents[sbom_name]),
+    }
+    contents[release_manifest.windows_provenance_subjects_name] = "".join(
+        f"{digest} *{name}\n" for name, digest in sorted(provenance_subjects.items())
+    ).encode("ascii")
+    assets = []
+    for name, content in contents.items():
+        (release_directory / name).write_bytes(content)
+        (site_directory / name).write_bytes(content)
+        assets.append({"name": name, "sha256": release_manifest.sha256_bytes(content), "size": len(content)})
+    checksum_entries = release_manifest.load_checksum_entries(checksum_path)
+    checksum_entries.update({asset["name"]: asset["sha256"] for asset in assets})
+    checksum_path.write_text(
+        "".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_entries.items())),
+        encoding="ascii",
+    )
+    artifact_names = {artifact["name"] for artifact in artifacts}
+    proof = {
+        "schema_version": 1,
+        "source_commit": "d" * 40,
+        "source_ref": "refs/heads/source",
+        "repository": "example/project",
+        "signer_workflow": "github.com/example/project/.github/workflows/source-ci.yml",
+        "version": "1.0.0",
+        "attestations": {
+            "verifier": "gh attestation verify",
+            "deny_self_hosted_runners": True,
+            "sbom_predicate_type": release_manifest.source_sbom_predicate_type,
+            "provenance_predicate_type": release_manifest.source_provenance_predicate_type,
+            "sbom_subjects": sorted(artifact_names),
+            "provenance_subjects": sorted(artifact_names | {sbom_name}),
+        },
+        "artifacts": artifacts,
+        "assets": sorted(assets, key=lambda asset: asset["name"]),
+    }
+    proof_path = release_directory / release_manifest.windows_binary_evidence_proof_name
+    proof_path.write_bytes(release_manifest.canonical_json_bytes(proof))
+    return proof_path, proof
+
+
 @pytest.fixture
 def release_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path | str]:
     root_repository = create_repository(tmp_path / "root", "root.txt")
@@ -230,6 +300,12 @@ def release_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         checksum,
         root_commit=run_git(root_repository, "rev-parse", "HEAD"),
         manager_commit=run_git(manager_repository, "rev-parse", "HEAD"),
+    )
+    windows_evidence_proof, windows_evidence = write_windows_binary_evidence_assets(
+        release_directory,
+        site_directory,
+        checksum,
+        bundle,
     )
     public_key_target = site_directory / public_key.name
     public_key_target.write_bytes(public_key.read_bytes())
@@ -339,6 +415,8 @@ def release_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "deployment_evidence": deployment_evidence,
         "github_evidence": github_evidence,
         "source_evidence_proof": source_evidence_proof,
+        "windows_evidence_proof": windows_evidence_proof,
+        "windows_evidence": windows_evidence,
         "deployment_id": deployment_id,
         "github_repository": github_repository,
         "github_tag": github_tag,
@@ -445,8 +523,9 @@ def test_signed_manifest_binds_prebuild_sources_public_artifacts_and_first_deplo
     verify_release(release_fixture)
 
     manifest = json.loads(Path(release_fixture["manifest"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     assert manifest["source_evidence"]["source_commit"] == "d" * 40
+    assert manifest["windows_binary_evidence"] == release_fixture["windows_evidence"]
     assert manifest["dist_files"] == manifest["public_site_dist_files"]
     assert {item["path"] for item in manifest["public_site_dist_files"]} == {
         "assets/app.js",
@@ -460,6 +539,7 @@ def test_signed_manifest_binds_prebuild_sources_public_artifacts_and_first_deplo
         Path(release_fixture["bundle"]).name,
         Path(release_fixture["checksum"]).name,
         *release_manifest.source_evidence_public_names,
+        *release_manifest.windows_binary_evidence_public_names("d" * 40),
         "codex-home-manager-local-win-x64-v1.0.0-"
         + release_manifest.sha256_file(Path(release_fixture["executable"]))[:12]
         + ".exe",
@@ -601,7 +681,10 @@ def test_verifier_rejects_artifact_or_bundle_byte_drift(
         run_git(public_repository, "add", "site")
         run_git(public_repository, "commit", "--quiet", "-m", "tamper public release")
 
-    with pytest.raises(release_manifest.ReleaseManifestError, match="hash mismatch|invalid SHA256SUMS"):
+    with pytest.raises(
+        release_manifest.ReleaseManifestError,
+        match="hash mismatch|invalid SHA256SUMS|cannot read JSON",
+    ):
         verify_release(release_fixture)
 
 

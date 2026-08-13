@@ -80,7 +80,10 @@ def source_fixture(tmp_path: Path) -> tuple[Path, Path]:
             )
             + "\n",
             ".github/workflows/source-ci.yml": "name: Source CI\n",
+            ".github/workflows/codeql.yml": "name: CodeQL\n",
             ".github/workflows/requirements-ci.txt": "pytest==8.4.2\n",
+            ".github/dependabot.yml": "version: 2\n",
+            "SECURITY.md": "# Security Policy\n",
             "backend/__init__.py": "\n",
             "backend/server.py": "from root_helper import root_value\nserver_value = root_value\n",
             "scripts/manager_helper.py": "manager_value = 11\n",
@@ -113,14 +116,18 @@ def test_export_contains_only_monorepo_sources_and_commit_manifest(tmp_path: Pat
     result = export_module.export_source_monorepo(root_repository, manager_repository, output)
 
     assert result["rootFiles"] == 6
-    assert result["managerFiles"] == 11
+    assert result["managerFiles"] == 14
     assert (output / "README.md").is_file()
     assert (output / ".gitattributes").read_text(encoding="utf-8") == "* text=auto eol=lf\n"
     assert (output / ".github" / "workflows" / "source-ci.yml").is_file()
+    assert (output / ".github" / "workflows" / "codeql.yml").is_file()
     assert (output / ".github" / "workflows" / "requirements-ci.txt").is_file()
+    assert (output / ".github" / "dependabot.yml").is_file()
+    assert (output / "SECURITY.md").is_file()
     assert (output / "scripts" / "repair_all_codex_after_exit.ps1").is_file()
     assert (output / "codex_home_manager" / "backend" / "server.py").is_file()
     assert not (output / "codex_home_manager" / ".github").exists()
+    assert not (output / "codex_home_manager" / "SECURITY.md").exists()
     assert not (output / "AGENTS.md").exists()
     assert not (output / "private").exists()
 

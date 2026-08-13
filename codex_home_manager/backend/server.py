@@ -68,15 +68,26 @@ from .codex_data import (
     write_codex_resource,
 )
 from .diagnostics import clear_diagnostics_runtime_caches, run_codex_diagnostics
+from .mcp_server import prompt_index_mcp_tool_definitions
+from .models import (
+    PromptIndexClearPreviewResponse,
+    PromptIndexClearRequest,
+    PromptIndexClearResponse,
+    PromptIndexStatusResponse,
+)
 from .prompt_index import (
     PromptIndexCancelled,
+    PromptIndexInUse,
     begin_prompt_index_request,
     cancel_prompt_index_request,
+    clear_prompt_index,
     finish_prompt_index_request,
+    prompt_index_database_path,
+    prompt_index_status,
 )
 
 
-packaged_product_version = "1.0.7"
+packaged_product_version = "1.0.8"
 
 
 def load_product_version() -> str:
@@ -1059,6 +1070,17 @@ def operation_state_digest(payload: dict[str, Any]) -> str:
         if payload.get("portableRestore") or payload.get("portableExport"):
             state_paths.extend((path, True) for path in portable_backup_state_paths(backup_id))
 
+    if payload.get("promptIndexClear"):
+        prompt_database_path = prompt_index_database_path(paths.codex_home_path)
+        state_paths.extend(
+            (path, False)
+            for path in (
+                prompt_database_path,
+                prompt_database_path.with_name(prompt_database_path.name + "-wal"),
+                prompt_database_path.with_name(prompt_database_path.name + "-shm"),
+            )
+        )
+
     unique_records: dict[str, dict[str, Any]] = {}
     for state_path, include_hash in state_paths:
         record = state_path_record(state_path, include_hash=include_hash)
@@ -1156,6 +1178,10 @@ def preview_bound_write(
 
 def codex_home_value(codex_home: str | None) -> str:
     return codex_home or ""
+
+
+def prompt_index_clear_payload(codex_home: str | None) -> dict[str, Any]:
+    return {"codexHome": codex_home_value(codex_home), "promptIndexClear": True}
 
 
 def content_digest(content: str) -> str:
@@ -1297,6 +1323,9 @@ capability_purpose_zh: dict[str, str] = {
     "snapshot_threads": "列出并分类所有本地 Codex 线程；新版 Codex 可显示完整线程列表，旧版首轮排序仅作为兼容信息。",
     "get_thread_detail": "读取单个线程的 SQLite 行、JSONL 统计、每日 token 消耗、文件位置和备份记录。",
     "read_thread_prompts": "只读查看一个线程里的所有用户 prompt，不写导出文件。",
+    "prompt_index_status": "查询当前 Codex Home 的 prompt 索引生命周期状态；只返回计数、容量、时间、保留上限和占用状态，不返回正文或 rollout 路径。",
+    "preview_clear_prompt_index": "预览清空当前 Codex Home 的派生 prompt 索引，并签发一次性预览票据；不会读取或返回 prompt 正文。",
+    "clear_prompt_index": "清空当前 Codex Home 的派生 prompt 索引，不修改源 rollout；为避免保留正文副本，此操作不创建缓存备份。",
     "read_thread_timeline": "从 JSONL 尾部按需读取线程的用户输入、助手回复、可读思考、加密思考标记和工具活动；通过字节游标加载更早内容，不需要先解析完整线程。",
     "read_thread_timeline_item": "按时间线记录的字节位置读取该条记录的完整语义内容，用于展开被截断的回复、思考或工具结果。",
     "preview_thread_action": "在写入前预览显示、隐藏、修复、归档或复制线程操作；复制预览需要 targetProjectPath。",
@@ -1347,6 +1376,9 @@ capability_text_zh: dict[str, str] = {
     "backup.backupId when the action writes state": "写入状态时返回 backup.backupId",
     "not idempotent; each successful write creates a backup and may create or move records": "非幂等；每次成功写入都会创建备份，并可能创建或移动记录",
     "idempotent read": "幂等读取",
+    "no backup; the disposable index is rebuilt from source rollouts": "不备份；派生索引可从源 rollout 重新构建",
+    "idempotent; clearing an absent index is a no-op": "幂等；索引不存在时清空操作不产生变化",
+    "not applicable; re-querying prompts rebuilds the index from source rollouts": "不适用；重新查询 prompt 会从源 rollout 重建索引",
     "restore backup by backup.backupId": "使用 backup.backupId 调用回滚接口恢复",
 }
 
@@ -1436,7 +1468,11 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             "backup": localize_text(backup),
             "bodyExample": body_example,
             "successFields": success_fields or [localize_text("backup.backupId when the action writes state")],
-            "rollback": "POST /api/backups/{backup_id}/restore" if backup != "read-only" else None,
+            "rollback": (
+                "POST /api/backups/{backup_id}/restore"
+                if backup not in {"read-only", "no backup; the disposable index is rebuilt from source rollouts"}
+                else None
+            ),
             "riskLevel": risk_level or ("write" if is_write else "read"),
             "previewEndpoint": preview_endpoint,
             "writeEndpoint": write_endpoint or (path if is_write else None),
@@ -1526,6 +1562,9 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("read_thread_prompt_page", "GET", "/api/threads/{thread_id}/prompts/page", "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "prompts", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
             item("cancel_thread_prompt_request", "DELETE", "/api/threads/{thread_id}/prompts/requests/{request_id}", "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("copy_thread_prompts", "GET", "/api/threads/{thread_id}/prompts/copy", "Stream filtered prompt text or NDJSON without materializing the complete result in process memory.", ["thread_id"], "read-only persistent cache", success_fields=[]),
+            item("prompt_index_status", "GET", "/api/prompt-index/status", "Read prompt-index lifecycle metadata for one Codex Home. The response contains the local derived-index root plus counts, sizes, timestamps, retention limits, readability and in-use state; it never includes prompt text or source rollout paths.", [], "read-only", success_fields=["databaseExists", "database.sizeBytes", "database.inUse", "database.readable", "database.inspectionState", "database.promptCount", "storage.rootPath", "storage.maxTotalBytes", "storage.maxIdleSeconds"]),
+            item("preview_clear_prompt_index", "POST", "/api/prompt-index/clear/preview", "Preview clearing the disposable prompt index for one Codex Home without returning prompt content.", ["X-Codex-Manager-Token"], "read-only", success_fields=["operationPreviewId", "inputHash", "willClear", "reclaimableBytes", "inUse"]),
+            item("clear_prompt_index", "POST", "/api/prompt-index/clear", "Clear the disposable prompt index for one Codex Home without modifying source rollouts. No cache backup is created because that would retain another copy of indexed prompt text.", ["X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "no backup; the disposable index is rebuilt from source rollouts", {"operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["cleared", "databaseExisted", "deletedFileCount", "reclaimedBytes"], risk_level="write", preview_endpoint="/api/prompt-index/clear/preview", idempotency="idempotent; clearing an absent index is a no-op", rollback_mode="not applicable; re-querying prompts rebuilds the index from source rollouts"),
             item("read_thread_timeline", "GET", "/api/threads/{thread_id}/timeline", "Read a semantic timeline from the JSONL tail without loading the complete rollout. Supports user input, assistant replies, readable reasoning, encrypted-reasoning markers, tool activity, search and byte-cursor pagination.", ["thread_id"], "read-only", success_fields=["threadId", "title", "items", "nextBeforeByte", "hasMore", "scannedRecords", "fileSize"]),
             item("read_thread_timeline_item", "GET", "/api/threads/{thread_id}/timeline/item", "Read the complete semantic content for one timeline record selected by its byteOffset.", ["thread_id", "byte_offset"], "read-only", success_fields=["id", "kind", "text", "byteOffset"]),
             item("preview_thread_action", "GET", "/api/threads/{thread_id}/action-preview", "Preview show, hide, repair, archive or duplicate before writing. Duplicate preview requires targetProjectPath.", ["thread_id", "action"], "read-only", success_fields=["operationPreviewId", "inputHash", "threadId", "warnings"]),
@@ -2031,6 +2070,68 @@ def copy_thread_prompts_endpoint(
             "X-Prompt-Request-Id": active_request_id,
         },
     )
+
+
+@app.get("/api/prompt-index/status", response_model=PromptIndexStatusResponse)
+def prompt_index_status_endpoint(
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        return prompt_index_status(paths.codex_home_path)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.post("/api/prompt-index/clear/preview", response_model=PromptIndexClearPreviewResponse)
+def preview_clear_prompt_index_endpoint(
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        status = prompt_index_status(paths.codex_home_path)
+        database = status.get("database") or {}
+        return {
+            **create_preview_ticket("clear_prompt_index", prompt_index_clear_payload(codex_home)),
+            "willClear": bool(status["databaseExists"]),
+            "reclaimableBytes": int(database.get("sizeBytes") or 0),
+            "inUse": bool(database.get("inUse")),
+            "warning": (
+                "The disposable index will be removed without a backup. Source rollouts are unchanged and can rebuild it."
+            ),
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.post("/api/prompt-index/clear", response_model=PromptIndexClearResponse)
+def clear_prompt_index_endpoint(
+    request: PromptIndexClearRequest,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        authorize_write_request(http_request)
+        paths = resolve_codex_paths(codex_home)
+        with preview_bound_write(
+            "clear_prompt_index",
+            prompt_index_clear_payload(codex_home),
+            request.operationPreviewId,
+            request.inputHash,
+        ):
+            return clear_prompt_index(paths.codex_home_path)
+    except HTTPException as error:
+        raise error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except PromptIndexInUse as error:
+        raise runtime_conflict(error) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @app.get("/api/threads/{thread_id}/action-preview", response_model=ThreadActionPreviewResponse)
@@ -2950,6 +3051,11 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
     return [
         mcp_tool("codex_health", "Read the local connector health and runtime write warnings.", mcp_base_properties()),
         mcp_tool("codex_auth_token", "Return a short-lived local token bound to one real Codex Home.", {"codexHome": optional_codex_home_schema}, requires_auth=False),
+        *prompt_index_mcp_tool_definitions(
+            build_tool=mcp_tool,
+            preview_properties=mcp_preview_properties,
+            write_properties=mcp_write_properties,
+        ),
         mcp_tool("codex_diagnostics", "Run the read-only Codex Home health check and return a repairPrompt handoff for another Codex agent.", {**mcp_base_properties(), "sidebarLimit": sidebar_limit_schema, "language": {"type": "string", "enum": ["zh", "en"], "default": "zh"}, "refresh": {"type": "boolean", "default": False, "description": "Bypass the short-lived report cache and run a fresh full scan."}}),
         mcp_tool("codex_preview_official_thread_tools_repair", "Preview fallback shadowing, registry position drift, and incomplete initial rollout metadata that can hide official codex_app tools.", mcp_preview_properties()),
         mcp_tool("codex_repair_official_thread_tools", "Repair initial rollout tool metadata with prompt-preservation verification, disable the legacy fallback, and normalize registry positions. SQLite normalization requires Codex Desktop to be fully closed.", mcp_write_properties(), ["apiToken", "operationPreviewId", "inputHash"]),
@@ -3115,6 +3221,30 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
             authorize_browser_write_origin(request)
             return mcp_result(create_local_authorization(codex_home))
         authorize_local_data_request(request, codex_home, mcp_str(arguments, "apiToken"))
+        if name == "codex_prompt_index_status":
+            paths = resolve_codex_paths(codex_home)
+            return mcp_result(prompt_index_status(paths.codex_home_path))
+        if name == "codex_preview_clear_prompt_index":
+            paths = resolve_codex_paths(codex_home)
+            status = prompt_index_status(paths.codex_home_path)
+            database = status.get("database") or {}
+            return mcp_result({
+                **create_preview_ticket("clear_prompt_index", prompt_index_clear_payload(codex_home)),
+                "willClear": bool(status["databaseExists"]),
+                "reclaimableBytes": int(database.get("sizeBytes") or 0),
+                "inUse": bool(database.get("inUse")),
+                "warning": "The disposable index will be removed without a backup. Source rollouts are unchanged and can rebuild it.",
+            })
+        if name == "codex_clear_prompt_index":
+            mcp_require_write(arguments)
+            paths = resolve_codex_paths(codex_home)
+            with preview_bound_write(
+                "clear_prompt_index",
+                prompt_index_clear_payload(codex_home),
+                mcp_str(arguments, "operationPreviewId"),
+                mcp_str(arguments, "inputHash"),
+            ):
+                return mcp_result(clear_prompt_index(paths.codex_home_path))
         if name == "codex_health":
             return mcp_result(validate_environment(codex_home))
         if name == "codex_diagnostics":

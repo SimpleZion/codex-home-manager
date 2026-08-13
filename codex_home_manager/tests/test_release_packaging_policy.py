@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from scripts import release_manifest
 manager_root = Path(__file__).resolve().parents[1]
 requirements_path = manager_root / "packaging" / "windows" / "requirements-connector.txt"
 package_script_path = manager_root / "scripts" / "package-local-connector.ps1"
+version_info_path = manager_root / "packaging" / "windows" / "version_info.txt"
 finalize_script_path = manager_root / "scripts" / "finalize-release-manifest.ps1"
 
 
@@ -57,6 +59,14 @@ def test_packaging_uses_content_addressed_artifacts_and_stable_latest_redirects(
     assert "immutable" in script
 
 
+def test_packaging_generates_hsts_and_non_overlapping_wasm_cache_headers() -> None:
+    script = package_script_path.read_text(encoding="utf-8")
+
+    assert "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload" in script
+    assert script.count("/assets/*.wasm") == 1
+    assert "/assets/*\n" not in script
+
+
 def test_packaging_audits_zip_and_pyinstaller_executable_before_public_copy() -> None:
     script = package_script_path.read_text(encoding="utf-8")
 
@@ -66,6 +76,26 @@ def test_packaging_audits_zip_and_pyinstaller_executable_before_public_copy() ->
     assert "connector-release.json" in script
     assert "sensitiveStrings" in script
     assert "sourceFiles" in script
+
+
+def test_windows_executables_receive_the_package_product_version_resource() -> None:
+    script = package_script_path.read_text(encoding="utf-8")
+    version_info = version_info_path.read_text(encoding="utf-8")
+    package_version = json.loads((manager_root / "package.json").read_text(encoding="utf-8"))["version"]
+    version_tuple = ", ".join([*package_version.split("."), "0"])
+
+    assert script.count("--version-file $versionInfoPath") == 2
+    assert "Assert-WindowsVersionMetadata" in script
+    assert f"filevers=({version_tuple})" in version_info
+    assert f"prodvers=({version_tuple})" in version_info
+    for name, value in {
+        "CompanyName": "SimpleZion",
+        "ProductName": "Codex Home Manager",
+        "FileDescription": "Codex Home Manager",
+        "FileVersion": package_version,
+        "ProductVersion": package_version,
+    }.items():
+        assert f'StringStruct("{name}", "{value}")' in version_info
 
 
 def test_packaging_recreates_and_audits_public_node_dependencies_from_lock() -> None:
@@ -116,6 +146,23 @@ def test_packaging_requires_attested_source_ci_evidence_before_public_checks() -
     assert script.index("prepare-source-evidence") < script.index("$releaseNpmPath run check")
 
 
+def test_release_consumes_same_commit_windows_ci_outputs_without_a_local_rebuild() -> None:
+    script = package_script_path.read_text(encoding="utf-8")
+
+    assert "[string]$WindowsEvidenceDirectory" in script
+    assert "prepare-windows-evidence" in script
+    assert "windows-binary-evidence.json" in script
+    assert "BINARY-*-SUBJECTS.txt" in script
+    assert "windows-*-attestation.sigstore.json" in script
+    ci_branch = script.index('if ($PSCmdlet.ParameterSetName -eq "CiBuild") {', script.index("quality_gate.py"))
+    ci_build = script.index('$firstBuild = Invoke-IsolatedConnectorBuild -BuildName "build-1"', ci_branch)
+    ci_sign = script.index("Invoke-AuthenticodePolicy -Path $directExecutablePath", ci_build)
+    release_evidence = script.index("prepare-windows-evidence", ci_sign)
+    assert ci_branch < ci_build < ci_sign < release_evidence
+    assert "Assert-CiAuthenticodeEvidence" in script
+    assert script.index("prepare-windows-evidence") < script.index("$releaseNpmPath run check")
+
+
 def test_packaging_requires_two_reproducible_isolated_builds_and_canonical_zip() -> None:
     script = package_script_path.read_text(encoding="utf-8")
 
@@ -127,6 +174,16 @@ def test_packaging_requires_two_reproducible_isolated_builds_and_canonical_zip()
     assert "run_reproducible_pyinstaller.py" in script
     assert "sorted(modules_toc" in script
     assert "Compress-Archive" not in script
+
+
+def test_packaging_reuses_the_release_builder_for_ci_binary_output() -> None:
+    script = package_script_path.read_text(encoding="utf-8")
+
+    assert 'ParameterSetName = "CiBuild"' in script
+    assert "$CiOutputDirectory" in script
+    assert "$VerifyReproducibleBuild" in script
+    assert "windows-build-metadata.json" in script
+    assert 'if ($PSCmdlet.ParameterSetName -eq "CiBuild")' in script
 
 
 def test_packaging_black_box_tests_the_final_executable_on_a_random_port() -> None:
@@ -154,10 +211,14 @@ def test_packaging_stops_only_verified_old_connector_processes_before_final_copy
     assert "Stop-VerifiedReleaseDestinationProcesses" in script
     assert "ExecutablePath" in script
     assert "Stop-Process -Id $process.ProcessId -Force" in script
-    stop_call = script.index("Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath")
-    final_copy = script.index("Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force")
+    ci_branch = script.index('if ($PSCmdlet.ParameterSetName -eq "CiBuild") {', script.index("quality_gate.py"))
+    stop_call = script.index("Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath", ci_branch)
+    final_copy = script.index("Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force", ci_branch)
     compare_builds = script.index("compare-builds")
     assert compare_builds < stop_call < final_copy
+    release_prepare = script.index("prepare-windows-evidence")
+    release_stop = script.rindex("Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath", 0, release_prepare)
+    assert release_stop < release_prepare
 
 
 def test_packaging_retires_stale_signed_metadata_before_public_release_checks() -> None:
@@ -205,10 +266,12 @@ def test_packaging_does_not_treat_untrusted_authenticode_as_trust() -> None:
     assert "CODEX_HOME_MANAGER_SIGNING_CERT_THUMBPRINT" in script
     assert "detachedSignatureRequired" in script
     assert "New-SelfSignedCertificate" not in script
-    assert 'status = if ($valid) { "valid" } else { "unavailable" }' not in script
-    assert '"self-signed"' in script
+    assert 'status = "not-signed"' in script
+    assert 'windowsStatus = "NotSigned"' in script
+    assert "SignatureStatus]::NotSigned" in script
     assert '"public-trusted"' in script
-    assert '"untrusted"' in script
+    assert 'status = "self-signed"' not in script
+    assert 'status = "untrusted"' not in script
     assert "PublicChainTrusted" in script
     assert "Cert:\\LocalMachine\\AuthRoot" in script
     assert "Cert:\\CurrentUser\\AuthRoot" in script

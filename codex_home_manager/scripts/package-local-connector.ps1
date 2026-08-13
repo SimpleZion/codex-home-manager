@@ -1,19 +1,33 @@
+[CmdletBinding(DefaultParameterSetName = "Release")]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")]
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]
     [string]$SourceEvidenceDirectory,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]
+    [string]$WindowsEvidenceDirectory,
+
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$SourceCommit,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")]
     [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
     [string]$SourceEvidenceRepository,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = "Release")]
     [ValidateNotNullOrEmpty()]
     [string]$SourceEvidenceSignerWorkflow,
+
+    [Parameter(Mandatory = $true, ParameterSetName = "CiBuild")]
+    [switch]$CiBuild,
+
+    [Parameter(Mandatory = $true, ParameterSetName = "CiBuild")]
+    [ValidateNotNullOrEmpty()]
+    [string]$CiOutputDirectory,
+
+    [switch]$VerifyReproducibleBuild,
 
     [switch]$FullReleaseValidation
 )
@@ -40,10 +54,12 @@ $embeddedReleasePublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7
 $releaseManifestScript = Join-Path $PSScriptRoot "release_manifest.py"
 $buildSourceSnapshotPath = Join-Path $buildRoot "release-build-source.json"
 $sourceEvidenceProofPath = Join-Path $buildRoot "source-release-evidence.json"
+$windowsBinaryEvidenceProofPath = Join-Path $buildRoot "windows-binary-evidence.json"
 $publicDistSyncPlanPath = Join-Path $buildRoot "public-dist-sync-plan.json"
 $generatedLauncherPath = Join-Path $buildRoot "connector_release_entry.py"
 $pyinstallerRunnerPath = Join-Path $buildRoot "run_reproducible_pyinstaller.py"
 $iconPath = Join-Path $appDirectory "packaging\windows\assets\codex-home-manager.ico"
+$versionInfoPath = Join-Path $appDirectory "packaging\windows\version_info.txt"
 $requirementsPath = Join-Path $appDirectory "packaging\windows\requirements-connector.txt"
 $releaseVersion = (Get-Content -LiteralPath (Join-Path $appDirectory "package.json") -Raw | ConvertFrom-Json).version
 
@@ -329,6 +345,24 @@ function Assert-PyInstallerExecutableBoundary {
     }
 }
 
+function Assert-WindowsVersionMetadata {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $versionInfo = (Get-Item -LiteralPath $Path).VersionInfo
+    $expected = [ordered]@{
+        FileVersion = $releaseVersion
+        ProductVersion = $releaseVersion
+        CompanyName = "SimpleZion"
+        ProductName = "Codex Home Manager"
+        FileDescription = "Codex Home Manager"
+    }
+    foreach ($name in $expected.Keys) {
+        if ([string]$versionInfo.$name -cne [string]$expected[$name]) {
+            throw "Windows version metadata mismatch for $name in ${Path}: expected '$($expected[$name])', got '$($versionInfo.$name)'"
+        }
+    }
+    return $expected
+}
+
 function Get-RandomLoopbackPort {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -457,7 +491,7 @@ ZIP fallback:
 2. Run "Install browser launch protocol.cmd" only when the browser protocol is not registered.
 3. Set CODEX_HOME before starting the connector if your .codex directory is not in a common location.
 
-Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. Authenticode is valid only for a non-self-signed certificate whose public trust chain validates; self-signed and other untrusted signatures are labeled untrusted.
+Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. Authenticode is used only when an existing publicly trusted certificate is available; otherwise Windows and release metadata explicitly report NotSigned.
 '@ | Set-Content -LiteralPath (Join-Path $PackageDirectory "README.txt") -Encoding UTF8
 }
 
@@ -482,7 +516,7 @@ function Invoke-IsolatedConnectorBuild {
 
     & $venvPython $pyinstallerRunnerPath `
             --noconfirm --clean --name CodexHomeManagerLocal --onedir --windowed `
-            --icon $iconPath --distpath $payloadRoot --workpath $oneDirWorkRoot --specpath $specRoot `
+            --icon $iconPath --version-file $versionInfoPath --distpath $payloadRoot --workpath $oneDirWorkRoot --specpath $specRoot `
             --add-data "$distSnapshot;dist" `
             --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.lifespan.on `
             --paths $appDirectory --paths (Join-Path $appDirectory "packaging\windows") `
@@ -493,7 +527,7 @@ function Invoke-IsolatedConnectorBuild {
 
     & $venvPython $pyinstallerRunnerPath `
             --noconfirm --clean --name CodexHomeManagerLocal --onefile --windowed `
-            --icon $iconPath --distpath $oneFileRoot --workpath $oneFileWorkRoot --specpath $specRoot `
+            --icon $iconPath --version-file $versionInfoPath --distpath $oneFileRoot --workpath $oneFileWorkRoot --specpath $specRoot `
             --add-data "$distSnapshot;dist" `
             --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.lifespan.on `
             --paths $appDirectory --paths (Join-Path $appDirectory "packaging\windows") `
@@ -577,38 +611,74 @@ function Invoke-AuthenticodePolicy {
         if ($signingResult.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
             throw "Authenticode signing did not produce a valid trusted signature: $($signingResult.StatusMessage)"
         }
-    }
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    $certificate = $signature.SignerCertificate
-    if ($null -eq $certificate) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path
+        $chainEvidence = Get-CertificateChainEvidence -Certificate $signature.SignerCertificate
+        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+            -not $chainEvidence.PublicChainTrusted) {
+            throw "Authenticode signing did not retain a publicly trusted signature"
+        }
         return [ordered]@{
-            status = "unavailable"
-            trust = "none"
-            signerThumbprint = $null
-            signerSubject = $null
+            status = "valid"
+            windowsStatus = "Valid"
+            trust = "public-trusted"
+            signerThumbprint = $signature.SignerCertificate.Thumbprint
+            signerSubject = $signature.SignerCertificate.Subject
             selfSigned = $false
-            chainTrusted = $false
+            chainTrusted = $true
             detachedSignatureRequired = $true
         }
     }
-    $chainEvidence = Get-CertificateChainEvidence -Certificate $certificate
-    $validPublicChain = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid -and
-        $chainEvidence.PublicChainTrusted
-    $status = if ($chainEvidence.SelfSigned) { "self-signed" } elseif ($validPublicChain) { "valid" } else { "untrusted" }
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+        $null -ne $signature.SignerCertificate) {
+        throw "No publicly trusted code-signing certificate is configured, but the EXE is not explicitly NotSigned"
+    }
     return [ordered]@{
-        status = $status
-        trust = if ($validPublicChain) { "public-trusted" } else { "untrusted" }
-        signerThumbprint = $certificate.Thumbprint
-        signerSubject = $certificate.Subject
-        selfSigned = [bool]$chainEvidence.SelfSigned
-        chainTrusted = [bool]$validPublicChain
+        status = "not-signed"
+        windowsStatus = "NotSigned"
+        trust = "none"
+        signerThumbprint = $null
+        signerSubject = $null
+        selfSigned = $false
+        chainTrusted = $false
         detachedSignatureRequired = $true
+    }
+}
+
+function Assert-CiAuthenticodeEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Evidence
+    )
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($Evidence.status -ceq "not-signed") {
+        if ($Evidence.windowsStatus -cne "NotSigned" -or
+            $Evidence.trust -cne "none" -or
+            $signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+            $null -ne $signature.SignerCertificate) {
+            throw "Source CI claims NotSigned, but the downloaded EXE Authenticode state differs"
+        }
+        return
+    }
+    if ($Evidence.status -cne "valid" -or
+        $Evidence.windowsStatus -cne "Valid" -or
+        $Evidence.trust -cne "public-trusted" -or
+        $signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate) {
+        throw "Source CI Authenticode evidence is neither explicitly NotSigned nor currently valid and public-trusted"
+    }
+    $chainEvidence = Get-CertificateChainEvidence -Certificate $signature.SignerCertificate
+    if (-not $chainEvidence.PublicChainTrusted -or
+        $signature.SignerCertificate.Thumbprint -cne [string]$Evidence.signerThumbprint -or
+        $signature.SignerCertificate.Subject -cne [string]$Evidence.signerSubject) {
+        throw "Downloaded EXE Authenticode signer or public trust chain differs from Source CI evidence"
     }
 }
 
 Push-Location $appDirectory
 try {
-    if (-not (Test-Path -LiteralPath $publicSiteRoot -PathType Container)) {
+    if ($PSCmdlet.ParameterSetName -eq "Release" -and -not (Test-Path -LiteralPath $publicSiteRoot -PathType Container)) {
         throw "Public site repository was not found: $publicSiteRoot"
     }
     if (-not (Test-Path -LiteralPath $releaseManifestScript -PathType Leaf)) {
@@ -630,75 +700,133 @@ try {
     Remove-InternalPath -Path $buildRoot
     New-Item -ItemType Directory -Force -Path $reproducibleBuildRoot, $releaseRoot | Out-Null
 
-    & python $releaseManifestScript capture-build-source `
-        --output $buildSourceSnapshotPath `
-        --root-repo $rootRepository `
-        --manager-repo $appDirectory
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to capture clean root and manager HEADs before the build"
+    if ($PSCmdlet.ParameterSetName -eq "Release") {
+        & python $releaseManifestScript capture-build-source `
+            --output $buildSourceSnapshotPath `
+            --root-repo $rootRepository `
+            --manager-repo $appDirectory
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to capture clean root and manager HEADs before the build"
+        }
     }
 
     Assert-ReleaseDestinationAvailable -Path $directExecutablePath
     Assert-ReleaseDestinationAvailable -Path $archivePath
 
-    if ($FullReleaseValidation) {
+    if ($PSCmdlet.ParameterSetName -eq "CiBuild" -and ($FullReleaseValidation -or $VerifyReproducibleBuild)) {
         & python "scripts\quality_gate.py"
         if ($LASTEXITCODE -ne 0) {
             throw "Complete product quality gate failed; connector packaging is blocked"
         }
     }
 
-    if (-not (Test-Path -LiteralPath $iconPath)) {
-        & python "scripts\generate_windows_icon.py"
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to generate Windows icon"
+    if ($PSCmdlet.ParameterSetName -eq "CiBuild") {
+        if (-not (Test-Path -LiteralPath $iconPath)) {
+            & python "scripts\generate_windows_icon.py"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to generate Windows icon"
+            }
         }
-    }
-    if (-not (Test-Path -LiteralPath $iconPath)) {
-        throw "Windows icon was not created: $iconPath"
+        if (-not (Test-Path -LiteralPath $iconPath)) {
+            throw "Windows icon was not created: $iconPath"
+        }
+        if (-not (Test-Path -LiteralPath $versionInfoPath -PathType Leaf)) {
+            throw "Windows version resource was not found: $versionInfoPath"
+        }
+        python -m venv $venvRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create connector packaging venv"
+        }
+        & $venvPython -m pip install --require-hashes --only-binary=:all: -r $requirementsPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install connector packaging requirements"
+        }
+        Write-ConnectorReleaseLauncher
+        Write-PyInstallerReproducibilityRunner
+        $firstBuild = Invoke-IsolatedConnectorBuild -BuildName "build-1"
+        if ($FullReleaseValidation -or $VerifyReproducibleBuild) {
+            $secondBuild = Invoke-IsolatedConnectorBuild -BuildName "build-2"
+            & python $releaseManifestScript compare-builds `
+                --first-dist $firstBuild.Dist --second-dist $secondBuild.Dist `
+                --first-exe $firstBuild.Exe --second-exe $secondBuild.Exe `
+                --first-zip $firstBuild.Zip --second-zip $secondBuild.Zip
+            if ($LASTEXITCODE -ne 0) {
+                throw "Two isolated connector builds were not byte-for-byte reproducible"
+            }
+        }
+        Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath
+        Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force
+        Copy-Item -LiteralPath $firstBuild.Zip -Destination $archivePath -Force
+        $authenticodeAudit = Invoke-AuthenticodePolicy -Path $directExecutablePath
+        Assert-ReleaseZipBoundary -Path $archivePath
+        $executableAudit = Assert-PyInstallerExecutableBoundary -Path $directExecutablePath
+        $versionAudit = Assert-WindowsVersionMetadata -Path $directExecutablePath
+        $executableAudit["versionInfo"] = $versionAudit
+        $directExecutableHash = Get-Sha256HashText -Path $directExecutablePath
+        $archiveHash = Get-Sha256HashText -Path $archivePath
+        $publicExecutableName = Get-ContentAddressedReleaseName -Extension "exe" -Sha256 $directExecutableHash
+        $publicArchiveName = Get-ContentAddressedReleaseName -Extension "zip" -Sha256 $archiveHash
+        $resolvedCiOutputDirectory = [System.IO.Path]::GetFullPath($CiOutputDirectory)
+        New-Item -ItemType Directory -Force -Path $resolvedCiOutputDirectory | Out-Null
+        $ciExecutablePath = Join-Path $resolvedCiOutputDirectory $publicExecutableName
+        $ciArchivePath = Join-Path $resolvedCiOutputDirectory $publicArchiveName
+        Copy-Item -LiteralPath $directExecutablePath -Destination $ciExecutablePath -Force
+        Copy-Item -LiteralPath $archivePath -Destination $ciArchivePath -Force
+        $ciMetadata = [ordered]@{
+            schemaVersion = 1
+            version = $releaseVersion
+            artifacts = @(
+                [ordered]@{ name = $publicExecutableName; kind = "exe"; sha256 = $directExecutableHash; size = (Get-Item -LiteralPath $ciExecutablePath).Length; audit = $executableAudit; authenticode = $authenticodeAudit },
+                [ordered]@{ name = $publicArchiveName; kind = "zip"; sha256 = $archiveHash; size = (Get-Item -LiteralPath $ciArchivePath).Length }
+            )
+        }
+        [System.IO.File]::WriteAllText(
+            (Join-Path $resolvedCiOutputDirectory "windows-build-metadata.json"),
+            ($ciMetadata | ConvertTo-Json -Depth 8) + "`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Write-Output "CI Windows release artifacts: $resolvedCiOutputDirectory"
+        return
     }
 
-    python -m venv $venvRoot
+    Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath
+    & python $releaseManifestScript prepare-windows-evidence `
+        --evidence-dir $WindowsEvidenceDirectory `
+        --source-commit $SourceCommit `
+        --version $releaseVersion `
+        --repository $SourceEvidenceRepository `
+        --signer-workflow $SourceEvidenceSignerWorkflow `
+        --release-dir $releaseRoot `
+        --public-site $publicSiteRoot `
+        --proof $windowsBinaryEvidenceProofPath
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create connector packaging venv"
+        throw "Source CI Windows artifact or attestation verification failed"
     }
-    & $venvPython -m pip install --require-hashes --only-binary=:all: -r $requirementsPath
+    $windowsBinaryEvidence = Get-Content -LiteralPath $windowsBinaryEvidenceProofPath -Raw | ConvertFrom-Json
+    $ciExecutableArtifact = @($windowsBinaryEvidence.artifacts | Where-Object kind -CEQ "exe")
+    $ciArchiveArtifact = @($windowsBinaryEvidence.artifacts | Where-Object kind -CEQ "zip")
+    if ($ciExecutableArtifact.Count -ne 1 -or $ciArchiveArtifact.Count -ne 1) {
+        throw "Verified Source CI Windows evidence must identify exactly one EXE and one ZIP"
+    }
+    $publicExecutableName = [string]$ciExecutableArtifact[0].name
+    $publicArchiveName = [string]$ciArchiveArtifact[0].name
+    $directExecutableHash = [string]$ciExecutableArtifact[0].sha256
+    $archiveHash = [string]$ciArchiveArtifact[0].sha256
+    $executableAudit = $ciExecutableArtifact[0].audit
+    $authenticodeAudit = $ciExecutableArtifact[0].authenticode
+    Assert-ReleaseZipBoundary -Path $archivePath
+    Assert-WindowsVersionMetadata -Path $directExecutablePath | Out-Null
+    Assert-CiAuthenticodeEvidence -Path $directExecutablePath -Evidence $authenticodeAudit
+    $blackboxPort = Get-RandomLoopbackPort
+    & python $releaseManifestScript blackbox-exe --executable $directExecutablePath --port $blackboxPort
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install connector packaging requirements"
+        throw "Downloaded Source CI EXE failed random-port public-Origin and same-origin black-box verification"
     }
-    Write-ConnectorReleaseLauncher
-    Write-PyInstallerReproducibilityRunner
-    $firstBuild = Invoke-IsolatedConnectorBuild -BuildName "build-1"
-    if ($FullReleaseValidation) {
-        $secondBuild = Invoke-IsolatedConnectorBuild -BuildName "build-2"
-        & python $releaseManifestScript compare-builds `
-            --first-dist $firstBuild.Dist --second-dist $secondBuild.Dist `
-            --first-exe $firstBuild.Exe --second-exe $secondBuild.Exe `
-            --first-zip $firstBuild.Zip --second-zip $secondBuild.Zip
-        if ($LASTEXITCODE -ne 0) {
-            throw "Two isolated connector builds were not byte-for-byte reproducible"
-        }
-    }
+
     Invoke-PublicSiteDistSync `
         -DistDirectory (Join-Path $appDirectory "dist") `
         -PublicSiteDirectory $publicSiteRoot
 
-    Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath
-    Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force
-    Copy-Item -LiteralPath $firstBuild.Zip -Destination $archivePath -Force
-    $authenticodeAudit = Invoke-AuthenticodePolicy -Path $directExecutablePath
-    $blackboxPort = Get-RandomLoopbackPort
-    & python $releaseManifestScript blackbox-exe --executable $directExecutablePath --port $blackboxPort
-    if ($LASTEXITCODE -ne 0) {
-        throw "Final packaged EXE failed random-port public-Origin and same-origin black-box verification"
-    }
-
-    Assert-ReleaseZipBoundary -Path $archivePath
-    $executableAudit = Assert-PyInstallerExecutableBoundary -Path $directExecutablePath
-    $directExecutableHash = Get-Sha256HashText -Path $directExecutablePath
-    $archiveHash = Get-Sha256HashText -Path $archivePath
-    $publicExecutableName = Get-ContentAddressedReleaseName -Extension "exe" -Sha256 $directExecutableHash
-    $publicArchiveName = Get-ContentAddressedReleaseName -Extension "zip" -Sha256 $archiveHash
     $publicExecutablePath = Join-Path $publicSiteRoot $publicExecutableName
     $publicArchivePath = Join-Path $publicSiteRoot $publicArchiveName
     $stableExePath = "/codex-home-manager-local-win-x64.exe"
@@ -779,7 +907,7 @@ try {
         (Join-Path $publicSiteRoot "verify-codex-home-manager.ps1"),
         (Join-Path $publicSiteRoot "release-signing-public-key.pem"),
         (Join-Path $publicSiteRoot "release-signing-public-key.sha256")
-    )
+    ) + @($windowsBinaryEvidence.assets | ForEach-Object { Join-Path $publicSiteRoot ([string]$_.name) })
     $publicChecksums = @($publicChecksumPaths | ForEach-Object {
         "{0}  {1}" -f (Get-Sha256HashText -Path $_), (Split-Path -Leaf $_)
     }) -join "`n"
@@ -823,8 +951,15 @@ try {
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
   X-Frame-Options: DENY
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
 
-/assets/*
+/assets/*.css
+  Cache-Control: public, max-age=31536000, immutable, no-transform
+
+/assets/*.js
+  Cache-Control: public, max-age=31536000, immutable, no-transform
+
+/assets/*.wasm
   Cache-Control: public, max-age=31536000, immutable, no-transform
 
 /codex-home-manager-local-win-x64-v*
@@ -860,6 +995,18 @@ $latestZipPath
 /source-*-attestation.sigstore.json
   Cache-Control: no-store, max-age=0
 
+/windows-build-metadata.json
+  Cache-Control: no-store, max-age=0
+
+/codex-home-manager-windows-x64-*.cdx.json
+  Cache-Control: no-store, max-age=0
+
+/BINARY-*-SUBJECTS.txt
+  Cache-Control: no-store, max-age=0
+
+/windows-*-attestation.sigstore.json
+  Cache-Control: no-store, max-age=0
+
 /release-manifest.json
   Cache-Control: no-store, max-age=0
 
@@ -881,9 +1028,11 @@ $latestZipPath
     Add-Type -AssemblyName Microsoft.VisualBasic
     $resolvedPublicSiteRoot = [System.IO.Path]::GetFullPath($publicSiteRoot).TrimEnd('\')
     $currentArtifactNames = @($publicExecutableName, $publicArchiveName)
+    $currentWindowsEvidenceNames = @($windowsBinaryEvidence.assets | ForEach-Object { [string]$_.name })
     $stalePublicArtifacts = @(Get-ChildItem -LiteralPath $publicSiteRoot -File | Where-Object {
         $_.Name -in @("codex-home-manager-local-win-x64.exe", "codex-home-manager-local-win-x64.zip") -or
-        ($_.Name -match '^codex-home-manager-local-win-x64-v\d+\.\d+\.\d+-[0-9a-f]{12}\.(exe|zip)$' -and $_.Name -notin $currentArtifactNames)
+        ($_.Name -match '^codex-home-manager-local-win-x64-v\d+\.\d+\.\d+-[0-9a-f]{12}\.(exe|zip)$' -and $_.Name -notin $currentArtifactNames) -or
+        ($_.Name -match '^codex-home-manager-windows-x64-[0-9a-f]{40}\.cdx\.json$' -and $_.Name -notin $currentWindowsEvidenceNames)
     })
     foreach ($staleArtifact in $stalePublicArtifacts) {
         if ([System.IO.Path]::GetFullPath($staleArtifact.DirectoryName).TrimEnd('\') -cne $resolvedPublicSiteRoot) {

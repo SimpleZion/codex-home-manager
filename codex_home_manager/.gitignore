@@ -3,6 +3,7 @@ dist/
 build/
 .pytest_cache/
 .t/
+.t-release-governance/
 .tmp/
 __pycache__/
 *.pyc

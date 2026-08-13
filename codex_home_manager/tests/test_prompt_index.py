@@ -13,12 +13,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import server
+from backend import prompt_index as prompt_index_module
 from backend.codex_data import export_thread_prompts, read_thread_prompt_page
 from backend.prompt_index import (
     PromptIndexCancelled,
     begin_prompt_index_request,
+    cleanup_prompt_indexes,
     finish_prompt_index_request,
+    iter_prompt_records,
     prompt_index_database_path,
+    prompt_index_root_path,
 )
 
 
@@ -366,6 +370,278 @@ def test_prompt_page_http_request_can_be_cancelled_during_sparse_scan(tmp_path: 
     assert cancelled is True
     assert page_response.status_code == 499
     assert page_response.json()["detail"] == "prompt indexing was cancelled"
+
+
+def test_prompt_index_status_and_clear_api_do_not_disclose_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_prompt = "private-prompt-marker-that-must-not-leak"
+    monkeypatch.setenv("CODEX_HOME_MANAGER_PROMPT_INDEX_MAX_TOTAL_BYTES", str(2 * 1024 * 1024))
+    monkeypatch.setenv("CODEX_HOME_MANAGER_PROMPT_INDEX_MAX_IDLE_SECONDS", "120")
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, [user_record(secret_prompt)])
+    read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+    database_path = prompt_index_database_path(codex_home_path)
+    assert database_path.is_file()
+
+    client = TestClient(server.app)
+    token_payload = client.get("/api/auth/token", params={"codex_home": str(codex_home_path)}).json()
+    headers = {token_payload["headerName"]: token_payload["token"]}
+    status_response = client.get(
+        "/api/prompt-index/status",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+    )
+
+    assert status_response.status_code == 200
+    status = status_response.json()
+    assert status["databaseExists"] is True
+    assert status["database"]["promptCount"] == 1
+    assert status["database"]["readable"] is True
+    assert status["database"]["inspectionState"] == "available"
+    assert status["storage"]["rootPath"] == str(prompt_index_root_path())
+    assert status["storage"]["maxTotalBytes"] == 2 * 1024 * 1024
+    assert status["storage"]["maxIdleSeconds"] == 120
+    serialized_status = json.dumps(status, ensure_ascii=False)
+    assert secret_prompt not in serialized_status
+    assert str(rollout_path) not in serialized_status
+    assert "rolloutPath" not in serialized_status
+
+    with TestClient(server.app) as unauthenticated_client:
+        unauthenticated_preview = unauthenticated_client.post(
+            "/api/prompt-index/clear/preview",
+            params={"codex_home": str(codex_home_path)},
+        )
+    assert unauthenticated_preview.status_code == 401
+
+    preview_response = client.post(
+        "/api/prompt-index/clear/preview",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["willClear"] is True
+    assert preview["reclaimableBytes"] > 0
+    assert secret_prompt not in json.dumps(preview, ensure_ascii=False)
+
+    missing_ticket_response = client.post(
+        "/api/prompt-index/clear",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+        json={},
+    )
+    assert missing_ticket_response.status_code == 428
+
+    request_body = {
+        "operationPreviewId": preview["operationPreviewId"],
+        "inputHash": preview["inputHash"],
+    }
+    clear_response = client.post(
+        "/api/prompt-index/clear",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+        json=request_body,
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["cleared"] is True
+    assert rollout_path.is_file()
+    assert not database_path.exists()
+
+    replay_response = client.post(
+        "/api/prompt-index/clear",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+        json=request_body,
+    )
+    assert replay_response.status_code == 428
+
+
+def test_prompt_index_cleanup_removes_orphans_idle_and_capacity_overflow(tmp_path: Path) -> None:
+    root_path = tmp_path / "prompt-indexes"
+    orphan_home, orphan_rollout = create_prompt_test_home(tmp_path / "orphan", [user_record("orphan")])
+    idle_home, _ = create_prompt_test_home(tmp_path / "idle", [user_record("idle")])
+    old_home, _ = create_prompt_test_home(tmp_path / "old", [user_record("old")])
+    recent_home, _ = create_prompt_test_home(tmp_path / "recent", [user_record("recent")])
+    for codex_home_path in (orphan_home, idle_home, old_home, recent_home):
+        read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+
+    orphan_database = prompt_index_database_path(orphan_home)
+    idle_database = prompt_index_database_path(idle_home)
+    old_database = prompt_index_database_path(old_home)
+    recent_database = prompt_index_database_path(recent_home)
+    orphan_rollout.unlink()
+    now_ns = time.time_ns()
+    with closing(sqlite3.connect(idle_database)) as connection, connection:
+        connection.execute(
+            "UPDATE prompt_index_metadata SET last_accessed_ns = ? WHERE singleton = 1",
+            (now_ns - 120 * 1_000_000_000,),
+        )
+
+    lifecycle_cleanup = cleanup_prompt_indexes(
+        root_path=root_path,
+        max_total_bytes=1024 * 1024 * 1024,
+        max_idle_seconds=60,
+        now_ns=now_ns,
+    )
+    assert lifecycle_cleanup["purgedMissingRollouts"] == 1
+    assert lifecycle_cleanup["deletedDatabases"] == 2
+    assert not orphan_database.exists()
+    assert not idle_database.exists()
+
+    for database_path, last_accessed_ns in (
+        (old_database, now_ns - 30 * 1_000_000_000),
+        (recent_database, now_ns - 5 * 1_000_000_000),
+    ):
+        with closing(sqlite3.connect(database_path)) as connection, connection:
+            connection.execute("CREATE TABLE capacity_padding (payload BLOB NOT NULL)")
+            connection.execute("INSERT INTO capacity_padding(payload) VALUES (zeroblob(?))", (2 * 1024 * 1024,))
+            connection.execute(
+                "UPDATE prompt_index_metadata SET last_accessed_ns = ? WHERE singleton = 1",
+                (last_accessed_ns,),
+            )
+    old_size = old_database.stat().st_size
+    recent_size = recent_database.stat().st_size
+    capacity_cleanup = cleanup_prompt_indexes(
+        root_path=root_path,
+        max_total_bytes=recent_size + 128 * 1024,
+        max_idle_seconds=3600,
+        now_ns=now_ns,
+    )
+    assert old_size > 0
+    assert capacity_cleanup["deletedDatabases"] == 1
+    assert not old_database.exists()
+    assert recent_database.exists()
+    assert capacity_cleanup["overCapacity"] is False
+
+
+def test_prompt_index_automatic_cleanup_purges_missing_rollout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orphan_home, orphan_rollout = create_prompt_test_home(tmp_path / "orphan", [user_record("orphan")])
+    active_home, _ = create_prompt_test_home(tmp_path / "active", [user_record("active")])
+    for codex_home_path in (orphan_home, active_home):
+        read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+    orphan_database = prompt_index_database_path(orphan_home)
+    active_database = prompt_index_database_path(active_home)
+    orphan_rollout.unlink()
+    monkeypatch.setattr(prompt_index_module, "prompt_index_cleanup_interval_seconds", 0)
+
+    page = read_thread_prompt_page(str(active_home), "thread-1", scope="all", scan_budget_ms=1_000)
+
+    assert page["promptCount"] == 1
+    assert not orphan_database.exists()
+    assert active_database.exists()
+
+
+def test_prompt_index_cleanup_skips_database_held_by_streaming_reader(tmp_path: Path) -> None:
+    codex_home_path, rollout_path = create_prompt_test_home(
+        tmp_path,
+        [user_record("first"), user_record("second", 1)],
+    )
+    read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+    database_path = prompt_index_database_path(codex_home_path)
+    records = iter_prompt_records(database_path, rollout_path, scope="all", fetch_size=1)
+    assert next(records)["text"] == "first"
+
+    cleanup_result = cleanup_prompt_indexes(
+        root_path=database_path.parent,
+        max_total_bytes=1024 * 1024 * 1024,
+        max_idle_seconds=60,
+        now_ns=time.time_ns() + 120 * 1_000_000_000,
+    )
+    assert cleanup_result["skippedInUse"] == 1
+    assert database_path.exists()
+
+    records.close()
+    cleanup_after_close = cleanup_prompt_indexes(
+        root_path=database_path.parent,
+        max_total_bytes=1024 * 1024 * 1024,
+        max_idle_seconds=60,
+        now_ns=time.time_ns() + 120 * 1_000_000_000,
+    )
+    assert cleanup_after_close["deletedDatabases"] == 1
+    assert not database_path.exists()
+
+
+def test_prompt_index_mcp_and_capability_metadata_are_explicit(tmp_path: Path) -> None:
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record("metadata secret")])
+    read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+    client = TestClient(server.app)
+    token_payload = client.get("/api/auth/token", params={"codex_home": str(codex_home_path)}).json()
+    api_token = token_payload["token"]
+
+    tools_response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    ).json()
+    tools = {tool["name"]: tool for tool in tools_response["result"]["tools"]}
+    assert {
+        "codex_prompt_index_status",
+        "codex_preview_clear_prompt_index",
+        "codex_clear_prompt_index",
+    } <= tools.keys()
+    clear_tool = tools["codex_clear_prompt_index"]
+    assert {"apiToken", "operationPreviewId", "inputHash"} <= set(clear_tool["inputSchema"]["required"])
+    assert "no cache backup" in clear_tool["description"]
+    assert "prompt text" in tools["codex_prompt_index_status"]["description"]
+
+    status_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_prompt_index_status",
+                "arguments": {"codexHome": str(codex_home_path), "apiToken": api_token},
+            },
+        },
+    ).json()
+    structured_status = status_response["result"]["structuredContent"]
+    assert structured_status["database"]["promptCount"] == 1
+    assert "metadata secret" not in json.dumps(structured_status, ensure_ascii=False)
+
+    preview_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_preview_clear_prompt_index",
+                "arguments": {"codexHome": str(codex_home_path), "apiToken": api_token},
+            },
+        },
+    ).json()
+    preview = preview_response["result"]["structuredContent"]
+    clear_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_clear_prompt_index",
+                "arguments": {
+                    "codexHome": str(codex_home_path),
+                    "apiToken": api_token,
+                    "operationPreviewId": preview["operationPreviewId"],
+                    "inputHash": preview["inputHash"],
+                },
+            },
+        },
+    ).json()
+    assert clear_response["result"]["structuredContent"]["cleared"] is True
+    assert not prompt_index_database_path(codex_home_path).exists()
+
+    capabilities = client.get("/api/capabilities").json()["capabilities"]
+    capabilities_by_name = {capability["name"]: capability for capability in capabilities}
+    clear_capability = capabilities_by_name["clear_prompt_index"]
+    assert clear_capability["previewEndpoint"] == "/api/prompt-index/clear/preview"
+    assert clear_capability["rollback"] is None
+    assert clear_capability["riskLevel"] == "write"
 
 
 def test_prompt_index_module_forbids_whole_file_mapping() -> None:

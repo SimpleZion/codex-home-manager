@@ -410,12 +410,37 @@ export type ConnectorReleaseMetadata = {
     kind: string;
     authenticode?: {
       status?: string;
+      trust?: string;
       signerSubject?: string | null;
       signerThumbprint?: string | null;
+      selfSigned?: boolean;
+      chainTrusted?: boolean;
       detachedSignatureRequired?: boolean;
     };
   }>;
 };
+
+export function parseConnectorReleaseMetadata(
+  value: unknown,
+  expectedVersion = String(packageMetadata.version)
+): ConnectorReleaseMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if ((record.schemaVersion !== 1 && record.schemaVersion !== 2)
+    || record.version !== expectedVersion
+    || !Array.isArray(record.artifacts)) return null;
+  const validArtifacts = record.artifacts.every((artifact) => {
+    if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return false;
+    const artifactRecord = artifact as Record<string, unknown>;
+    if (typeof artifactRecord.name !== "string" || typeof artifactRecord.kind !== "string") return false;
+    if (artifactRecord.authenticode === undefined) return true;
+    if (!artifactRecord.authenticode || typeof artifactRecord.authenticode !== "object" || Array.isArray(artifactRecord.authenticode)) return false;
+    const authenticode = artifactRecord.authenticode as Record<string, unknown>;
+    return (authenticode.status === undefined || typeof authenticode.status === "string")
+      && (authenticode.trust === undefined || typeof authenticode.trust === "string");
+  });
+  return validArtifacts ? value as ConnectorReleaseMetadata : null;
+}
 
 function semanticVersionMajor(version: string): number | null {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version.trim());
@@ -460,12 +485,18 @@ export function connectorReleaseTrustMessage(
   const executable = metadata.artifacts.find((artifact) => artifact.kind.toLowerCase() === "exe");
   const authenticode = executable?.authenticode;
   const status = String(authenticode?.status || "").trim().toLowerCase();
+  const trust = String(authenticode?.trust || "").trim().toLowerCase();
   const signer = String(authenticode?.signerSubject || "").trim();
   if (status === "valid") {
     const signerText = signer ? (language === "en" ? ` (signer: ${signer})` : `（签名者：${signer}）`) : "";
     return language === "en"
       ? `Release metadata reports Authenticode status “valid”${signerText}, but that build-time result does not prove public certificate trust on this Windows device or SmartScreen reputation. Authenticity is independently verifiable with the detached Ed25519 release manifest and pinned public-key fingerprint.`
       : `发布元数据记录 Authenticode 状态为“valid”${signerText}，但该构建时结果不证明证书在这台 Windows 设备上属于公共受信任代码签名，也不代表 SmartScreen 信誉；真实性可另行通过 detached Ed25519 发布清单和固定公钥指纹核验。`;
+  }
+  if (status === "unavailable" && (trust === "none" || !trust)) {
+    return language === "en"
+      ? "Release metadata explicitly reports Authenticode as unavailable with no certificate trust evidence. This is a valid published state; Windows may warn, and authenticity should be checked with the detached Ed25519 release manifest and pinned public-key fingerprint."
+      : "发布元数据明确记录 Authenticode 不可用且没有证书信任证据。这是合法的发布状态；Windows 可能提示风险，真实性应通过 detached Ed25519 发布清单和固定公钥指纹核验。";
   }
   return language === "en"
     ? `Release metadata does not report a valid Authenticode result${status ? ` (status: ${status})` : ""}; this does not determine whether any signature bytes are present. Windows may warn, and authenticity should be checked with the detached Ed25519 release manifest and pinned public-key fingerprint.`
@@ -639,6 +670,51 @@ type AuthToken = {
   headerName: string;
   expiresAtMs: number | null;
 };
+
+type PromptIndexStatus = {
+  databaseExists: boolean;
+  database: {
+    sizeBytes: number;
+    inUse: boolean;
+    activeOperations: number;
+    readable: boolean | null;
+    inspectionState: string;
+    lastAccessedAtMs: number | null;
+    schemaVersion: number | null;
+    sourceRolloutCount: number | null;
+    missingSourceRolloutCount: number | null;
+    promptCount: number | null;
+  } | null;
+  storage: {
+    rootPath: string;
+    databaseCount: number;
+    activeDatabaseCount: number;
+    totalSizeBytes: number;
+    maxTotalBytes: number;
+    maxIdleSeconds: number;
+    overCapacity: boolean;
+  };
+};
+
+type PromptIndexClearPreview = {
+  operationPreviewId: string;
+  inputHash: string;
+  expiresAtMs: number;
+  stateDigest: string;
+  willClear: boolean;
+  reclaimableBytes: number;
+  inUse: boolean;
+  warning: string;
+};
+
+type PromptIndexClearResult = {
+  cleared: boolean;
+  databaseExisted: boolean;
+  deletedFileCount: number;
+  reclaimedBytes: number;
+};
+
+type AuthorizedJsonRequest = <T>(url: string, options?: RequestInit, jsonBody?: boolean) => Promise<T>;
 
 class ApiError extends Error {
   status: number;
@@ -1422,6 +1498,47 @@ const englishText: Record<string, string> = {
   "条可搜索": "searchable",
   "上一个匹配": "Previous match",
   "下一个匹配": "Next match",
+  "仍有结果未加载": "More results not loaded",
+  "本机搜索索引": "Local search index",
+  "索引状态": "Index status",
+  "正在读取索引状态...": "Loading index status...",
+  "索引状态暂时不可用": "Index status is temporarily unavailable",
+  "派生明文索引": "Derived plaintext index",
+  "这是存储在本机的派生明文索引，用于加速线程内容搜索。": "This is a derived plaintext index stored on this device to speed up thread-content search.",
+  "本机索引目录": "Local index directory",
+  "全部索引大小": "All index size",
+  "当前索引大小": "Current index size",
+  "数据库数": "Databases",
+  "活跃数据库": "Active databases",
+  "索引 prompt": "Indexed prompts",
+  "源 rollout": "Source rollouts",
+  "缺失源 rollout": "Missing source rollouts",
+  "空闲回收": "Idle cleanup",
+  "容量上限": "Capacity limit",
+  "源 rollout 删除后，对应派生索引会自动回收。": "Derived index data is automatically reclaimed after its source rollout is deleted.",
+  "刷新索引状态": "Refresh index status",
+  "清空索引": "Clear index",
+  "正在清空索引...": "Clearing index...",
+  "当前没有可清空的索引。": "There is no index to clear.",
+  "索引正在使用中，暂时不能清空。请等待当前搜索或扫描完成后重试。": "The index is currently in use and cannot be cleared. Wait for the active search or scan to finish, then retry.",
+  "清空本机 prompt 索引？": "Clear the local prompt index?",
+  "不会删除源线程或 rollout。清空后，当前搜索内容会从源线程重新建立索引。": "Source threads and rollouts will not be deleted. After clearing, the current search content will rebuild the index from source threads.",
+  "预计释放：": "Expected reclaim: ",
+  "索引已清空；当前内容正在从源线程重建。": "The index was cleared; current content is rebuilding it from source threads.",
+  "索引已不存在；当前内容仍可从源线程重建。": "The index no longer exists; current content can still rebuild it from source threads.",
+  "清空索引不会删除源线程，后续搜索会自动重建。": "Clearing the index does not delete source threads; later searches rebuild it automatically.",
+  "当前索引正在使用": "Current index is in use",
+  "没有当前索引": "No current index",
+  "个数据库": "databases",
+  "小时": "hours",
+  "分钟": "minutes",
+  "秒": "seconds",
+  "正在加载后续匹配...": "Loading later matches...",
+  "已加载后续匹配。": "Loaded later matches.",
+  "后续匹配尚未可用，索引可能仍在扫描。": "Later matches are not available yet; indexing may still be in progress.",
+  "已循环到当前已加载的最后匹配；后端仍有匹配尚未加载。": "Wrapped to the last currently loaded match; more backend matches are not loaded yet.",
+  "已循环到最后一个匹配。": "Wrapped to the last match.",
+  "已循环到第一个匹配。": "Wrapped to the first match.",
   "清空搜索": "Clear search",
   "原始记录": "Raw record",
   "（已截断）": " (truncated)",
@@ -1840,6 +1957,21 @@ function formatDate(value: number | null): string {
 
 function formatCount(value: number): string {
   return value.toLocaleString("en-US");
+}
+
+function formatRetentionSeconds(value: number, t: Translator): string {
+  if (!Number.isFinite(value) || value <= 0) return `0 ${t("秒")}`;
+  const units = [
+    { seconds: 24 * 60 * 60, translatedLabel: t("天") },
+    { seconds: 60 * 60, translatedLabel: t("小时") },
+    { seconds: 60, translatedLabel: t("分钟") }
+  ];
+  for (const unit of units) {
+    if (value >= unit.seconds && value % unit.seconds === 0) {
+      return `${formatCount(value / unit.seconds)} ${unit.translatedLabel}`;
+    }
+  }
+  return `${formatCount(value)} ${t("秒")}`;
 }
 
 function formatCompactCount(value: number, language: Language = "en"): string {
@@ -5989,11 +6121,13 @@ function ThreadPromptModal({
   thread,
   codexHome,
   browserWorkspace,
+  fetchAuthorizedJson,
   onClose
 }: {
   thread: ThreadRecord | null;
   codexHome: string;
   browserWorkspace: BrowserCodexWorkspace | null;
+  fetchAuthorizedJson: AuthorizedJsonRequest;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -6011,7 +6145,14 @@ function ThreadPromptModal({
   const [promptsLoading, setPromptsLoading] = React.useState(false);
   const [promptsLoadingMore, setPromptsLoadingMore] = React.useState(false);
   const [promptsError, setPromptsError] = React.useState("");
+  const [promptNavigationStatus, setPromptNavigationStatus] = React.useState("");
   const [copyingPrompts, setCopyingPrompts] = React.useState(false);
+  const [promptIndexStatus, setPromptIndexStatus] = React.useState<PromptIndexStatus | null>(null);
+  const [promptIndexStatusLoading, setPromptIndexStatusLoading] = React.useState(false);
+  const [promptIndexClearing, setPromptIndexClearing] = React.useState(false);
+  const [promptIndexError, setPromptIndexError] = React.useState("");
+  const [promptIndexNotice, setPromptIndexNotice] = React.useState("");
+  const [promptContentRefreshNonce, setPromptContentRefreshNonce] = React.useState(0);
   const promptSearchInputRef = React.useRef<HTMLInputElement>(null);
   const browserPromptSequenceRef = React.useRef(0);
   const promptPageSequenceRef = React.useRef(0);
@@ -6034,6 +6175,8 @@ function ThreadPromptModal({
   const promptLoadingMoreRef = React.useRef(false);
   const loadedPromptsRef = React.useRef<PromptRecord[]>([]);
   const loadMorePromptsRef = React.useRef<() => Promise<number>>(async () => 0);
+  const promptIndexStatusSequenceRef = React.useRef(0);
+  const refreshPromptIndexAfterContentRef = React.useRef(false);
   const clearSearchOnEscape = React.useCallback(() => {
     if (!promptSearchText) return false;
     setPromptSearchText("");
@@ -6045,6 +6188,26 @@ function ThreadPromptModal({
   const dialogRef = useModalAccessibility(Boolean(thread), onClose, clearSearchOnEscape);
   const currentBrowserPrompts = browserPrompts?.threadId === thread?.id ? browserPrompts : null;
   const isBrowserPromptMode = Boolean(browserWorkspace);
+
+  const loadPromptIndexStatus = React.useCallback(async () => {
+    if (!thread || isBrowserPromptMode) return null;
+    const sequence = promptIndexStatusSequenceRef.current + 1;
+    promptIndexStatusSequenceRef.current = sequence;
+    setPromptIndexStatusLoading(true);
+    setPromptIndexError("");
+    try {
+      const params = new URLSearchParams({ codex_home: codexHome });
+      const status = await fetchJson<PromptIndexStatus>(`/api/prompt-index/status?${params.toString()}`, { cache: "no-store" });
+      if (promptIndexStatusSequenceRef.current !== sequence) return null;
+      setPromptIndexStatus(status);
+      return status;
+    } catch {
+      if (promptIndexStatusSequenceRef.current === sequence) setPromptIndexError(t("索引状态暂时不可用"));
+      return null;
+    } finally {
+      if (promptIndexStatusSequenceRef.current === sequence) setPromptIndexStatusLoading(false);
+    }
+  }, [codexHome, isBrowserPromptMode, t, thread]);
 
   const cancelActivePageRequest = React.useCallback(() => {
     const request = promptPageRequestRef.current;
@@ -6081,7 +6244,19 @@ function ThreadPromptModal({
     setLocalNextCursor(null);
     promptNextCursorRef.current = null;
     setPromptsError("");
+    setPromptNavigationStatus("");
+    setPromptIndexStatus(null);
+    setPromptIndexStatusLoading(false);
+    setPromptIndexClearing(false);
+    setPromptIndexError("");
+    setPromptIndexNotice("");
+    refreshPromptIndexAfterContentRef.current = false;
   }, [thread?.id]);
+
+  React.useEffect(() => {
+    if (!thread || contentMode !== "prompts" || isBrowserPromptMode) return;
+    void loadPromptIndexStatus();
+  }, [contentMode, isBrowserPromptMode, loadPromptIndexStatus, thread]);
 
   React.useEffect(() => {
     const timeoutId = window.setTimeout(() => setPromptSearchQuery(promptSearchText.trim()), 160);
@@ -6254,7 +6429,7 @@ function ThreadPromptModal({
       setPromptsLoadingMore(false);
       loadMorePromptsRef.current = async () => 0;
     };
-  }, [activePromptScope, browserWorkspace, cancelActivePageRequest, codexHome, contentMode, promptSearchQuery, t, thread]);
+  }, [activePromptScope, browserWorkspace, cancelActivePageRequest, codexHome, contentMode, promptContentRefreshNonce, promptSearchQuery, t, thread]);
 
   React.useEffect(() => () => cancelActiveCopyRequest(), [activePromptScope, cancelActiveCopyRequest, promptSearchQuery, thread?.id]);
 
@@ -6303,6 +6478,7 @@ function ThreadPromptModal({
 
   React.useEffect(() => {
     setActivePromptSearchIndex(promptSearchQuery && searchedPrompts.length ? 0 : -1);
+    setPromptNavigationStatus("");
   }, [filterMode, promptSearchQuery, thread?.id]);
 
   React.useEffect(() => {
@@ -6312,6 +6488,12 @@ function ThreadPromptModal({
       return Math.min(current, searchedPrompts.length - 1);
     });
   }, [promptSearchQuery, searchedPrompts.length]);
+
+  React.useEffect(() => {
+    if (!refreshPromptIndexAfterContentRef.current || !promptDataReady || !promptMatchCountComplete) return;
+    refreshPromptIndexAfterContentRef.current = false;
+    void loadPromptIndexStatus();
+  }, [loadPromptIndexStatus, promptDataReady, promptMatchCountComplete]);
   const filterOptions: Array<{ value: PromptFilterMode; label: string; count: number; description: string }> = [
     {
       value: "pure",
@@ -6455,37 +6637,123 @@ function ThreadPromptModal({
   }
 
   async function selectPromptSearchResult(direction: -1 | 1) {
+    setPromptNavigationStatus("");
     if (!searchedPrompts.length) {
       if (direction > 0 && promptsHaveMore) {
+        setPromptNavigationStatus(t("正在加载后续匹配..."));
         const added = await loadMorePromptsRef.current();
-        if (added > 0) setActivePromptSearchIndex(0);
+        if (added > 0) {
+          setActivePromptSearchIndex(0);
+          setPromptNavigationStatus(t("已加载后续匹配。"));
+        } else {
+          setPromptNavigationStatus(t("后续匹配尚未可用，索引可能仍在扫描。"));
+        }
       }
       return;
     }
     const currentIndex = activePromptSearchIndex < 0 ? 0 : activePromptSearchIndex;
-    if (direction > 0 && currentIndex >= searchedPrompts.length - 1 && promptsHaveMore) {
-      const previousLength = searchedPrompts.length;
-      const added = await loadMorePromptsRef.current();
-      if (added > 0) setActivePromptSearchIndex(previousLength);
+    if (direction < 0 && currentIndex === 0) {
+      setActivePromptSearchIndex(searchedPrompts.length - 1);
+      setPromptNavigationStatus(promptsHaveMore
+        ? t("已循环到当前已加载的最后匹配；后端仍有匹配尚未加载。")
+        : t("已循环到最后一个匹配。"));
       return;
     }
-    if (direction < 0 && currentIndex === 0 && promptsHaveMore) return;
+    if (direction > 0 && currentIndex >= searchedPrompts.length - 1) {
+      if (promptsHaveMore) {
+        const previousLength = searchedPrompts.length;
+        setPromptNavigationStatus(t("正在加载后续匹配..."));
+        const added = await loadMorePromptsRef.current();
+        if (added > 0) {
+          setActivePromptSearchIndex(previousLength);
+          setPromptNavigationStatus(t("已加载后续匹配。"));
+        } else if (promptNextCursorRef.current) {
+          setPromptNavigationStatus(t("后续匹配尚未可用，索引可能仍在扫描。"));
+        } else {
+          setActivePromptSearchIndex(0);
+          setPromptNavigationStatus(t("已循环到第一个匹配。"));
+        }
+        return;
+      }
+      setActivePromptSearchIndex(0);
+      setPromptNavigationStatus(t("已循环到第一个匹配。"));
+      return;
+    }
     setActivePromptSearchIndex((current) => {
       if (current < 0) return direction > 0 ? 0 : searchedPrompts.length - 1;
-      return (current + direction + searchedPrompts.length) % searchedPrompts.length;
+      return current + direction;
     });
+  }
+
+  async function clearPromptIndex() {
+    if (isBrowserPromptMode || promptIndexClearing) return;
+    setPromptIndexClearing(true);
+    setPromptIndexError("");
+    setPromptIndexNotice("");
+    try {
+      const params = new URLSearchParams({ codex_home: codexHome });
+      const preview = await fetchJson<PromptIndexClearPreview>(`/api/prompt-index/clear/preview?${params.toString()}`, {
+        method: "POST",
+        cache: "no-store"
+      });
+      if (preview.inUse) {
+        setPromptIndexError(t("索引正在使用中，暂时不能清空。请等待当前搜索或扫描完成后重试。"));
+        await loadPromptIndexStatus();
+        return;
+      }
+      if (!preview.willClear) {
+        setPromptIndexNotice(t("当前没有可清空的索引。"));
+        await loadPromptIndexStatus();
+        return;
+      }
+      const confirmed = window.confirm(
+        `${t("清空本机 prompt 索引？")}\n\n${t("预计释放：")}${formatBytes(preview.reclaimableBytes)}\n\n${t("不会删除源线程或 rollout。清空后，当前搜索内容会从源线程重新建立索引。")}`
+      );
+      if (!confirmed) return;
+      const result = await fetchAuthorizedJson<PromptIndexClearResult>(`/api/prompt-index/clear?${params.toString()}`, {
+        method: "POST",
+        body: JSON.stringify({
+          operationPreviewId: preview.operationPreviewId,
+          inputHash: preview.inputHash
+        })
+      }, true);
+      setPromptIndexNotice(result.cleared
+        ? t("索引已清空；当前内容正在从源线程重建。")
+        : t("索引已不存在；当前内容仍可从源线程重建。"));
+      await loadPromptIndexStatus();
+      refreshPromptIndexAfterContentRef.current = true;
+      setPromptContentRefreshNonce((value) => value + 1);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        await loadPromptIndexStatus();
+        setPromptIndexError(t("索引正在使用中，暂时不能清空。请等待当前搜索或扫描完成后重试。"));
+      } else {
+        setPromptIndexError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setPromptIndexClearing(false);
+    }
   }
 
   function clearPromptSearch() {
     setPromptSearchText("");
     setPromptSearchQuery("");
     setActivePromptSearchIndex(-1);
+    setPromptNavigationStatus("");
     promptSearchInputRef.current?.focus();
   }
 
   const closeOnBackdrop = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.target === event.currentTarget) onClose();
   };
+
+  const promptIndexDatabase = promptIndexStatus?.database || null;
+  const promptIndexStorage = promptIndexStatus?.storage || null;
+  const promptIndexSummary = promptIndexStatusLoading && !promptIndexStatus
+    ? t("正在读取索引状态...")
+    : promptIndexStatus
+      ? `${formatBytes(promptIndexStatus.storage.totalSizeBytes)} · ${formatCount(promptIndexStatus.storage.databaseCount)} ${t("个数据库")}`
+      : t("索引状态");
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={closeOnBackdrop}>
@@ -6574,6 +6842,53 @@ function ThreadPromptModal({
               {copyingPrompts ? t("正在流式读取...") : copied ? t("已复制") : copyMode === "metadata" ? t("复制带元信息") : t("复制干净文本")}
             </button>
           </div>
+          {!isBrowserPromptMode ? (
+            <details className="prompt-index-management" onToggle={(event) => {
+              if (event.currentTarget.open) void loadPromptIndexStatus();
+            }}>
+              <summary>
+                <Database size={15} aria-hidden="true" />
+                <span>{t("本机搜索索引")}</span>
+                <em>{promptIndexSummary}</em>
+                {promptIndexDatabase?.inUse ? <i>{t("当前索引正在使用")}</i> : null}
+                <ChevronDown className="prompt-index-chevron" size={15} aria-hidden="true" />
+              </summary>
+              <div className="prompt-index-body">
+                <div className="prompt-index-intro">
+                  <strong>{t("派生明文索引")}</strong>
+                  <p>{t("这是存储在本机的派生明文索引，用于加速线程内容搜索。")}</p>
+                </div>
+                {promptIndexStatusLoading && !promptIndexStatus ? <p className="prompt-index-loading" role="status">{t("正在读取索引状态...")}</p> : null}
+                {promptIndexStorage ? (
+                  <>
+                    <p className="prompt-index-path"><span>{t("本机索引目录")}</span><code title={promptIndexStorage.rootPath}>{promptIndexStorage.rootPath}</code></p>
+                    <dl className="prompt-index-facts">
+                      <div><dt>{t("全部索引大小")}</dt><dd>{formatBytes(promptIndexStorage.totalSizeBytes)}</dd></div>
+                      <div><dt>{t("数据库数")}</dt><dd>{formatCount(promptIndexStorage.databaseCount)}<small>{t("活跃数据库")} {formatCount(promptIndexStorage.activeDatabaseCount)}</small></dd></div>
+                      <div><dt>{t("当前索引大小")}</dt><dd>{promptIndexDatabase ? formatBytes(promptIndexDatabase.sizeBytes) : t("没有当前索引")}</dd></div>
+                      <div><dt>{t("索引 prompt")}</dt><dd>{promptIndexDatabase?.promptCount == null ? "-" : formatCount(promptIndexDatabase.promptCount)}</dd></div>
+                      <div><dt>{t("源 rollout")}</dt><dd>{promptIndexDatabase?.sourceRolloutCount == null ? "-" : formatCount(promptIndexDatabase.sourceRolloutCount)}<small>{t("缺失源 rollout")} {promptIndexDatabase?.missingSourceRolloutCount == null ? "-" : formatCount(promptIndexDatabase.missingSourceRolloutCount)}</small></dd></div>
+                      <div><dt>{t("空闲回收")}</dt><dd>{formatRetentionSeconds(promptIndexStorage.maxIdleSeconds, t)}<small>{t("容量上限")} {formatBytes(promptIndexStorage.maxTotalBytes)}</small></dd></div>
+                    </dl>
+                  </>
+                ) : null}
+                <p className="prompt-index-policy">{t("源 rollout 删除后，对应派生索引会自动回收。")}</p>
+                <div className="prompt-index-actions">
+                  <button type="button" onClick={() => void loadPromptIndexStatus()} disabled={promptIndexStatusLoading || promptIndexClearing}>
+                    <RefreshCcw size={14} aria-hidden="true" />
+                    {t("刷新索引状态")}
+                  </button>
+                  <button className="danger-action" type="button" onClick={() => void clearPromptIndex()} disabled={promptIndexStatusLoading || promptIndexClearing || !promptIndexStatus?.databaseExists || Boolean(promptIndexDatabase?.inUse)}>
+                    <Trash2 size={14} aria-hidden="true" />
+                    {promptIndexClearing ? t("正在清空索引...") : t("清空索引")}
+                  </button>
+                </div>
+                <p className="prompt-index-clear-note">{t("清空索引不会删除源线程，后续搜索会自动重建。")}</p>
+                {promptIndexError ? <p className="prompt-index-message error" role="alert">{promptIndexError}</p> : null}
+                {promptIndexNotice ? <p className="prompt-index-message success" role="status" aria-live="polite">{promptIndexNotice}</p> : null}
+              </div>
+            </details>
+          ) : null}
         </div>
 
         <div className="prompt-filter-bar" aria-label={t("Prompt 筛选")}>
@@ -6613,11 +6928,12 @@ function ThreadPromptModal({
             type="search"
           />
           <span className="prompt-search-count" role="status" aria-live="polite">
-            {promptSearchQuery
+            <span>{promptSearchQuery
               ? searchedPrompts.length
-                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(promptMatchCount)} · ${promptMatchCountComplete ? t("完整") : t("扫描中")}`
+                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? t("扫描中") : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`
                 : promptMatchCountComplete ? t("没有匹配内容") : `${t("扫描中")} · 0`
-              : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${promptMatchCountComplete ? t("完整") : t("扫描中")}`}
+              : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? t("扫描中") : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`}</span>
+            {promptNavigationStatus ? <span className="prompt-navigation-note">{promptNavigationStatus}</span> : null}
           </span>
           <button onClick={() => void selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
           <button onClick={() => void selectPromptSearchResult(1)} disabled={!promptSearchQuery || (!searchedPrompts.length && !promptsHaveMore)} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={16} /></button>
@@ -6649,13 +6965,9 @@ function useConnectorReleaseMetadata(): ConnectorReleaseMetadata | null | undefi
     void fetch(connectorReleaseMetadataUrl, { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Release metadata request failed with HTTP ${response.status}`);
-        const value = await response.json() as unknown;
-        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid release metadata");
-        const record = value as Record<string, unknown>;
-        if (record.schemaVersion !== 1 || record.version !== packageMetadata.version || !Array.isArray(record.artifacts)) {
-          throw new Error("Unsupported release metadata");
-        }
-        setMetadata(value as ConnectorReleaseMetadata);
+        const parsedMetadata = parseConnectorReleaseMetadata(await response.json() as unknown);
+        if (!parsedMetadata) throw new Error("Unsupported release metadata");
+        setMetadata(parsedMetadata);
       })
       .catch((error: unknown) => {
         if (!(error instanceof DOMException && error.name === "AbortError")) setMetadata(null);
@@ -7941,6 +8253,7 @@ function App() {
           thread={promptThread}
           codexHome={codexHome}
           browserWorkspace={browserWorkspace}
+          fetchAuthorizedJson={fetchAuthorizedJson}
           onClose={closePromptModal}
         />
       </section>

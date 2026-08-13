@@ -16,12 +16,15 @@ from typing import Any, Callable
 
 manifest_name = "SOURCE_COMMITS.json"
 supported_git_modes = {"100644", "100755"}
-manager_workflow_prefix = ".github/workflows/"
+manager_github_prefix = ".github/"
 required_export_paths = {
     ".gitattributes",
+    ".github/dependabot.yml",
+    ".github/workflows/codeql.yml",
     ".github/workflows/requirements-ci.txt",
     ".github/workflows/source-ci.yml",
     "README.md",
+    "SECURITY.md",
     "scripts/export_codex_home_manager_source.py",
     "scripts/repair_all_codex_after_exit.ps1",
     "scripts/verify_codex_after_restart.py",
@@ -253,7 +256,7 @@ def export_source_monorepo(root_repository: Path, manager_repository: Path, outp
     manager_snapshot = repository_snapshot(manager_repository, lambda _source_path: True)
 
     def manager_export_path(source_path: str) -> str:
-        if source_path.startswith(manager_workflow_prefix):
+        if source_path == "SECURITY.md" or source_path.startswith(manager_github_prefix):
             return source_path
         return f"codex_home_manager/{source_path}"
 
@@ -390,9 +393,9 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
                     or export_path.startswith("scripts/")
                 ):
                     raise SourceExportError(f"root repository file is outside the monorepo layout: {export_path}")
-            elif original_source_path.startswith(manager_workflow_prefix):
+            elif original_source_path == "SECURITY.md" or original_source_path.startswith(manager_github_prefix):
                 if export_path != original_source_path:
-                    raise SourceExportError(f"manager workflow is outside the source workflow root: {export_path}")
+                    raise SourceExportError(f"manager GitHub configuration is outside the source GitHub root: {export_path}")
             elif export_path != f"codex_home_manager/{original_source_path}":
                 raise SourceExportError(f"manager repository file is outside the monorepo layout: {export_path}")
             if export_path in expected_files:

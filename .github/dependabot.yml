@@ -1,0 +1,37 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: source
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Shanghai
+
+  - package-ecosystem: npm
+    directory: "/codex_home_manager"
+    target-branch: source
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:15"
+      timezone: Asia/Shanghai
+
+  - package-ecosystem: pip
+    directory: "/.github/workflows"
+    target-branch: source
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+      timezone: Asia/Shanghai
+
+  - package-ecosystem: pip
+    directory: "/codex_home_manager/packaging/windows"
+    target-branch: source
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:45"
+      timezone: Asia/Shanghai

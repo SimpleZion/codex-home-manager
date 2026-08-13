@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import struct
@@ -58,6 +59,25 @@ source_evidence_public_names = (
 )
 source_sbom_predicate_type = "https://cyclonedx.org/bom"
 source_provenance_predicate_type = "https://slsa.dev/provenance/v1"
+windows_build_metadata_name = "windows-build-metadata.json"
+windows_sbom_subjects_name = "BINARY-SBOM-SUBJECTS.txt"
+windows_provenance_subjects_name = "BINARY-PROVENANCE-SUBJECTS.txt"
+windows_sbom_attestation_name = "windows-sbom-attestation.sigstore.json"
+windows_provenance_attestation_name = "windows-provenance-attestation.sigstore.json"
+windows_binary_evidence_proof_name = "windows-binary-evidence.json"
+windows_version_company = "SimpleZion"
+windows_version_product = "Codex Home Manager"
+
+
+def windows_binary_evidence_public_names(source_commit: str) -> tuple[str, ...]:
+    return (
+        windows_build_metadata_name,
+        f"codex-home-manager-windows-x64-{source_commit}.cdx.json",
+        windows_sbom_subjects_name,
+        windows_provenance_subjects_name,
+        windows_sbom_attestation_name,
+        windows_provenance_attestation_name,
+    )
 
 
 user_artifact_verifier_source = r'''from __future__ import annotations
@@ -136,7 +156,7 @@ def verify_artifact(arguments: argparse.Namespace) -> dict[str, object]:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise VerificationError("signed release manifest is not valid UTF-8 JSON") from error
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 4:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 5:
         raise VerificationError("signed release manifest has an unsupported schema")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise VerificationError("signed release manifest public-key fingerprint does not match the trust anchor")
@@ -1121,6 +1141,296 @@ def update_public_checksums(checksum_path: Path, records: list[dict[str, Any]]) 
     write_bytes(checksum_path, content.encode("ascii"))
 
 
+def load_windows_subject_checksums(path: Path, label: str) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise ReleaseManifestError(f"{label} checksum list is unreadable") from error
+    entries: dict[str, str] = {}
+    for line_number, line in enumerate(lines, start=1):
+        match = re.fullmatch(r"([0-9a-f]{64}) \*([^/\\]+)", line)
+        if match is None or match.group(2) in entries:
+            raise ReleaseManifestError(f"invalid {label} checksum line {line_number}")
+        entries[match.group(2)] = match.group(1)
+    return entries
+
+
+def validate_windows_build_metadata(
+    metadata: Any,
+    *,
+    expected_version: str,
+    artifact_directory: Path,
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("schemaVersion") != 1
+        or metadata.get("version") != expected_version
+        or re.fullmatch(r"\d+\.\d+\.\d+", expected_version) is None
+    ):
+        raise ReleaseManifestError("Windows build metadata has an invalid schema or version")
+    artifacts = metadata.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        raise ReleaseManifestError("Windows build metadata must contain exactly the final EXE and ZIP")
+    normalized: list[dict[str, Any]] = []
+    kinds: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ReleaseManifestError("Windows build metadata has an invalid artifact")
+        name = artifact.get("name")
+        kind = artifact.get("kind")
+        expected_hash = artifact.get("sha256")
+        expected_size = artifact.get("size")
+        if (
+            not isinstance(name, str)
+            or kind not in {"exe", "zip"}
+            or kind in kinds
+            or re.fullmatch(r"[0-9a-f]{64}", expected_hash or "") is None
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 1
+            or re.fullmatch(
+                rf"codex-home-manager-local-win-x64-v{re.escape(expected_version)}-{expected_hash[:12]}\.{kind}",
+                name,
+            )
+            is None
+        ):
+            raise ReleaseManifestError("Windows build metadata has an invalid artifact")
+        artifact_path = artifact_directory / name
+        if (
+            not artifact_path.is_file()
+            or artifact_path.is_symlink()
+            or artifact_path.stat().st_size != expected_size
+            or sha256_file(artifact_path) != expected_hash
+        ):
+            raise ReleaseManifestError(f"Windows build artifact hash mismatch: {name}")
+        normalized_artifact = {
+            "name": name,
+            "kind": kind,
+            "sha256": expected_hash,
+            "size": expected_size,
+        }
+        if kind == "exe":
+            audit = artifact.get("audit")
+            if (
+                not isinstance(audit, dict)
+                or audit.get("method") != "pyi-archive-viewer+strings"
+                or not isinstance(audit.get("archiveEntryCount"), int)
+                or isinstance(audit.get("archiveEntryCount"), bool)
+                or audit["archiveEntryCount"] < 1
+                or audit.get("sourceFiles") != []
+                or audit.get("sensitiveStrings") != []
+                or audit.get("versionInfo")
+                != {
+                    "FileVersion": expected_version,
+                    "ProductVersion": expected_version,
+                    "CompanyName": windows_version_company,
+                    "ProductName": windows_version_product,
+                    "FileDescription": windows_version_product,
+                }
+            ):
+                raise ReleaseManifestError("Windows EXE build audit is invalid")
+            validate_authenticode_evidence(artifact.get("authenticode"))
+            normalized_artifact["audit"] = audit
+            normalized_artifact["authenticode"] = artifact["authenticode"]
+        normalized.append(normalized_artifact)
+        kinds.add(kind)
+    if kinds != {"exe", "zip"}:
+        raise ReleaseManifestError("Windows build metadata must contain exactly the final EXE and ZIP")
+    return sorted(normalized, key=lambda artifact: artifact["name"])
+
+
+def copy_verified_bytes(source: Path, destination: Path, expected_hash: str, expected_size: int) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    if destination.stat().st_size != expected_size or sha256_file(destination) != expected_hash:
+        raise ReleaseManifestError(f"copied Windows release evidence hash mismatch: {destination.name}")
+
+
+def resolve_windows_evidence_paths(evidence_directory: Path, source_commit: str) -> dict[str, Path]:
+    entries = list(evidence_directory.iterdir())
+    if entries and all(path.is_file() and not path.is_symlink() for path in entries):
+        return {path.name: path for path in entries}
+    binary_directory = evidence_directory / f"windows-release-binaries-{source_commit}"
+    attestation_directory = evidence_directory / f"windows-release-evidence-{source_commit}"
+    if (
+        {path.name for path in entries}
+        != {binary_directory.name, attestation_directory.name}
+        or any(not path.is_dir() or path.is_symlink() for path in entries)
+    ):
+        raise ReleaseManifestError("Windows evidence download directory set mismatch")
+    binary_paths = list(binary_directory.iterdir())
+    attestation_paths = list(attestation_directory.iterdir())
+    if (
+        any(not path.is_file() or path.is_symlink() for path in [*binary_paths, *attestation_paths])
+        or len(binary_paths) != 3
+        or len(attestation_paths) != 7
+    ):
+        raise ReleaseManifestError("Windows evidence file set mismatch")
+    binary_by_name = {path.name: path for path in binary_paths}
+    attestation_by_name = {path.name: path for path in attestation_paths}
+    duplicated_names = set(binary_by_name) & set(attestation_by_name)
+    if (
+        windows_build_metadata_name not in binary_by_name
+        or {Path(name).suffix.lower() for name in duplicated_names} != {".exe", ".zip"}
+        or len(duplicated_names) != 2
+    ):
+        raise ReleaseManifestError("Windows evidence artifact directory layout is invalid")
+    for name in duplicated_names:
+        if (
+            binary_by_name[name].stat().st_size != attestation_by_name[name].stat().st_size
+            or sha256_file(binary_by_name[name]) != sha256_file(attestation_by_name[name])
+        ):
+            raise ReleaseManifestError(f"Windows evidence duplicated artifact mismatch: {name}")
+    return {**binary_by_name, **{name: path for name, path in attestation_by_name.items() if name not in duplicated_names}}
+
+
+def prepare_windows_binary_evidence(
+    *,
+    evidence_directory: Path,
+    expected_source_commit: str,
+    expected_version: str,
+    repository: str,
+    signer_workflow: str,
+    release_directory: Path,
+    public_site_directory: Path,
+    proof_path: Path,
+    attestation_verifier: Callable[..., None] = verify_github_attestation,
+) -> dict[str, Any]:
+    if re.fullmatch(r"[0-9a-f]{40}", expected_source_commit) is None:
+        raise ReleaseManifestError("expected source commit must be a lowercase 40-character Git commit")
+    validate_repository_name(repository, "Windows evidence repository")
+    validate_signer_workflow(repository, signer_workflow)
+    if not evidence_directory.is_dir():
+        raise ReleaseManifestError("Windows evidence directory does not exist")
+    evidence_paths = resolve_windows_evidence_paths(evidence_directory, expected_source_commit)
+    actual_names = set(evidence_paths)
+    sbom_name = f"codex-home-manager-windows-x64-{expected_source_commit}.cdx.json"
+    metadata_path = evidence_paths.get(windows_build_metadata_name)
+    if metadata_path is None:
+        raise ReleaseManifestError("Windows evidence file set mismatch")
+    metadata = load_json_object(metadata_path)
+    artifacts = validate_windows_build_metadata(
+        metadata,
+        expected_version=expected_version,
+        artifact_directory=metadata_path.parent,
+    )
+    artifact_names = {artifact["name"] for artifact in artifacts}
+    evidence_names = set(windows_binary_evidence_public_names(expected_source_commit))
+    if actual_names != artifact_names | evidence_names:
+        raise ReleaseManifestError("Windows evidence file set mismatch")
+
+    sbom_subjects = load_windows_subject_checksums(
+        evidence_paths[windows_sbom_subjects_name],
+        "Windows SBOM subjects",
+    )
+    provenance_subjects = load_windows_subject_checksums(
+        evidence_paths[windows_provenance_subjects_name],
+        "Windows provenance subjects",
+    )
+    artifact_hashes = {artifact["name"]: artifact["sha256"] for artifact in artifacts}
+    if sbom_subjects != artifact_hashes:
+        raise ReleaseManifestError("Windows SBOM subject set does not match the final EXE and ZIP")
+    expected_provenance_subjects = {
+        **artifact_hashes,
+        sbom_name: sha256_file(evidence_paths[sbom_name]),
+    }
+    if provenance_subjects != expected_provenance_subjects:
+        raise ReleaseManifestError("Windows provenance subject set does not match the EXE, ZIP, and SBOM")
+
+    sbom_path = evidence_paths[sbom_name]
+    try:
+        sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseManifestError("Windows binary CycloneDX SBOM is invalid") from error
+    if (
+        sbom_path.stat().st_size > 16 * 1024 * 1024
+        or not isinstance(sbom, dict)
+        or sbom.get("bomFormat") != "CycloneDX"
+        or not isinstance(sbom.get("specVersion"), str)
+        or not isinstance(sbom.get("serialNumber"), str)
+        or not sbom["serialNumber"].startswith("urn:uuid:")
+    ):
+        raise ReleaseManifestError("Windows binary CycloneDX SBOM is invalid")
+    sbom_bundle_path = evidence_paths[windows_sbom_attestation_name]
+    provenance_bundle_path = evidence_paths[windows_provenance_attestation_name]
+    for path in (metadata_path, sbom_path, evidence_paths[windows_sbom_subjects_name],
+                 evidence_paths[windows_provenance_subjects_name], sbom_bundle_path, provenance_bundle_path):
+        content = path.read_bytes()
+        assert_public_evidence_privacy(path.name, content)
+        if path.suffix == ".json":
+            try:
+                value = json.loads(content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ReleaseManifestError(f"public Windows evidence JSON is invalid: {path.name}") from error
+            if not isinstance(value, dict):
+                raise ReleaseManifestError(f"public Windows evidence JSON must be an object: {path.name}")
+
+    for artifact in artifacts:
+        attestation_verifier(
+            subject_path=evidence_paths[artifact["name"]],
+            bundle_path=sbom_bundle_path,
+            repository=repository,
+            signer_workflow=signer_workflow,
+            source_commit=expected_source_commit,
+            predicate_type=source_sbom_predicate_type,
+        )
+    for subject_name in sorted(expected_provenance_subjects):
+        attestation_verifier(
+            subject_path=evidence_paths[subject_name],
+            bundle_path=provenance_bundle_path,
+            repository=repository,
+            signer_workflow=signer_workflow,
+            source_commit=expected_source_commit,
+            predicate_type=source_provenance_predicate_type,
+        )
+
+    release_directory.mkdir(parents=True, exist_ok=True)
+    public_site_directory.mkdir(parents=True, exist_ok=True)
+    local_names = {"exe": local_artifact_names[0], "zip": local_artifact_names[1]}
+    for artifact in artifacts:
+        source_path = evidence_paths[artifact["name"]]
+        copy_verified_bytes(
+            source_path,
+            release_directory / local_names[artifact["kind"]],
+            artifact["sha256"],
+            artifact["size"],
+        )
+        copy_verified_bytes(
+            source_path,
+            public_site_directory / artifact["name"],
+            artifact["sha256"],
+            artifact["size"],
+        )
+    assets: list[dict[str, Any]] = []
+    for name in windows_binary_evidence_public_names(expected_source_commit):
+        source_path = evidence_paths[name]
+        expected_hash = sha256_file(source_path)
+        expected_size = source_path.stat().st_size
+        for directory in (release_directory, public_site_directory):
+            copy_verified_bytes(source_path, directory / name, expected_hash, expected_size)
+        assets.append({"name": name, "sha256": expected_hash, "size": expected_size})
+    proof = {
+        "schema_version": 1,
+        "source_commit": expected_source_commit,
+        "source_ref": "refs/heads/source",
+        "repository": repository,
+        "signer_workflow": signer_workflow,
+        "version": expected_version,
+        "attestations": {
+            "verifier": "gh attestation verify",
+            "deny_self_hosted_runners": True,
+            "sbom_predicate_type": source_sbom_predicate_type,
+            "provenance_predicate_type": source_provenance_predicate_type,
+            "sbom_subjects": sorted(sbom_subjects),
+            "provenance_subjects": sorted(provenance_subjects),
+        },
+        "artifacts": artifacts,
+        "assets": sorted(assets, key=lambda asset: asset["name"]),
+    }
+    write_bytes(proof_path, canonical_json_bytes(proof))
+    return proof
+
+
 def prepare_source_release_evidence(
     *,
     evidence_directory: Path,
@@ -1445,6 +1755,7 @@ def validate_authenticode_evidence(value: Any) -> None:
     if not isinstance(value, dict) or value.get("detachedSignatureRequired") is not True:
         raise ReleaseManifestError("public EXE has invalid Authenticode evidence")
     status = value.get("status")
+    windows_status = value.get("windowsStatus")
     trust = value.get("trust")
     thumbprint = value.get("signerThumbprint")
     subject = value.get("signerSubject")
@@ -1454,34 +1765,22 @@ def validate_authenticode_evidence(value: Any) -> None:
     has_signer = has_signer and isinstance(subject, str) and bool(subject.strip())
     valid_public_chain = (
         status == "valid"
+        and windows_status == "Valid"
         and trust == "public-trusted"
         and has_signer
         and self_signed is False
         and chain_trusted is True
     )
-    explicit_self_signed = (
-        status == "self-signed"
-        and trust == "untrusted"
-        and has_signer
-        and self_signed is True
-        and chain_trusted is False
-    )
-    explicit_untrusted = (
-        status == "untrusted"
-        and trust == "untrusted"
-        and has_signer
-        and self_signed is False
-        and chain_trusted is False
-    )
-    explicitly_unavailable = (
-        status == "unavailable"
+    explicitly_not_signed = (
+        status == "not-signed"
+        and windows_status == "NotSigned"
         and trust == "none"
         and thumbprint is None
         and subject is None
         and self_signed is False
         and chain_trusted is False
     )
-    if not any((valid_public_chain, explicit_self_signed, explicit_untrusted, explicitly_unavailable)):
+    if not any((valid_public_chain, explicitly_not_signed)):
         raise ReleaseManifestError("public EXE has inconsistent Authenticode status and trust evidence")
 
 
@@ -1547,6 +1846,7 @@ def collect_public_artifact_records(
     site_directory: Path,
     local_records: list[dict[str, Any]],
     source_evidence: dict[str, Any] | None = None,
+    windows_binary_evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     bundle, bundle_records = load_public_bundle(site_directory)
     validate_public_bundle_matches_local_artifacts(bundle, local_records)
@@ -1565,10 +1865,21 @@ def collect_public_artifact_records(
             if checksum_entries.get(asset["name"]) != asset["sha256"]:
                 raise ReleaseManifestError(f"SHA256SUMS mismatch for {asset['name']}")
             source_records.append(record)
+    binary_evidence_records: list[dict[str, Any]] = []
+    if windows_binary_evidence is not None:
+        for asset in windows_binary_evidence["assets"]:
+            path = site_directory / asset["name"]
+            record = record_for_path(path)
+            if record["sha256"] != asset["sha256"] or record["size"] != asset["size"]:
+                raise ReleaseManifestError(f"public Windows evidence hash mismatch: {asset['name']}")
+            if checksum_entries.get(asset["name"]) != asset["sha256"]:
+                raise ReleaseManifestError(f"SHA256SUMS mismatch for {asset['name']}")
+            binary_evidence_records.append(record)
     return sorted(
         [
             *bundle_records,
             *source_records,
+            *binary_evidence_records,
             record_for_path(checksum_path),
             record_for_path(site_directory / public_bundle_name),
         ],
@@ -1671,6 +1982,127 @@ def load_source_evidence_proof(
     }
 
 
+def load_windows_binary_evidence_proof(
+    proof_path: Path,
+    *,
+    source_evidence: dict[str, Any],
+    release_directory: Path,
+    public_site_directory: Path,
+) -> dict[str, Any]:
+    proof = load_json_object(proof_path)
+    source_commit = proof.get("source_commit")
+    repository = proof.get("repository")
+    signer_workflow = proof.get("signer_workflow")
+    version = proof.get("version")
+    attestations = proof.get("attestations")
+    artifacts = proof.get("artifacts")
+    assets = proof.get("assets")
+    if (
+        proof.get("schema_version") != 1
+        or source_commit != source_evidence.get("source_commit")
+        or proof.get("source_ref") != "refs/heads/source"
+        or repository != source_evidence.get("repository")
+        or signer_workflow != source_evidence.get("signer_workflow")
+        or not isinstance(version, str)
+        or re.fullmatch(r"\d+\.\d+\.\d+", version) is None
+        or not isinstance(attestations, dict)
+        or not isinstance(artifacts, list)
+        or not isinstance(assets, list)
+    ):
+        raise ReleaseManifestError("Windows binary evidence proof is incomplete or has a different source identity")
+    validate_repository_name(repository, "Windows evidence repository")
+    validate_signer_workflow(repository, signer_workflow)
+    expected_asset_names = set(windows_binary_evidence_public_names(source_commit))
+    if (
+        len(artifacts) != 2
+        or any(not isinstance(artifact, dict) or not isinstance(artifact.get("name"), str) for artifact in artifacts)
+    ):
+        raise ReleaseManifestError("Windows binary evidence artifact set is invalid")
+    artifact_names = {artifact["name"] for artifact in artifacts}
+    expected_attestations = {
+        "verifier": "gh attestation verify",
+        "deny_self_hosted_runners": True,
+        "sbom_predicate_type": source_sbom_predicate_type,
+        "provenance_predicate_type": source_provenance_predicate_type,
+        "sbom_subjects": sorted(artifact_names),
+        "provenance_subjects": sorted(
+            artifact_names | {f"codex-home-manager-windows-x64-{source_commit}.cdx.json"}
+        ),
+    }
+    if attestations != expected_attestations:
+        raise ReleaseManifestError("Windows binary attestation identity or subject set is invalid")
+
+    metadata = load_json_object(public_site_directory / windows_build_metadata_name)
+    validated_artifacts = validate_windows_build_metadata(
+        metadata,
+        expected_version=version,
+        artifact_directory=public_site_directory,
+    )
+    if artifacts != validated_artifacts:
+        raise ReleaseManifestError("Windows binary evidence artifacts differ from build metadata")
+    bundle, _ = load_public_bundle(public_site_directory)
+    if bundle.get("version") != version or sorted(bundle["artifacts"], key=lambda item: item["name"]) != artifacts:
+        raise ReleaseManifestError("public connector bundle differs from verified Windows CI artifacts")
+
+    local_by_kind = {"exe": local_artifact_names[0], "zip": local_artifact_names[1]}
+    for artifact in artifacts:
+        for path, label in (
+            (release_directory / local_by_kind[artifact["kind"]], "local release"),
+            (public_site_directory / artifact["name"], "public"),
+        ):
+            if (
+                not path.is_file()
+                or path.stat().st_size != artifact["size"]
+                or sha256_file(path) != artifact["sha256"]
+            ):
+                raise ReleaseManifestError(f"{label} Windows artifact hash mismatch: {path.name}")
+
+    checksums = load_checksum_entries(public_site_directory / public_checksum_name)
+    normalized_assets: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise ReleaseManifestError("Windows binary evidence has an invalid public asset")
+        name = asset.get("name")
+        expected_hash = asset.get("sha256")
+        expected_size = asset.get("size")
+        if (
+            name not in expected_asset_names
+            or name in names
+            or re.fullmatch(r"[0-9a-f]{64}", expected_hash or "") is None
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 1
+        ):
+            raise ReleaseManifestError("Windows binary evidence has an invalid public asset")
+        for directory, label in ((release_directory, "release"), (public_site_directory, "public")):
+            path = directory / name
+            if (
+                not path.is_file()
+                or path.stat().st_size != expected_size
+                or sha256_file(path) != expected_hash
+            ):
+                raise ReleaseManifestError(f"{label} Windows evidence hash mismatch: {name}")
+        if checksums.get(name) != expected_hash:
+            raise ReleaseManifestError(f"SHA256SUMS mismatch for {name}")
+        assert_public_evidence_privacy(name, (public_site_directory / name).read_bytes())
+        names.add(name)
+        normalized_assets.append({"name": name, "sha256": expected_hash, "size": expected_size})
+    if names != expected_asset_names:
+        raise ReleaseManifestError("Windows binary evidence public asset set mismatch")
+    return {
+        "schema_version": 1,
+        "source_commit": source_commit,
+        "source_ref": "refs/heads/source",
+        "repository": repository,
+        "signer_workflow": signer_workflow,
+        "version": version,
+        "attestations": attestations,
+        "artifacts": artifacts,
+        "assets": sorted(normalized_assets, key=lambda asset: asset["name"]),
+    }
+
+
 def validate_deployment_evidence(
     evidence_path: Path,
     *,
@@ -1704,6 +2136,7 @@ def validate_github_release_evidence(
     evidence_path: Path,
     public_site_directory: Path,
     source_evidence: dict[str, Any],
+    windows_binary_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     evidence = load_json_object(evidence_path)
     release = evidence.get("release")
@@ -1726,6 +2159,11 @@ def validate_github_release_evidence(
         for artifact in bundle["artifacts"]
         if isinstance(artifact, dict) and artifact.get("kind") in {"exe", "zip"}
     }
+    binary_artifacts = {
+        artifact["name"]: artifact for artifact in windows_binary_evidence["artifacts"]
+    }
+    if expected_artifacts != binary_artifacts:
+        raise ReleaseManifestError("GitHub connector artifacts differ from verified Windows CI artifacts")
     expected_artifacts.update({asset["name"]: asset for asset in source_evidence["assets"]})
     normalized = validate_github_release_payload(
         release,
@@ -1788,13 +2226,24 @@ def create_signed_manifest(
         release_directory=release_directory,
         public_site_directory=public_site_directory,
     )
+    windows_binary_evidence = load_windows_binary_evidence_proof(
+        source_evidence_proof_path.with_name(windows_binary_evidence_proof_name),
+        source_evidence=source_evidence,
+        release_directory=release_directory,
+        public_site_directory=public_site_directory,
+    )
     artifact_public_source, expected_deployment_id = load_artifact_public_source_snapshot(artifact_public_source_snapshot_path)
     deployment = validate_deployment_evidence(
         artifact_deployment_evidence_path,
         expected_deployment_id=expected_deployment_id,
         expected_public_commit=artifact_public_source["head"],
     )
-    github = validate_github_release_evidence(github_release_evidence_path, public_site_directory, source_evidence)
+    github = validate_github_release_evidence(
+        github_release_evidence_path,
+        public_site_directory,
+        source_evidence,
+        windows_binary_evidence,
+    )
     if github["repository"] != source_evidence["repository"]:
         raise ReleaseManifestError("GitHub release repository does not match source evidence repository")
     trusted_fingerprint = load_trusted_public_key_fingerprint(trusted_public_key_fingerprint_path)
@@ -1802,7 +2251,12 @@ def create_signed_manifest(
     assert_public_key_matches_trust(private_key.public_key(), trusted_fingerprint)
     validate_public_site_key_pin(public_site_directory, trusted_fingerprint)
     local_records = [record_for_path(release_directory / name) for name in sorted(local_artifact_names)]
-    public_records = collect_public_artifact_records(public_site_directory, local_records, source_evidence)
+    public_records = collect_public_artifact_records(
+        public_site_directory,
+        local_records,
+        source_evidence,
+        windows_binary_evidence,
+    )
     dist_records = public_dist_file_records(dist_directory)
     public_site_dist_records = verify_public_site_dist(dist_directory, public_site_directory)
     current_public_state = repository_state(
@@ -1814,7 +2268,7 @@ def create_signed_manifest(
     if current_public_state["head"] != artifact_public_source["head"]:
         raise ReleaseManifestError("public HEAD changed after artifact capture")
     manifest = {
-        "schema_version": 4,
+        "schema_version": 5,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "sources": {"build": build_sources, "artifact_public": artifact_public_source},
         "dist_files": dist_records,
@@ -1822,6 +2276,7 @@ def create_signed_manifest(
         "local_artifacts": local_records,
         "public_artifacts": public_records,
         "source_evidence": source_evidence,
+        "windows_binary_evidence": windows_binary_evidence,
         "public_key_fingerprint": trusted_fingerprint,
         "cloudflare": {"artifact_deployment": deployment},
         "github": github,
@@ -1893,7 +2348,7 @@ def verify_release(
     except OSError as error:
         raise ReleaseManifestError("signature verification failed") from error
     manifest = load_json_object(manifest_path)
-    if manifest.get("schema_version") != 4:
+    if manifest.get("schema_version") != 5:
         raise ReleaseManifestError("unsupported release manifest schema")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise ReleaseManifestError("manifest public key fingerprint mismatch")
@@ -1914,6 +2369,14 @@ def verify_release(
     )
     if manifest.get("source_evidence") != source_evidence:
         raise ReleaseManifestError("manifest source evidence proof mismatch")
+    windows_binary_evidence = load_windows_binary_evidence_proof(
+        source_evidence_proof_path.with_name(windows_binary_evidence_proof_name),
+        source_evidence=source_evidence,
+        release_directory=release_directory,
+        public_site_directory=public_site_directory,
+    )
+    if manifest.get("windows_binary_evidence") != windows_binary_evidence:
+        raise ReleaseManifestError("manifest Windows binary evidence proof mismatch")
     artifact_public_source = valid_source_state("artifact public", sources.get("artifact_public"))
     require_main_branch("artifact public", artifact_public_source)
     public_state = repository_state("public", public_repository, require_clean=True)
@@ -1945,10 +2408,20 @@ def verify_release(
     verify_file_records(manifest.get("local_artifacts"), release_directory, "local artifact")
     verify_file_records(manifest.get("public_artifacts"), public_site_directory, "public artifact")
     local_records = [record_for_path(release_directory / name) for name in sorted(local_artifact_names)]
-    public_records = collect_public_artifact_records(public_site_directory, local_records, source_evidence)
+    public_records = collect_public_artifact_records(
+        public_site_directory,
+        local_records,
+        source_evidence,
+        windows_binary_evidence,
+    )
     if manifest.get("public_artifacts") != public_records:
         raise ReleaseManifestError("public artifact manifest mismatch")
-    github = validate_github_release_evidence(github_release_evidence_path, public_site_directory, source_evidence)
+    github = validate_github_release_evidence(
+        github_release_evidence_path,
+        public_site_directory,
+        source_evidence,
+        windows_binary_evidence,
+    )
     if github["repository"] != source_evidence["repository"]:
         raise ReleaseManifestError("GitHub release repository does not match source evidence repository")
     if manifest.get("github") != github:
@@ -2093,6 +2566,99 @@ def validate_online_source_evidence(value: Any, build_sources: Any) -> dict[str,
     return value
 
 
+def validate_online_windows_binary_evidence(
+    value: Any,
+    source_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ReleaseManifestError("online Windows binary evidence proof is invalid")
+    source_commit = source_evidence["source_commit"]
+    version = value.get("version")
+    artifacts = value.get("artifacts")
+    assets = value.get("assets")
+    if (
+        value.get("source_commit") != source_commit
+        or value.get("source_ref") != "refs/heads/source"
+        or value.get("repository") != source_evidence["repository"]
+        or value.get("signer_workflow") != source_evidence["signer_workflow"]
+        or not isinstance(version, str)
+        or re.fullmatch(r"\d+\.\d+\.\d+", version) is None
+        or not isinstance(artifacts, list)
+        or len(artifacts) != 2
+        or not isinstance(assets, list)
+    ):
+        raise ReleaseManifestError("online Windows binary evidence source identity is invalid")
+    normalized_bundle = {"schemaVersion": 2, "version": version, "artifacts": artifacts}
+    validate_public_bundle_metadata(normalized_bundle)
+    artifact_names: set[str] = set()
+    artifact_kinds: set[str] = set()
+    for artifact in artifacts:
+        name = artifact["name"]
+        kind = artifact["kind"]
+        expected_hash = artifact["sha256"]
+        if (
+            re.fullmatch(
+                rf"codex-home-manager-local-win-x64-v{re.escape(version)}-{expected_hash[:12]}\.{kind}",
+                name,
+            )
+            is None
+            or name in artifact_names
+            or kind in artifact_kinds
+        ):
+            raise ReleaseManifestError("online Windows binary artifact identity is invalid")
+        if kind == "exe":
+            audit = artifact.get("audit")
+            if (
+                not isinstance(audit, dict)
+                or audit.get("method") != "pyi-archive-viewer+strings"
+                or not isinstance(audit.get("archiveEntryCount"), int)
+                or isinstance(audit.get("archiveEntryCount"), bool)
+                or audit["archiveEntryCount"] < 1
+                or audit.get("sourceFiles") != []
+                or audit.get("sensitiveStrings") != []
+                or audit.get("versionInfo")
+                != {
+                    "FileVersion": version,
+                    "ProductVersion": version,
+                    "CompanyName": windows_version_company,
+                    "ProductName": windows_version_product,
+                    "FileDescription": windows_version_product,
+                }
+            ):
+                raise ReleaseManifestError("online Windows EXE build audit is invalid")
+        artifact_names.add(name)
+        artifact_kinds.add(kind)
+    expected_attestations = {
+        "verifier": "gh attestation verify",
+        "deny_self_hosted_runners": True,
+        "sbom_predicate_type": source_sbom_predicate_type,
+        "provenance_predicate_type": source_provenance_predicate_type,
+        "sbom_subjects": sorted(artifact_names),
+        "provenance_subjects": sorted(
+            artifact_names | {f"codex-home-manager-windows-x64-{source_commit}.cdx.json"}
+        ),
+    }
+    if value.get("attestations") != expected_attestations:
+        raise ReleaseManifestError("online Windows binary attestation identity or subject set is invalid")
+    expected_asset_names = set(windows_binary_evidence_public_names(source_commit))
+    asset_names: set[str] = set()
+    for asset in assets:
+        if (
+            not isinstance(asset, dict)
+            or asset.get("name") not in expected_asset_names
+            or asset["name"] in asset_names
+            or re.fullmatch(r"[0-9a-f]{64}", asset.get("sha256") or "") is None
+            or not isinstance(asset.get("size"), int)
+            or isinstance(asset.get("size"), bool)
+            or asset["size"] < 1
+        ):
+            raise ReleaseManifestError("online Windows binary evidence asset is invalid")
+        asset_names.add(asset["name"])
+    if asset_names != expected_asset_names or assets != sorted(assets, key=lambda asset: asset["name"]):
+        raise ReleaseManifestError("online Windows binary evidence asset set is invalid")
+    return value
+
+
 def validate_public_dist_records(records: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(records, list) or not records:
         raise ReleaseManifestError(f"manifest has no {label} records")
@@ -2177,7 +2743,7 @@ def verify_online_release(
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ReleaseManifestError("online release manifest is invalid") from error
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 4:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 5:
         raise ReleaseManifestError("online release manifest has an unsupported schema")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise ReleaseManifestError("online release manifest public key fingerprint mismatch")
@@ -2185,6 +2751,10 @@ def verify_online_release(
     if not isinstance(sources, dict):
         raise ReleaseManifestError("online release manifest has no source proof")
     source_evidence = validate_online_source_evidence(manifest.get("source_evidence"), sources.get("build"))
+    windows_binary_evidence = validate_online_windows_binary_evidence(
+        manifest.get("windows_binary_evidence"),
+        source_evidence,
+    )
     cloudflare = manifest.get("cloudflare")
     if not isinstance(cloudflare, dict) or not isinstance(cloudflare.get("artifact_deployment"), dict):
         raise ReleaseManifestError("online release manifest has no artifact deployment proof")
@@ -2261,6 +2831,18 @@ def verify_online_release(
     connector_names = github_artifact_names - set(source_evidence_public_names)
     if len(connector_names) != 2 or {Path(name).suffix.lower() for name in connector_names} != {".exe", ".zip"}:
         raise ReleaseManifestError("online release GitHub artifact proof must contain the connector EXE and ZIP")
+    binary_artifact_records = {
+        artifact["name"]: {
+            "name": artifact["name"],
+            "sha256": artifact["sha256"],
+            "size": artifact["size"],
+        }
+        for artifact in windows_binary_evidence["artifacts"]
+    }
+    if {
+        name: github_records_by_name[name] for name in connector_names
+    } != binary_artifact_records:
+        raise ReleaseManifestError("online GitHub connector artifacts differ from verified Windows CI artifacts")
 
     github_api_url = f"https://api.github.com/repos/{expected_github_repository}/releases/tags/{quote(expected_github_tag, safe='')}"
     try:
@@ -2302,6 +2884,21 @@ def verify_online_release(
             raise ReleaseManifestError("online release manifest has an invalid public artifact path")
         artifact_bytes[path] = fetch_bytes(urljoin(artifact_deployment_url + "/", path))
     validate_online_public_artifacts(records, artifact_bytes)
+    try:
+        public_bundle = json.loads(artifact_bytes[public_bundle_name].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseManifestError("online connector release metadata is invalid") from error
+    if (
+        not isinstance(public_bundle, dict)
+        or public_bundle.get("version") != windows_binary_evidence["version"]
+        or sorted(public_bundle.get("artifacts", []), key=lambda item: item.get("name", ""))
+        != windows_binary_evidence["artifacts"]
+    ):
+        raise ReleaseManifestError("online connector release metadata differs from verified Windows CI artifacts")
+    for asset in windows_binary_evidence["assets"]:
+        content = artifact_bytes.get(asset["name"])
+        if content is None or len(content) != asset["size"] or sha256_bytes(content) != asset["sha256"]:
+            raise ReleaseManifestError(f"online Windows binary evidence mismatch: {asset['name']}")
     for record in github_artifact_records:
         name = record["name"]
         cloudflare_content = artifact_bytes.get(name)
@@ -2362,6 +2959,16 @@ def build_parser() -> argparse.ArgumentParser:
     source_evidence.add_argument("--release-dir", required=True, type=path_argument)
     source_evidence.add_argument("--public-site", required=True, type=path_argument)
     source_evidence.add_argument("--proof", required=True, type=path_argument)
+
+    windows_evidence = subparsers.add_parser("prepare-windows-evidence")
+    windows_evidence.add_argument("--evidence-dir", required=True, type=path_argument)
+    windows_evidence.add_argument("--source-commit", required=True)
+    windows_evidence.add_argument("--version", required=True)
+    windows_evidence.add_argument("--repository", required=True)
+    windows_evidence.add_argument("--signer-workflow", required=True)
+    windows_evidence.add_argument("--release-dir", required=True, type=path_argument)
+    windows_evidence.add_argument("--public-site", required=True, type=path_argument)
+    windows_evidence.add_argument("--proof", required=True, type=path_argument)
 
     public_dist_plan = subparsers.add_parser("plan-public-dist-sync")
     public_dist_plan.add_argument("--dist", required=True, type=path_argument)
@@ -2459,6 +3066,17 @@ def main(arguments: list[str] | None = None) -> int:
                 evidence_directory=parsed.evidence_dir,
                 expected_source_commit=parsed.source_commit,
                 expected_build_sources=load_build_source_snapshot(parsed.build_source_snapshot, verify_current=True),
+                repository=parsed.repository,
+                signer_workflow=parsed.signer_workflow,
+                release_directory=parsed.release_dir,
+                public_site_directory=parsed.public_site,
+                proof_path=parsed.proof,
+            )
+        elif parsed.command == "prepare-windows-evidence":
+            prepare_windows_binary_evidence(
+                evidence_directory=parsed.evidence_dir,
+                expected_source_commit=parsed.source_commit,
+                expected_version=parsed.version,
                 repository=parsed.repository,
                 signer_workflow=parsed.signer_workflow,
                 release_directory=parsed.release_dir,

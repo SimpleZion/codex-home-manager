@@ -316,11 +316,51 @@ function capabilitiesPayload() {
   };
 }
 
+function createPromptIndexApiState() {
+  return {
+    statusRequests: [],
+    previewRequests: [],
+    clearRequests: [],
+    databaseExists: true,
+    rebuildPending: false,
+    rebuildPageRequests: 0,
+    clearConflict: false
+  };
+}
+
+function promptIndexStatusPayload(state) {
+  return {
+    databaseExists: state.databaseExists,
+    database: state.databaseExists ? {
+      sizeBytes: 524_288,
+      inUse: false,
+      activeOperations: 0,
+      readable: true,
+      inspectionState: "available",
+      lastAccessedAtMs: Date.now() - 5_000,
+      schemaVersion: 3,
+      sourceRolloutCount: 1,
+      missingSourceRolloutCount: 0,
+      promptCount: 125
+    } : null,
+    storage: {
+      rootPath: "C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index",
+      databaseCount: state.databaseExists ? 3 : 2,
+      activeDatabaseCount: 0,
+      totalSizeBytes: state.databaseExists ? 1_572_864 : 1_048_576,
+      maxTotalBytes: 1_073_741_824,
+      maxIdleSeconds: 2_592_000,
+      overCapacity: false
+    }
+  };
+}
+
 async function installApplicationRoutes(page, {
   includeRaceThread = false,
   emulateUncancellableSlowPrompt = false,
   simulateColdIndex = false,
-  promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] }
+  promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] },
+  promptIndexApiState = createPromptIndexApiState()
 } = {}) {
   await page.addInitScript((apiBase) => {
     window.localStorage.setItem("codex-home-manager-api-base-url", apiBase);
@@ -412,6 +452,51 @@ async function installApplicationRoutes(page, {
       await route.fulfill({ json: diagnosticsPayload() });
       return;
     }
+    if (pathname === "/api/prompt-index/status") {
+      promptIndexApiState.statusRequests.push({ codexHome: requestUrl.searchParams.get("codex_home") });
+      await route.fulfill({ json: promptIndexStatusPayload(promptIndexApiState) });
+      return;
+    }
+    if (pathname === "/api/prompt-index/clear/preview") {
+      promptIndexApiState.previewRequests.push({ method: route.request().method(), codexHome: requestUrl.searchParams.get("codex_home") });
+      await route.fulfill({
+        json: {
+          operationPreviewId: "prompt-index-preview-1",
+          inputHash: "prompt-index-input-hash-1",
+          expiresAtMs: Date.now() + 60_000,
+          stateDigest: "prompt-index-state-1",
+          willClear: promptIndexApiState.databaseExists,
+          reclaimableBytes: promptIndexApiState.databaseExists ? 524_288 : 0,
+          inUse: false,
+          warning: "Source rollouts are unchanged and can rebuild it."
+        }
+      });
+      return;
+    }
+    if (pathname === "/api/prompt-index/clear") {
+      promptIndexApiState.clearRequests.push({
+        method: route.request().method(),
+        codexHome: requestUrl.searchParams.get("codex_home"),
+        token: route.request().headers()["x-codex-manager-token"],
+        body: route.request().postDataJSON()
+      });
+      if (promptIndexApiState.clearConflict) {
+        await route.fulfill({ status: 409, json: { detail: "prompt index is currently in use" } });
+        return;
+      }
+      const databaseExisted = promptIndexApiState.databaseExists;
+      promptIndexApiState.databaseExists = false;
+      promptIndexApiState.rebuildPending = databaseExisted;
+      await route.fulfill({
+        json: {
+          cleared: databaseExisted,
+          databaseExisted,
+          deletedFileCount: databaseExisted ? 3 : 0,
+          reclaimedBytes: databaseExisted ? 524_288 : 0
+        }
+      });
+      return;
+    }
     if (pathname === "/api/threads/thread-1") {
       await route.fulfill({ json: detailPayload() });
       return;
@@ -434,6 +519,11 @@ async function installApplicationRoutes(page, {
       const search = requestUrl.searchParams.get("search") || "";
       const cursor = requestUrl.searchParams.get("cursor");
       const scanBudgetMs = Number(requestUrl.searchParams.get("scanBudgetMs") || 0);
+      if (promptIndexApiState.rebuildPending && !cursor) {
+        promptIndexApiState.rebuildPending = false;
+        promptIndexApiState.databaseExists = true;
+        promptIndexApiState.rebuildPageRequests += 1;
+      }
       promptApiState.queryCalls ||= new Map();
       const queryKey = `${threadId}|${scope}|${search}`;
       const queryCallCount = cursor ? (promptApiState.queryCalls.get(queryKey) || 1) : (promptApiState.queryCalls.get(queryKey) || 0) + 1;
@@ -675,6 +765,53 @@ async function assertDialogKeyboardContract(page, dialog) {
   assert.ok(await page.locator("[inert]").count() > 0, "dialog must make background content inert");
 }
 
+async function assertPromptModalLayoutAndHitTargets(page, promptDialog, viewportLabel) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const layout = await promptDialog.evaluate((dialog) => {
+    const promptView = dialog.querySelector(".prompt-view:not([hidden])");
+    const search = promptView?.querySelector(".prompt-content-search");
+    const content = promptView?.querySelector(".prompt-modal-content");
+    const list = promptView?.querySelector(".prompt-list");
+    if (!promptView || !search || !content || !list) return null;
+    const rectangle = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return { top: bounds.top, right: bounds.right, bottom: bounds.bottom, left: bounds.left };
+    };
+    const buttonHits = [...search.querySelectorAll("button")].map((button) => {
+      const bounds = button.getBoundingClientRect();
+      const centerX = bounds.left + bounds.width / 2;
+      const centerY = bounds.top + bounds.height / 2;
+      const hit = document.elementFromPoint(centerX, centerY);
+      return {
+        label: button.getAttribute("aria-label"),
+        centerX,
+        centerY,
+        hit: Boolean(hit && button.contains(hit))
+      };
+    });
+    return {
+      gridRows: getComputedStyle(promptView).gridTemplateRows.trim().split(/\s+/).filter(Boolean),
+      childClasses: [...promptView.children].map((child) => child.className),
+      search: rectangle(search),
+      content: rectangle(content),
+      list: rectangle(list),
+      buttonHits
+    };
+  });
+  assert.ok(layout, `${viewportLabel}: prompt layout elements must render`);
+  assert.equal(layout.gridRows.length, 4, `${viewportLabel}: prompt view must expose four explicit grid rows`);
+  assert.deepEqual(layout.childClasses, ["prompt-modal-toolbar", "prompt-filter-bar", "prompt-content-search", "prompt-modal-content"], `${viewportLabel}: all four prompt rows must coexist in DOM order`);
+  assert.ok(layout.search.bottom <= layout.content.top + 1, `${viewportLabel}: search row must end before content row starts`);
+  assert.ok(layout.search.bottom <= layout.list.top + 1, `${viewportLabel}: search row must not overlap the virtual list`);
+  assert.equal(layout.buttonHits.length, 3, `${viewportLabel}: prompt search must render three action buttons`);
+  for (const target of layout.buttonHits) {
+    assert.ok(target.centerX >= 0 && target.centerX <= page.viewportSize().width, `${viewportLabel}: ${target.label} center must remain in the viewport`);
+    assert.ok(target.centerY >= 0 && target.centerY <= page.viewportSize().height, `${viewportLabel}: ${target.label} center must remain in the viewport`);
+    assert.equal(target.hit, true, `${viewportLabel}: ${target.label} center hit-test must resolve to its button`);
+  }
+  return layout;
+}
+
 async function waitForPromptApiState(page, predicate, message, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -720,17 +857,24 @@ async function runPromptPaginationFlow() {
     await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledAllRequest.requestId), "changing search did not DELETE-cancel the prior request");
 
     await promptDialog.getByText("1 / 3 · 扫描中", { exact: true }).waitFor();
-    await promptDialog.getByText("1 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByText("1 / 3 · 仍有结果未加载", { exact: true }).waitFor();
     assert.equal(await promptDialog.getByText("paged-search match 3", { exact: false }).count(), 0, "a later search page must not be in the DOM before paging");
     const nextMatch = promptDialog.getByRole("button", { name: "下一个匹配" });
-    await nextMatch.click();
-    await promptDialog.getByText("2 / 3 · 完整", { exact: true }).waitFor();
+    const previousMatch = promptDialog.getByRole("button", { name: "上一个匹配" });
+    assert.equal(await previousMatch.isEnabled(), true, "previous match must remain usable at the first loaded item");
+    await previousMatch.click();
+    await promptDialog.getByText("2 / 3 · 仍有结果未加载", { exact: true }).waitFor();
+    await promptDialog.getByText("已循环到当前已加载的最后匹配；后端仍有匹配尚未加载。", { exact: true }).waitFor();
     await nextMatch.click();
     await promptDialog.getByText("3 / 3 · 完整", { exact: true }).waitFor();
     await promptDialog.getByText("paged-search match 3", { exact: false }).waitFor();
     assert.ok(promptApiState.pageRequests.some((request) => request.search === "paged-search" && request.cursor === "cursor-2"), "next-match navigation must request the next backend page");
-    await promptDialog.getByRole("button", { name: "上一个匹配" }).click();
-    await promptDialog.getByText("2 / 3 · 完整", { exact: true }).waitFor();
+    await nextMatch.click();
+    await promptDialog.getByText("1 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByText("已循环到第一个匹配。", { exact: true }).waitFor();
+    await previousMatch.click();
+    await promptDialog.getByText("3 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByText("已循环到最后一个匹配。", { exact: true }).waitFor();
 
     assert.equal(promptApiState.copyRequests.length, 0, "copy content must not be requested before the user clicks copy");
     await promptDialog.getByRole("button", { name: "复制干净文本" }).click();
@@ -803,13 +947,57 @@ async function runPromptRequestRaceFlow() {
   }
 }
 
+async function runPromptIndexEnglishFlow() {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  try {
+    const page = await context.newPage();
+    await installApplicationRoutes(page, { promptIndexApiState: createPromptIndexApiState() });
+    await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
+    await page.locator(".thread-table tbody tr").first().waitFor();
+    await page.locator(".language-toggle").click();
+    await page.waitForFunction(() => document.documentElement.lang === "en");
+    const threadRow = page.locator(".thread-table tbody tr").first();
+    await threadRow.dblclick();
+    const detailDialog = page.locator(".thread-detail-modal");
+    await detailDialog.waitFor();
+    await detailDialog.getByRole("button", { name: "View thread content" }).last().click();
+    const promptDialog = page.locator(".prompt-modal");
+    await promptDialog.waitFor();
+    await promptDialog.getByRole("tab", { name: "My input" }).click();
+    const management = promptDialog.locator(".prompt-index-management");
+    await management.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await management.getByText("Derived plaintext index", { exact: true }).waitFor();
+    await management
+      .locator(".prompt-index-path code")
+      .getByText("C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index", { exact: true })
+      .waitFor();
+    const text = await management.innerText();
+    assert.match(text, /Local search index/);
+    assert.match(text, /This is a derived plaintext index stored on this device/);
+    assert.match(text, /Local index directory\s+C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index/);
+    assert.match(text, /Idle cleanup\s+30 days/);
+    assert.match(text, /Capacity limit 1\.0 GB/);
+    assert.match(text, /automatically reclaimed after its source rollout is deleted/);
+    assert.match(text, /Clearing the index does not delete source threads/);
+    assert.equal(await management.getByRole("button", { name: "Clear index" }).count(), 1);
+    await assertAccessibleSurface(page, "English prompt index management");
+  } finally {
+    void context.close().catch(() => {});
+    void browser.close().catch(() => {});
+  }
+}
+
 async function runAccessibilityFlow() {
   assert.ok(fs.existsSync(path.join(distPath, "index.html")), "run npm run build before the accessibility test");
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   try {
     const page = await context.newPage();
-    await installApplicationRoutes(page);
+    const promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] };
+    const promptIndexApiState = createPromptIndexApiState();
+    await installApplicationRoutes(page, { promptApiState, promptIndexApiState });
     await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
     await page.locator(".thread-table tbody tr").waitFor();
 
@@ -868,6 +1056,71 @@ async function runAccessibilityFlow() {
     assert.equal(await promptDialog.locator(".timeline-entry").getByText("加密推理记录", { exact: true }).count(), 0, "encrypted markers must not expose a separate label");
     await promptDialog.getByRole("tab", { name: "我的输入" }).click();
     await promptDialog.locator('[role="tabpanel"]:not([hidden])').getByText("Verify keyboard access", { exact: true }).waitFor();
+    const promptIndexManagement = promptDialog.locator(".prompt-index-management");
+    const promptIndexSummary = promptIndexManagement.locator("summary");
+    await promptIndexSummary.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await promptIndexManagement.getAttribute("open"), "", "prompt index disclosure must open from the keyboard");
+    await promptIndexManagement.getByText("派生明文索引", { exact: true }).waitFor();
+    await promptIndexManagement
+      .locator(".prompt-index-path code")
+      .getByText("C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index", { exact: true })
+      .waitFor();
+    const promptIndexText = await promptIndexManagement.innerText();
+    assert.match(promptIndexText, /这是存储在本机的派生明文索引/);
+    assert.match(promptIndexText, /本机索引目录\s+C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index/);
+    assert.match(promptIndexText, /全部索引大小\s+1\.5 MB/);
+    assert.match(promptIndexText, /数据库数\s+3/);
+    assert.match(promptIndexText, /当前索引大小\s+512 KB/);
+    assert.match(promptIndexText, /索引 prompt\s+125/);
+    assert.match(promptIndexText, /空闲回收\s+30 天/);
+    assert.match(promptIndexText, /容量上限 1\.0 GB/);
+    assert.match(promptIndexText, /源 rollout 删除后，对应派生索引会自动回收/);
+    assert.match(promptIndexText, /清空索引不会删除源线程，后续搜索会自动重建/);
+    assert.equal(await promptIndexManagement.locator(".prompt-index-path code").textContent(), "C:\\Users\\Test\\AppData\\Local\\CodexHomeManager\\prompt-index", "the UI must display the exact rootPath returned by the status API");
+    const clearPromptIndexButton = promptIndexManagement.getByRole("button", { name: "清空索引" });
+    const pageRequestsBeforeClear = promptApiState.pageRequests.length;
+    const statusRequestsBeforeClear = promptIndexApiState.statusRequests.length;
+    page.once("dialog", async (dialog) => {
+      assert.match(dialog.message(), /不会删除源线程或 rollout/);
+      assert.match(dialog.message(), /当前搜索内容会从源线程重新建立索引/);
+      await dialog.accept();
+    });
+    await clearPromptIndexButton.focus();
+    await page.keyboard.press("Enter");
+    await waitForPromptApiState(page, () => promptIndexApiState.clearRequests.length === 1, "clear-index write request was not sent");
+    await promptIndexManagement.getByText("索引已清空；当前内容正在从源线程重建。", { exact: true }).waitFor();
+    assert.equal(promptIndexApiState.previewRequests[0].method, "POST", "clear-index preview must use POST");
+    assert.equal(promptIndexApiState.clearRequests[0].method, "POST", "clear-index write must use POST");
+    assert.equal(promptIndexApiState.clearRequests[0].token, "test-token", "clear-index write must use the existing authorization header");
+    assert.deepEqual(promptIndexApiState.clearRequests[0].body, {
+      operationPreviewId: "prompt-index-preview-1",
+      inputHash: "prompt-index-input-hash-1"
+    }, "clear-index write must bind the preview ticket");
+    await waitForPromptApiState(page, () => promptIndexApiState.rebuildPageRequests === 1, "clearing the index did not refresh current prompt content");
+    await waitForPromptApiState(page, () => promptIndexApiState.statusRequests.length >= statusRequestsBeforeClear + 2, "clearing and rebuilding did not refresh index status");
+    assert.ok(promptApiState.pageRequests.length > pageRequestsBeforeClear, "clearing the index must issue a fresh current-content request");
+    await promptDialog.getByText("Verify keyboard access", { exact: true }).waitFor();
+    await page.waitForFunction(() => {
+      const button = document.querySelector(".prompt-index-management .prompt-index-actions .danger-action");
+      return button instanceof HTMLButtonElement && !button.disabled;
+    });
+
+    promptIndexApiState.clearConflict = true;
+    page.once("dialog", async (dialog) => dialog.accept());
+    await clearPromptIndexButton.focus();
+    await page.keyboard.press("Space");
+    await waitForPromptApiState(page, () => promptIndexApiState.clearRequests.length === 2, "in-use clear-index write request was not observed");
+    const promptIndexError = promptIndexManagement.locator(".prompt-index-message.error");
+    await promptIndexError.waitFor();
+    assert.equal(
+      await promptIndexError.textContent(),
+      "索引正在使用中，暂时不能清空。请等待当前搜索或扫描完成后重试。",
+      "409 must render the dedicated localized in-use message"
+    );
+    assert.equal(promptIndexApiState.rebuildPageRequests, 1, "409 must not trigger a second content rebuild");
+    promptIndexApiState.clearConflict = false;
+    await assertAccessibleSurface(page, "expanded prompt index management");
     const purePromptListText = await promptDialog.locator(".prompt-list").innerText();
     assert.equal(
       await promptDialog.locator(".prompt-list .prompt-entry").count(),
@@ -877,6 +1130,7 @@ async function runAccessibilityFlow() {
     assert.doesNotMatch(purePromptListText, /<recommended_plugins>/);
     await promptDialog.getByRole("button", { name: /全部/ }).click();
     await promptDialog.getByText("推荐插件上下文", { exact: true }).waitFor();
+    await assertPromptModalLayoutAndHitTargets(page, promptDialog, "1440x1000");
     assert.equal(await promptDialog.getByText("顶刊能力建设的尾部搜索目标", { exact: false }).count(), 0, "virtualized tail content must not be present in the DOM before searching");
     await page.keyboard.press("Control+f");
     const promptSearch = promptDialog.getByRole("searchbox", { name: "搜索当前筛选的全部内容" });
@@ -887,6 +1141,26 @@ async function runAccessibilityFlow() {
     assert.equal(await promptDialog.locator(".prompt-entry mark", { hasText: "顶刊" }).count(), 1, "full-content search must highlight matches found outside the rendered window");
     await promptDialog.getByRole("button", { name: "清空搜索" }).click();
     assert.equal(await promptSearch.inputValue(), "", "clear search must restore the unfiltered prompt list");
+    await promptSearch.fill("paged-search");
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.some((request) => request.search === "paged-search"), "paged-search request was not observed");
+    const promptSearchCount = promptDialog.locator(".prompt-search-count > span:first-child");
+    await page.waitForFunction(() => /^1 \/ 3 · (仍有结果未加载|完整)$/.test(document.querySelector(".prompt-modal .prompt-search-count > span:first-child")?.textContent?.trim() || ""));
+    await promptDialog.locator(".prompt-entry").nth(1).waitFor();
+    await assertPromptModalLayoutAndHitTargets(page, promptDialog, "1440x1000 searched");
+    const previousMatch = promptDialog.getByRole("button", { name: "上一个匹配" });
+    const nextMatch = promptDialog.getByRole("button", { name: "下一个匹配" });
+    await previousMatch.focus();
+    await previousMatch.press("Enter");
+    await page.waitForFunction(() => !document.querySelector(".prompt-modal .prompt-search-count > span:first-child")?.textContent?.trim().startsWith("1 / 3"));
+    const desktopPreviousCount = (await promptSearchCount.textContent())?.trim();
+    assert.ok(
+      desktopPreviousCount === "2 / 3 · 仍有结果未加载" || desktopPreviousCount === "3 / 3 · 完整",
+      `previous match must cycle away from the first result: ${desktopPreviousCount}`
+    );
+    await nextMatch.focus();
+    await nextMatch.press("Space");
+    await promptDialog.getByText(desktopPreviousCount?.startsWith("2 / 3") ? "3 / 3 · 完整" : "1 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByRole("button", { name: "清空搜索" }).click();
     await promptSearch.fill("izmir");
     await promptDialog.getByText("1 / 1 · 完整", { exact: true }).waitFor();
     const turkishHighlight = promptDialog.locator(".prompt-entry mark").first();
@@ -897,10 +1171,38 @@ async function runAccessibilityFlow() {
     const combiningHighlight = promptDialog.locator(".prompt-entry mark").first();
     assert.equal(await combiningHighlight.textContent(), "Cafe\u0301", "canonical-equivalent search must retain the original combining sequence");
     await promptDialog.getByRole("button", { name: "清空搜索" }).click();
-    await promptDialog.getByText("60 / 125 · 完整", { exact: true }).waitFor();
+    await page.waitForFunction(() => {
+      const count = document.querySelector(".prompt-modal .prompt-search-count > span:first-child");
+      return /^\d+ \/ 125 · (仍有结果未加载|完整)$/.test(count?.textContent?.trim() || "");
+    });
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileOverflow = await promptDialog.evaluate((element) => element.scrollWidth - element.clientWidth);
     assert.ok(mobileOverflow <= 1, `thread content dialog must not overflow horizontally on mobile: ${mobileOverflow}px`);
+    const mobilePromptIndexLayout = await promptIndexManagement.evaluate((element) => {
+      const facts = element.querySelector(".prompt-index-facts");
+      return {
+        overflow: element.scrollWidth - element.clientWidth,
+        factColumns: facts ? getComputedStyle(facts).gridTemplateColumns.trim().split(/\s+/).filter(Boolean).length : 0
+      };
+    });
+    assert.ok(mobilePromptIndexLayout.overflow <= 1, `prompt index management must not overflow on mobile: ${mobilePromptIndexLayout.overflow}px`);
+    assert.equal(mobilePromptIndexLayout.factColumns, 2, "prompt index facts must use two columns on mobile");
+    await promptSearch.fill("paged-search");
+    await page.waitForFunction(() => /^1 \/ 3 · (仍有结果未加载|完整)$/.test(document.querySelector(".prompt-modal .prompt-search-count > span:first-child")?.textContent?.trim() || ""));
+    const mobileLayout = await assertPromptModalLayoutAndHitTargets(page, promptDialog, "390x844");
+    const mobilePreviousTarget = mobileLayout.buttonHits.find((target) => target.label === "上一个匹配");
+    assert.ok(mobilePreviousTarget, "390x844: previous-match center must be available for pointer activation");
+    await page.mouse.click(mobilePreviousTarget.centerX, mobilePreviousTarget.centerY);
+    await page.waitForFunction(() => !document.querySelector(".prompt-modal .prompt-search-count > span:first-child")?.textContent?.trim().startsWith("1 / 3"));
+    const mobilePreviousCount = (await promptSearchCount.textContent())?.trim();
+    assert.ok(
+      mobilePreviousCount === "2 / 3 · 仍有结果未加载" || mobilePreviousCount === "3 / 3 · 完整",
+      `mobile previous-match center click must cycle away from the first result: ${mobilePreviousCount}`
+    );
+    await nextMatch.focus();
+    await nextMatch.press("Enter");
+    await promptDialog.getByText(mobilePreviousCount?.startsWith("2 / 3") ? "3 / 3 · 完整" : "1 / 3 · 完整", { exact: true }).waitFor();
+    await promptDialog.getByRole("button", { name: "清空搜索" }).click();
     await page.setViewportSize({ width: 1440, height: 1000 });
     await assertAccessibleSurface(page, "prompts dialog");
     await assertDialogKeyboardContract(page, promptDialog);
@@ -978,6 +1280,7 @@ let exitCode = 0;
 try {
   await runPromptPaginationFlow();
   await runPromptRequestRaceFlow();
+  await runPromptIndexEnglishFlow();
   await runAccessibilityFlow();
 } catch (error) {
   exitCode = 1;

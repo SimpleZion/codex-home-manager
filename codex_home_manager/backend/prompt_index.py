@@ -4,13 +4,14 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,17 @@ prompt_index_scan_chunk_bytes = 1024 * 1024
 prompt_index_candidate_overlap_bytes = 512
 prompt_index_direct_candidate_bytes = 4 * 1024 * 1024
 prompt_index_redacted_attachment = "[附件内容已隐藏]".encode("utf-8")
+prompt_index_default_max_total_bytes = 1024 * 1024 * 1024
+prompt_index_default_max_idle_seconds = 30 * 24 * 60 * 60
+prompt_index_cleanup_interval_seconds = 60
+prompt_index_database_pattern = re.compile(r"^[0-9a-f]{64}\.sqlite$")
 
 
 class PromptIndexCancelled(RuntimeError):
+    pass
+
+
+class PromptIndexInUse(RuntimeError):
     pass
 
 
@@ -32,6 +41,11 @@ _request_lock = threading.Lock()
 _request_events: dict[str, tuple[str, threading.Event]] = {}
 _file_locks_lock = threading.Lock()
 _file_locks: dict[str, threading.Lock] = {}
+_database_locks_lock = threading.Lock()
+_database_locks: dict[str, threading.RLock] = {}
+_database_active_counts: dict[str, int] = {}
+_cleanup_lock = threading.Lock()
+_cleanup_last_run_ns: dict[str, int] = {}
 
 
 def prompt_index_root_path() -> Path:
@@ -49,6 +63,140 @@ def prompt_index_database_path(codex_home_path: Path) -> Path:
     normalized_home = os.path.normcase(str(codex_home_path.expanduser().resolve(strict=False)))
     database_name = hashlib.sha256(normalized_home.encode("utf-8")).hexdigest() + ".sqlite"
     return prompt_index_root_path() / database_name
+
+
+def _database_key(database_path: Path) -> str:
+    return os.path.normcase(str(database_path.expanduser().resolve(strict=False)))
+
+
+def _database_lock(database_path: Path) -> threading.RLock:
+    key = _database_key(database_path)
+    with _database_locks_lock:
+        lock = _database_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _database_locks[key] = lock
+        return lock
+
+
+def _lock_database_file(lock_file, *, blocking: bool) -> bool:
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    lock_file.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        try:
+            msvcrt.locking(lock_file.fileno(), mode, 1)
+        except OSError:
+            return False
+        return True
+
+    import fcntl
+
+    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(lock_file.fileno(), flags)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock_database_file(lock_file) -> None:
+    lock_file.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _database_use(database_path: Path, *, blocking: bool = True) -> Iterator[None]:
+    database_path = database_path.expanduser().resolve(strict=False)
+    local_lock = _database_lock(database_path)
+    if not local_lock.acquire(blocking=blocking):
+        raise PromptIndexInUse("prompt index is currently in use")
+    lock_file = None
+    locked = False
+    registered = False
+    key = _database_key(database_path)
+    try:
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = database_path.with_name(database_path.name + ".lock")
+        lock_file = lock_path.open("a+b")
+        locked = _lock_database_file(lock_file, blocking=blocking)
+        if not locked:
+            raise PromptIndexInUse("prompt index is currently in use by another process")
+        with _database_locks_lock:
+            _database_active_counts[key] = _database_active_counts.get(key, 0) + 1
+        registered = True
+        yield
+    finally:
+        if locked and lock_file is not None:
+            try:
+                _unlock_database_file(lock_file)
+            except OSError:
+                pass
+        if lock_file is not None:
+            lock_file.close()
+        if registered:
+            with _database_locks_lock:
+                active_count = _database_active_counts.get(key, 0)
+                if active_count <= 1:
+                    _database_active_counts.pop(key, None)
+                else:
+                    _database_active_counts[key] = active_count - 1
+        local_lock.release()
+
+
+def _database_active_count(database_path: Path) -> int:
+    with _database_locks_lock:
+        return _database_active_counts.get(_database_key(database_path), 0)
+
+
+def _database_is_in_use(database_path: Path) -> bool:
+    if _database_active_count(database_path) > 0:
+        return True
+    try:
+        with _database_use(database_path, blocking=False):
+            return False
+    except PromptIndexInUse:
+        return True
+
+
+def _configured_positive_int(name: str, default: int, minimum: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return max(minimum, int(raw_value))
+    except ValueError:
+        return default
+
+
+def prompt_index_retention_limits() -> dict[str, int]:
+    max_total_bytes = _configured_positive_int(
+        "CODEX_HOME_MANAGER_PROMPT_INDEX_MAX_TOTAL_BYTES",
+        prompt_index_default_max_total_bytes,
+        1024 * 1024,
+    )
+    max_idle_seconds = _configured_positive_int(
+        "CODEX_HOME_MANAGER_PROMPT_INDEX_MAX_IDLE_SECONDS",
+        prompt_index_default_max_idle_seconds,
+        60,
+    )
+    return {
+        "maxTotalBytes": max_total_bytes,
+        "maxIdleSeconds": max_idle_seconds,
+    }
 
 
 def begin_prompt_index_request(thread_id: str, request_id: str | None = None) -> tuple[str, threading.Event]:
@@ -136,6 +284,10 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS prompts_file_order_idx ON prompts(file_id, prompt_index);
         CREATE INDEX IF NOT EXISTS prompts_file_source_idx ON prompts(file_id, source_type, prompt_index);
+        CREATE TABLE IF NOT EXISTS prompt_index_metadata (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            last_accessed_ns INTEGER NOT NULL
+        );
         """
     )
     if previous_schema_version != prompt_index_schema_version:
@@ -143,7 +295,14 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         # or extraction semantics change instead of serving stale cached rows.
         connection.execute("DELETE FROM prompt_files")
         connection.execute(f"PRAGMA user_version={prompt_index_schema_version}")
-        connection.commit()
+    connection.execute(
+        """
+        INSERT INTO prompt_index_metadata(singleton, last_accessed_ns) VALUES (1, ?)
+        ON CONFLICT(singleton) DO UPDATE SET last_accessed_ns = excluded.last_accessed_ns
+        """,
+        (time.time_ns(),),
+    )
+    connection.commit()
     return connection
 
 
@@ -391,7 +550,8 @@ def update_prompt_index(
     if not rollout_path.is_file():
         raise FileNotFoundError(str(rollout_path))
 
-    with _file_lock(rollout_path), closing(_connect(database_path)) as connection:
+    _maybe_cleanup_prompt_indexes(database_path)
+    with _database_use(database_path), _file_lock(rollout_path), closing(_connect(database_path)) as connection:
         row, reset = _prepare_file_index(connection, rollout_path)
         scan_start_offset = int(row["scanned_offset"])
         scan_start_line = int(row["scanned_line_count"])
@@ -649,7 +809,7 @@ def read_prompt_page(
         after_index = max(0, int(cursor_payload.get("after") or 0))
 
     path_text = str(rollout_path.expanduser().resolve(strict=False))
-    with closing(_connect(database_path)) as connection:
+    with _database_use(database_path), closing(_connect(database_path)) as connection:
         file_row = connection.execute("SELECT * FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             raise RuntimeError("prompt index metadata is missing")
@@ -743,7 +903,7 @@ def iter_prompt_records(
     scope_sql, scope_parameters = _scope_clause(scope)
     clauses = ["file_id = ?", scope_sql]
     path_text = str(rollout_path.expanduser().resolve(strict=False))
-    with closing(_connect(database_path)) as connection:
+    with _database_use(database_path), closing(_connect(database_path)) as connection:
         file_row = connection.execute("SELECT id FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             return
@@ -767,3 +927,299 @@ def iter_prompt_records(
             for row in rows:
                 _check_cancelled(cancel_check)
                 yield _prompt_from_row(row)
+
+
+def _database_files(database_path: Path) -> tuple[Path, Path, Path]:
+    return (
+        database_path,
+        database_path.with_name(database_path.name + "-wal"),
+        database_path.with_name(database_path.name + "-shm"),
+    )
+
+
+def _database_size_bytes(database_path: Path) -> int:
+    total_size = 0
+    for path in _database_files(database_path):
+        try:
+            total_size += path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total_size
+
+
+def _prompt_index_databases(root_path: Path) -> list[Path]:
+    try:
+        candidates = root_path.iterdir()
+    except FileNotFoundError:
+        return []
+    return sorted(
+        (
+            path
+            for path in candidates
+            if path.is_file() and prompt_index_database_pattern.fullmatch(path.name)
+        ),
+        key=lambda path: path.name,
+    )
+
+
+def _inspect_prompt_index_database(database_path: Path) -> dict[str, Any]:
+    stat_result = database_path.stat()
+    result: dict[str, Any] = {
+        "sizeBytes": _database_size_bytes(database_path),
+        "lastAccessedNs": int(stat_result.st_mtime_ns),
+        "schemaVersion": 0,
+        "sourceRolloutCount": 0,
+        "missingSourceRolloutCount": 0,
+        "promptCount": 0,
+        "missingFileIds": [],
+    }
+    database_uri = database_path.as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True, timeout=1.0)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=1000")
+        result["schemaVersion"] = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('prompt_files', 'prompts', 'prompt_index_metadata')"
+            )
+        }
+        if "prompt_index_metadata" in table_names:
+            metadata_row = connection.execute(
+                "SELECT last_accessed_ns FROM prompt_index_metadata WHERE singleton = 1"
+            ).fetchone()
+            if metadata_row is not None:
+                result["lastAccessedNs"] = int(metadata_row[0])
+        if "prompt_files" not in table_names:
+            return result
+        source_rows = connection.execute("SELECT id, path FROM prompt_files").fetchall()
+        missing_file_ids: list[int] = []
+        existing_count = 0
+        for row in source_rows:
+            if Path(str(row["path"])).is_file():
+                existing_count += 1
+            else:
+                missing_file_ids.append(int(row["id"]))
+        result["sourceRolloutCount"] = len(source_rows)
+        result["existingSourceRolloutCount"] = existing_count
+        result["missingSourceRolloutCount"] = len(missing_file_ids)
+        result["missingFileIds"] = missing_file_ids
+        if "prompts" in table_names:
+            result["promptCount"] = int(connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0])
+    return result
+
+
+def _purge_missing_rollouts(database_path: Path, missing_file_ids: list[int]) -> None:
+    if not missing_file_ids:
+        return
+    with closing(sqlite3.connect(database_path, timeout=5.0)) as connection:
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA secure_delete=ON")
+        connection.executemany("DELETE FROM prompt_files WHERE id = ?", ((file_id,) for file_id in missing_file_ids))
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def _delete_database_files(database_path: Path) -> tuple[int, int]:
+    reclaimed_bytes = _database_size_bytes(database_path)
+    deleted_files = 0
+    remaining_errors: list[OSError] = []
+    for attempt in range(4):
+        remaining_errors = []
+        for path in reversed(_database_files(database_path)):
+            try:
+                path.unlink()
+                deleted_files += 1
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                remaining_errors.append(error)
+        if not remaining_errors:
+            return deleted_files, reclaimed_bytes
+        time.sleep(0.05 * (attempt + 1))
+    raise PromptIndexInUse("prompt index files are locked and could not be cleared") from remaining_errors[-1]
+
+
+def clear_prompt_index(codex_home_path: Path) -> dict[str, Any]:
+    database_path = prompt_index_database_path(codex_home_path)
+    existed = any(path.exists() for path in _database_files(database_path))
+    if not existed:
+        return {
+            "cleared": False,
+            "databaseExisted": False,
+            "deletedFileCount": 0,
+            "reclaimedBytes": 0,
+        }
+    with _database_use(database_path, blocking=False):
+        deleted_file_count, reclaimed_bytes = _delete_database_files(database_path)
+    return {
+        "cleared": True,
+        "databaseExisted": True,
+        "deletedFileCount": deleted_file_count,
+        "reclaimedBytes": reclaimed_bytes,
+    }
+
+
+def cleanup_prompt_indexes(
+    *,
+    root_path: Path | None = None,
+    max_total_bytes: int | None = None,
+    max_idle_seconds: int | None = None,
+    now_ns: int | None = None,
+    protected_database_paths: set[Path] | None = None,
+) -> dict[str, Any]:
+    root = (root_path or prompt_index_root_path()).expanduser().resolve(strict=False)
+    limits = prompt_index_retention_limits()
+    total_limit = max(
+        1024 * 1024,
+        int(limits["maxTotalBytes"] if max_total_bytes is None else max_total_bytes),
+    )
+    idle_limit = max(
+        60,
+        int(limits["maxIdleSeconds"] if max_idle_seconds is None else max_idle_seconds),
+    )
+    current_time_ns = int(now_ns or time.time_ns())
+    protected_keys = {
+        _database_key(path)
+        for path in (protected_database_paths or set())
+    }
+    summary = {
+        "examinedDatabases": 0,
+        "deletedDatabases": 0,
+        "deletedCorruptDatabases": 0,
+        "purgedMissingRollouts": 0,
+        "skippedInUse": 0,
+        "reclaimedBytes": 0,
+        "maxTotalBytes": total_limit,
+        "maxIdleSeconds": idle_limit,
+    }
+    candidates: list[dict[str, Any]] = []
+
+    for database_path in _prompt_index_databases(root):
+        summary["examinedDatabases"] += 1
+        is_protected = _database_key(database_path) in protected_keys
+        try:
+            with _database_use(database_path, blocking=False):
+                metadata = _inspect_prompt_index_database(database_path)
+                missing_file_ids = list(metadata.pop("missingFileIds", []))
+                if missing_file_ids:
+                    _purge_missing_rollouts(database_path, missing_file_ids)
+                    summary["purgedMissingRollouts"] += len(missing_file_ids)
+                    metadata = _inspect_prompt_index_database(database_path)
+                    metadata.pop("missingFileIds", None)
+                if is_protected:
+                    continue
+                has_sources = int(metadata.get("sourceRolloutCount", 0)) > 0
+                is_idle = current_time_ns - int(metadata["lastAccessedNs"]) > idle_limit * 1_000_000_000
+                if not has_sources or is_idle:
+                    _, reclaimed_bytes = _delete_database_files(database_path)
+                    summary["deletedDatabases"] += 1
+                    summary["reclaimedBytes"] += reclaimed_bytes
+                    continue
+                candidates.append({"path": database_path, **metadata})
+        except (PromptIndexInUse, PermissionError, sqlite3.OperationalError):
+            summary["skippedInUse"] += 1
+        except sqlite3.DatabaseError:
+            try:
+                with _database_use(database_path, blocking=False):
+                    _, reclaimed_bytes = _delete_database_files(database_path)
+                summary["deletedDatabases"] += 1
+                summary["deletedCorruptDatabases"] += 1
+                summary["reclaimedBytes"] += reclaimed_bytes
+            except (PromptIndexInUse, PermissionError, sqlite3.Error):
+                summary["skippedInUse"] += 1
+
+    total_size = sum(_database_size_bytes(path) for path in _prompt_index_databases(root))
+    if total_size > total_limit:
+        for candidate in sorted(candidates, key=lambda item: int(item["lastAccessedNs"])):
+            if total_size <= total_limit:
+                break
+            database_path = candidate["path"]
+            try:
+                with _database_use(database_path, blocking=False):
+                    _, reclaimed_bytes = _delete_database_files(database_path)
+                total_size = max(0, total_size - reclaimed_bytes)
+                summary["deletedDatabases"] += 1
+                summary["reclaimedBytes"] += reclaimed_bytes
+            except (PromptIndexInUse, PermissionError, sqlite3.OperationalError, sqlite3.DatabaseError):
+                summary["skippedInUse"] += 1
+    summary["remainingDatabases"] = len(_prompt_index_databases(root))
+    summary["remainingBytes"] = sum(_database_size_bytes(path) for path in _prompt_index_databases(root))
+    summary["overCapacity"] = summary["remainingBytes"] > total_limit
+    return summary
+
+
+def _maybe_cleanup_prompt_indexes(protected_database_path: Path) -> None:
+    root = prompt_index_root_path()
+    root_key = os.path.normcase(str(root.resolve(strict=False)))
+    now_ns = time.time_ns()
+    with _cleanup_lock:
+        last_run_ns = _cleanup_last_run_ns.get(root_key, 0)
+        if now_ns - last_run_ns < prompt_index_cleanup_interval_seconds * 1_000_000_000:
+            return
+        _cleanup_last_run_ns[root_key] = now_ns
+    try:
+        cleanup_prompt_indexes(
+            root_path=root,
+            now_ns=now_ns,
+            protected_database_paths={protected_database_path},
+        )
+    except OSError:
+        return
+
+
+def prompt_index_status(codex_home_path: Path) -> dict[str, Any]:
+    root = prompt_index_root_path()
+    database_path = prompt_index_database_path(codex_home_path)
+    database_paths = _prompt_index_databases(root)
+    limits = prompt_index_retention_limits()
+    total_size_bytes = sum(_database_size_bytes(path) for path in database_paths)
+    active_database_count = sum(1 for path in database_paths if _database_is_in_use(path))
+    database_status: dict[str, Any] | None = None
+    if database_path.is_file():
+        in_use = _database_is_in_use(database_path)
+        readable: bool | None = None
+        inspection_state = "in_use" if in_use else "available"
+        metadata: dict[str, Any] = {}
+        if not in_use:
+            try:
+                with _database_use(database_path, blocking=False):
+                    metadata = _inspect_prompt_index_database(database_path)
+                    metadata.pop("missingFileIds", None)
+                readable = True
+            except (PromptIndexInUse, PermissionError, sqlite3.OperationalError):
+                in_use = True
+                inspection_state = "in_use"
+            except sqlite3.DatabaseError:
+                readable = False
+                inspection_state = "unreadable"
+        database_status = {
+            "sizeBytes": _database_size_bytes(database_path),
+            "inUse": in_use,
+            "activeOperations": _database_active_count(database_path),
+            "readable": readable,
+            "inspectionState": inspection_state,
+            "lastAccessedAtMs": (
+                int(metadata["lastAccessedNs"]) // 1_000_000
+                if metadata.get("lastAccessedNs") is not None
+                else None
+            ),
+            "schemaVersion": metadata.get("schemaVersion"),
+            "sourceRolloutCount": metadata.get("sourceRolloutCount"),
+            "missingSourceRolloutCount": metadata.get("missingSourceRolloutCount"),
+            "promptCount": metadata.get("promptCount"),
+        }
+    return {
+        "databaseExists": database_status is not None,
+        "database": database_status,
+        "storage": {
+            "rootPath": str(root),
+            "databaseCount": len(database_paths),
+            "activeDatabaseCount": active_database_count,
+            "totalSizeBytes": total_size_bytes,
+            "maxTotalBytes": limits["maxTotalBytes"],
+            "maxIdleSeconds": limits["maxIdleSeconds"],
+            "overCapacity": total_size_bytes > limits["maxTotalBytes"],
+        },
+    }

@@ -48,6 +48,7 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[
 const {
   capabilityResponseIsCompatible,
   connectorReleaseTrustMessage,
+  parseConnectorReleaseMetadata,
   probeLocalConnector
 } = await import(moduleUrl);
 const packageVersion = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")).version;
@@ -110,6 +111,7 @@ const selfSignedLikeMetadata = {
     }
   }]
 };
+assert.equal(parseConnectorReleaseMetadata(selfSignedLikeMetadata), selfSignedLikeMetadata, "schema 1 release metadata must remain compatible");
 const englishTrust = connectorReleaseTrustMessage(selfSignedLikeMetadata, "en");
 assert.match(englishTrust, /reports Authenticode status/);
 assert.match(englishTrust, /does not prove public certificate trust/);
@@ -121,5 +123,31 @@ assert.match(chineseTrust, /固定公钥指纹/);
 const unavailableTrust = connectorReleaseTrustMessage(null, "en");
 assert.match(unavailableTrust, /not confirmed/);
 assert.doesNotMatch(unavailableTrust, /this build is unsigned/i);
+
+const schemaTwoUnavailableMetadata = {
+  schemaVersion: 2,
+  version: packageVersion,
+  artifacts: [{
+    name: "connector.exe",
+    kind: "exe",
+    sha256: "test-sha256",
+    authenticode: {
+      status: "unavailable",
+      trust: "none",
+      signerThumbprint: null,
+      signerSubject: null,
+      selfSigned: false,
+      chainTrusted: false,
+      detachedSignatureRequired: true
+    }
+  }]
+};
+assert.equal(parseConnectorReleaseMetadata(schemaTwoUnavailableMetadata), schemaTwoUnavailableMetadata, "schema 2 unavailable/none release metadata must parse as a valid published state");
+const schemaTwoTrust = connectorReleaseTrustMessage(schemaTwoUnavailableMetadata, "en");
+assert.match(schemaTwoTrust, /valid published state/);
+assert.match(schemaTwoTrust, /no certificate trust evidence/);
+assert.equal(parseConnectorReleaseMetadata({ ...schemaTwoUnavailableMetadata, schemaVersion: 3 }), null, "unknown release metadata schemas must be rejected");
+assert.equal(parseConnectorReleaseMetadata({ ...schemaTwoUnavailableMetadata, version: "999.0.0" }), null, "release metadata for another frontend version must be rejected");
+assert.equal(parseConnectorReleaseMetadata({ ...schemaTwoUnavailableMetadata, artifacts: [{ name: "connector.exe", kind: "exe", authenticode: { status: "unavailable", trust: 0 } }] }), null, "malformed Authenticode trust metadata must be rejected");
 
 console.log("frontend connector contract tests passed");

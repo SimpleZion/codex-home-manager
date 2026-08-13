@@ -11,6 +11,9 @@ workflow_root = (
     else manager_root.parent
 )
 workflow_path = workflow_root / ".github" / "workflows" / "source-ci.yml"
+codeql_path = workflow_root / ".github" / "workflows" / "codeql.yml"
+dependabot_path = workflow_root / ".github" / "dependabot.yml"
+security_path = manager_root / "SECURITY.md"
 ci_requirements_path = workflow_root / ".github" / "workflows" / "requirements-ci.txt"
 
 
@@ -88,6 +91,53 @@ def test_source_ci_generates_standard_sbom_and_provenance_evidence() -> None:
     assert "source-sbom-attestation.sigstore.json" in workflow
     assert "source-provenance-attestation.sigstore.json" in workflow
     assert "source-release-evidence-${{ github.sha }}" in workflow
+    assert "-CiBuild" in workflow
+    assert "-VerifyReproducibleBuild" in workflow
+    assert "windows-release-binaries-${{ github.sha }}" in workflow
+    assert 'Copy-Item -LiteralPath $buildMetadataPath -Destination (Join-Path $outputRoot "windows-build-metadata.json")' in workflow
+    assert "Generate binary CycloneDX SBOM with Syft" in workflow
+    assert "BINARY-SBOM-SUBJECTS.txt" in workflow
+    assert "BINARY-PROVENANCE-SUBJECTS.txt" in workflow
+    assert "windows-sbom-attestation.sigstore.json" in workflow
+    assert "windows-provenance-attestation.sigstore.json" in workflow
+    assert "windows-release-evidence-${{ github.sha }}" in workflow
+    assert workflow.count("runs-on: windows-latest") == 2
+    assert "self-hosted" not in workflow
+
+
+def test_codeql_and_dependabot_cover_the_exported_source_dependencies() -> None:
+    codeql = codeql_path.read_text(encoding="utf-8")
+    dependabot = dependabot_path.read_text(encoding="utf-8")
+
+    action_references = re.findall(r"^\s*uses:\s*([^\s#]+)", codeql, flags=re.MULTILINE)
+    assert action_references
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", reference) for reference in action_references)
+    assert "github/codeql-action/init@" in codeql
+    assert "github/codeql-action/analyze@" in codeql
+    assert "language: [python, javascript-typescript]" in codeql
+    assert "runs-on: windows-latest" in codeql
+    assert "security-events: write" in codeql
+    assert "build-mode: none" in codeql
+    assert "package-ecosystem: github-actions" in dependabot
+    assert "package-ecosystem: npm" in dependabot
+    assert dependabot.count("package-ecosystem: pip") == 2
+    assert 'directory: "/codex_home_manager"' in dependabot
+    assert 'directory: "/.github/workflows"' in dependabot
+    assert 'directory: "/codex_home_manager/packaging/windows"' in dependabot
+    assert dependabot.count("target-branch: source") == 4
+
+
+def test_security_policy_has_private_reporting_and_release_trust_boundaries() -> None:
+    policy = security_path.read_text(encoding="utf-8")
+
+    assert "security/advisories/new" in policy
+    assert "Latest published release" in policy
+    assert "Current `source` branch" in policy
+    assert "3 business days" in policy
+    assert "7 business days" in policy
+    assert "NotSigned" in policy
+    assert "detached Ed25519 manifest signature" in policy
+    assert "public bug bounty" in policy
 
 
 def test_source_ci_python_test_dependencies_are_hash_locked() -> None:
