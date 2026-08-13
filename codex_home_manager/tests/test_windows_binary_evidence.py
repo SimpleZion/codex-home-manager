@@ -11,7 +11,7 @@ from scripts import release_manifest
 source_commit = "d" * 40
 repository = "example/project"
 signer_workflow = "github.com/example/project/.github/workflows/source-ci.yml"
-version = "1.0.8"
+version = "1.0.9"
 
 
 def write_windows_evidence(directory: Path) -> dict[str, Path]:

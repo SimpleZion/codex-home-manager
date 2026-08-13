@@ -898,10 +898,10 @@ const detailPanelViewportReserve = 320;
 const diagnosticsCacheTtlMs = 30_000;
 const diagnosticsReportCache = new Map<string, { report: DiagnosticsReport; cachedAtMs: number }>();
 const defaultLocalApiBaseUrl = "http://127.0.0.1:8765";
-const githubReleaseAssetBaseUrl = "https://github.com/SimpleZion/codex-home-manager/releases/latest/download";
+const officialReleaseBaseUrl = "https://codex-home-manager.simplezion.com";
 const hostedReleaseAssetBaseUrl = typeof window !== "undefined" && !["127.0.0.1", "localhost"].includes(window.location.hostname)
   ? window.location.origin
-  : githubReleaseAssetBaseUrl;
+  : officialReleaseBaseUrl;
 const localConnectorDownloadUrl = `${hostedReleaseAssetBaseUrl}/codex-home-manager-local-win-x64.exe`;
 const localConnectorZipDownloadUrl = `${hostedReleaseAssetBaseUrl}/codex-home-manager-local-win-x64.zip`;
 const connectorReleaseMetadataUrl = `${hostedReleaseAssetBaseUrl}/connector-release.json`;

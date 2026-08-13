@@ -17,11 +17,11 @@ VSVersionInfo(
                     [
                         StringStruct("CompanyName", "SimpleZion"),
                         StringStruct("FileDescription", "Codex Home Manager"),
-                        StringStruct("FileVersion", "1.0.8"),
+                        StringStruct("FileVersion", "1.0.9"),
                         StringStruct("InternalName", "CodexHomeManagerLocal"),
                         StringStruct("OriginalFilename", "CodexHomeManagerLocal.exe"),
                         StringStruct("ProductName", "Codex Home Manager"),
-                        StringStruct("ProductVersion", "1.0.8"),
+                        StringStruct("ProductVersion", "1.0.9"),
                     ],
                 )
             ]

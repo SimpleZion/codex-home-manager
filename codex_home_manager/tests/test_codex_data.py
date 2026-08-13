@@ -7795,7 +7795,11 @@ def test_sensitive_console_responses_set_security_headers_without_breaking_cors(
     )
 
     for current_response in (console_response, response, preflight):
-        assert current_response.headers["Content-Security-Policy"].find("frame-ancestors 'none'") >= 0
+        content_security_policy = current_response.headers["Content-Security-Policy"]
+        assert content_security_policy.find("frame-ancestors 'none'") >= 0
+        assert "connect-src 'self' https://codex-home-manager.simplezion.com" in content_security_policy
+        assert "github.com" not in content_security_policy
+        assert "release-assets.githubusercontent.com" not in content_security_policy
         assert current_response.headers["X-Frame-Options"] == "DENY"
         assert current_response.headers["X-Content-Type-Options"] == "nosniff"
         assert current_response.headers["Referrer-Policy"] == "no-referrer"

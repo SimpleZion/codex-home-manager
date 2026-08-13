@@ -1,6 +1,6 @@
 {
   "name": "codex-home-manager",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": false,
   "type": "module",
   "scripts": {

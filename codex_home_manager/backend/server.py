@@ -87,7 +87,7 @@ from .prompt_index import (
 )
 
 
-packaged_product_version = "1.0.8"
+packaged_product_version = "1.0.9"
 
 
 def load_product_version() -> str:
@@ -961,7 +961,8 @@ security_response_headers = {
     "Content-Security-Policy": (
         "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
         "form-action 'none'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; "
-        "connect-src 'self'; worker-src 'none'; manifest-src 'self'"
+        "connect-src 'self' https://codex-home-manager.simplezion.com; "
+        "worker-src 'none'; manifest-src 'self'"
     ),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",

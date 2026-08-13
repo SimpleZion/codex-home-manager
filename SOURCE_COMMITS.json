@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T22:30:40.070311+00:00",
+  "generatedAt": "2026-08-13T23:14:20.709118+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "31394b291e8017ac6bfd9be2e15ec73836d4999c",
+      "commit": "ef89e7a8d795e478173fcda583acaa431c13ab9d",
       "selection": [
         "**"
       ],
@@ -358,9 +358,9 @@
           "path": "codex_home_manager/backend/server.py",
           "sourcePath": "backend/server.py",
           "gitMode": "100644",
-          "gitObject": "0222b5181b2537c4efdd32f50d7d3b0c068d589e",
-          "bytes": 184776,
-          "sha256": "e451dee80932762d69380f9ce6086a45038f735525dd35035658243527e24524"
+          "gitObject": "740acd19d9277a897f151b386d6b7984bf3ec5c6",
+          "bytes": 184829,
+          "sha256": "986d3240b6084f348f91c17c5562b870340544b88b5f21fb198eb0413c5be000"
         },
         {
           "path": "codex_home_manager/backend/stale_subagent_edges.py",
@@ -398,17 +398,17 @@
           "path": "codex_home_manager/package-lock.json",
           "sourcePath": "package-lock.json",
           "gitMode": "100644",
-          "gitObject": "5109ac2d5bcf34ad9a0b1fe4961e67a1238d019e",
+          "gitObject": "94c81e6c6b5f165f631a7caa7fe0c2799ab902fb",
           "bytes": 63521,
-          "sha256": "61f04f34fda939817ec4c66ab2b230098c3dd2c035ac9e50994340333559592f"
+          "sha256": "cc3f451c1ace221b89b538ccc8059b040a9820617646cb698d23bf8510af4608"
         },
         {
           "path": "codex_home_manager/package.json",
           "sourcePath": "package.json",
           "gitMode": "100644",
-          "gitObject": "740de6830580c02153a027373820084561786535",
+          "gitObject": "f30dad6d5e0cc4eb5bf2005a0ffba8c8bc1b0d8c",
           "bytes": 1084,
-          "sha256": "0f4a155910116cb2ac9434417cec068307e2ceeacc65d1c49465654ddb953c69"
+          "sha256": "feb3998ecdaf6072f4fbfc937ae299a373b31b1a020140c324b10a2e8d72b47b"
         },
         {
           "path": "codex_home_manager/packaging/windows/assets/codex-home-manager.ico",
@@ -438,9 +438,9 @@
           "path": "codex_home_manager/packaging/windows/version_info.txt",
           "sourcePath": "packaging/windows/version_info.txt",
           "gitMode": "100644",
-          "gitObject": "69043a4def2318b1f66473168ec44454bd4f1fa9",
+          "gitObject": "68d22b1c6a44a7e55ab56d334ac1c028124b8e5d",
           "bytes": 1013,
-          "sha256": "5c286a5c2e060e871387ce7053457fa3219f3dc4045d5caacbadc2aed34e8b88"
+          "sha256": "f328d1fb9a5efab1bf4688065e0169ea05a491fc61cc642e41dc98155c3c6610"
         },
         {
           "path": "codex_home_manager/public/favicon.svg",
@@ -582,9 +582,9 @@
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "751b7cf304da709815432ebba2941475201c04f0",
-          "bytes": 383761,
-          "sha256": "655d727e5f51d9e9de7e03092078e499f2ee349d13813fd38061ba6f8c46fbac"
+          "gitObject": "11da366b3b3e9631e753ef51e5b4f8969d6da557",
+          "bytes": 383723,
+          "sha256": "f3f65ac9cf5e82148ed48770128ed0e34aa0b82470833601caf2e7dfccbda89c"
         },
         {
           "path": "codex_home_manager/src/promptClassification.ts",
@@ -662,9 +662,9 @@
           "path": "codex_home_manager/tests/test_codex_data.py",
           "sourcePath": "tests/test_codex_data.py",
           "gitMode": "100644",
-          "gitObject": "9f4ee420ac79bf34da856b76bad9c47481894ea9",
-          "bytes": 377104,
-          "sha256": "01259b6b0f557fc3dbf7be3e9468c201203f7240f65a20f6cf8e533a0cfb1901"
+          "gitObject": "34269d1bb5c86da63135f18820c5d6eaf0679ac3",
+          "bytes": 377411,
+          "sha256": "7b71095d908c861b112c39e148e5b2a4fc88b041d5b579db93ae6a5afda654e4"
         },
         {
           "path": "codex_home_manager/tests/test_codex_plugin_state_snapshot.py",
@@ -886,9 +886,9 @@
           "path": "codex_home_manager/tests/test_windows_binary_evidence.py",
           "sourcePath": "tests/test_windows_binary_evidence.py",
           "gitMode": "100644",
-          "gitObject": "6ea9bbd2357853a9dabecfd139db979fc8da2033",
+          "gitObject": "73bc2c5eaf21406f592884ad35d41f3aa4017f69",
           "bytes": 11659,
-          "sha256": "35b688868d6d8bd2d64a0807745d7ea9da10993e9c66c7d820afb2998940dfb5"
+          "sha256": "1d4d1865f844ddcae140682f7184b0c775322c893258e733a223658fa3808b89"
         },
         {
           "path": "codex_home_manager/tests/test_windows_connector.py",
