@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,7 +31,7 @@ async function createReleaseFixture() {
   await writeFile(join(root, "site", "_redirects"), "\n");
   await writeFile(join(root, "site", "SHA256SUMS.txt"), "");
   await writeFile(join(root, "site", "connector-release.json"), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     version: "1.0.0",
     artifacts: []
   }));
@@ -159,7 +159,7 @@ async function addExecutableRelease(root) {
   const name = `codex-home-manager-local-win-x64-v1.0.0-${sha256.slice(0, 12)}.exe`;
   await writeFile(join(root, "site", name), content);
   await writeFile(join(root, "site", "connector-release.json"), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     version: "1.0.0",
     artifacts: [{
       name,
@@ -167,7 +167,15 @@ async function addExecutableRelease(root) {
       sha256,
       size: content.length,
       audit: { method: "pyi-archive-viewer+strings", archiveEntryCount: 1, sourceFiles: [], sensitiveStrings: [] },
-      authenticode: { status: "unavailable", signerThumbprint: null, signerSubject: null, detachedSignatureRequired: true }
+      authenticode: {
+        status: "unavailable",
+        trust: "none",
+        signerThumbprint: null,
+        signerSubject: null,
+        selfSigned: false,
+        chainTrusted: false,
+        detachedSignatureRequired: true
+      }
     }]
   }));
   await writeFile(join(root, "site", "SHA256SUMS.txt"), `${sha256}  ${name}\n`);
@@ -326,8 +334,11 @@ test("rejects fake Authenticode trust or a release that makes detached signature
   const bundle = JSON.parse(await (await import("node:fs/promises")).readFile(bundlePath, "utf8"));
   bundle.artifacts[0].authenticode = {
     status: "valid",
+    trust: "public-trusted",
     signerThumbprint: null,
     signerSubject: null,
+    selfSigned: false,
+    chainTrusted: true,
     detachedSignatureRequired: false
   };
   await writeFile(bundlePath, JSON.stringify(bundle));
@@ -338,6 +349,52 @@ test("rejects fake Authenticode trust or a release that makes detached signature
   assert.match(result.stderr, /invalid Authenticode trust evidence or detached signature policy/i);
 });
 
+test("rejects self-signed Authenticode presented as valid public trust", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  const bundlePath = join(root, "site", "connector-release.json");
+  const bundle = JSON.parse(await readFile(bundlePath, "utf8"));
+  bundle.artifacts[0].authenticode = {
+    status: "valid",
+    trust: "public-trusted",
+    signerThumbprint: "A".repeat(40),
+    signerSubject: "CN=Self-Signed Test",
+    selfSigned: true,
+    chainTrusted: true,
+    detachedSignatureRequired: true
+  };
+  await writeFile(bundlePath, JSON.stringify(bundle));
+
+  const result = runChecker(root);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid Authenticode trust evidence/i);
+});
+
+test("accepts explicitly self-signed Authenticode only as untrusted", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  const bundlePath = join(root, "site", "connector-release.json");
+  const bundle = JSON.parse(await readFile(bundlePath, "utf8"));
+  bundle.artifacts[0].authenticode = {
+    status: "self-signed",
+    trust: "untrusted",
+    signerThumbprint: "A".repeat(40),
+    signerSubject: "CN=Self-Signed Test",
+    selfSigned: true,
+    chainTrusted: false,
+    detachedSignatureRequired: true
+  };
+  await writeFile(bundlePath, JSON.stringify(bundle));
+  const artifact = bundle.artifacts[0];
+  const checksumPath = join(root, "site", "SHA256SUMS.txt");
+  await writeFile(checksumPath, `${artifact.sha256}  ${artifact.name}\n${createHash("sha256").update(await readFile(bundlePath)).digest("hex")}  connector-release.json\n`);
+
+  const result = runChecker(root);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("validates signed release metadata only against a separately pinned public key fingerprint", async () => {
   const root = await createReleaseFixture();
   const { fingerprint } = await addSignedReleaseMetadata(root);
@@ -345,6 +402,55 @@ test("validates signed release metadata only against a separately pinned public 
   const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects a tampered signed release manifest", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  const manifestPath = join(root, "site", "release-manifest.json");
+  await writeFile(manifestPath, Buffer.concat([await readFile(manifestPath), Buffer.from(" ")]));
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Ed25519 signature verification failed/i);
+});
+
+test("rejects a tampered release manifest signature", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  const signaturePath = join(root, "site", "release-manifest.json.sig");
+  const signature = Buffer.from((await readFile(signaturePath, "ascii")).trim(), "base64");
+  signature[0] ^= 1;
+  await writeFile(signaturePath, signature.toString("base64") + "\n");
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Ed25519 signature verification failed/i);
+});
+
+test("rejects a replaced release public-key PEM", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  const replacementKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" });
+  await writeFile(join(root, "site", "release-signing-public-key.pem"), replacementKey);
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /pinned public key fingerprint/i);
+});
+
+test("rejects a tampered artifact after signed manifest verification", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint, name } = await addSignedReleaseMetadata(root);
+  await writeFile(join(root, "site", name), "tampered artifact");
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /signed manifest artifact hash mismatch/i);
 });
 
 test("rejects public frontend bytes that drift from the signed dist mirror", async () => {
@@ -440,6 +546,20 @@ test("release mode rejects when all signed metadata is absent", async () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /release mode requires complete signed release metadata/i);
+});
+
+test("release mode rejects legacy Authenticode schema 1", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  const bundlePath = join(root, "site", "connector-release.json");
+  const bundle = JSON.parse(await readFile(bundlePath, "utf8"));
+  bundle.schemaVersion = 1;
+  await writeFile(bundlePath, JSON.stringify(bundle));
+
+  const result = runChecker(root, { CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE: "1" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /schema 2 Authenticode trust evidence/i);
 });
 
 for (const missingName of [

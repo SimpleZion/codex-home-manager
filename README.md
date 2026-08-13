@@ -56,22 +56,20 @@ For the full local management mode on Windows, download and run the local connec
 
 The website URL is the stable download alias. It redirects to the current content-addressed EXE published by the same release process; GitHub Releases intentionally contains the content-addressed asset name rather than a second mutable `codex-home-manager-local-win-x64.exe` asset.
 
-Before running the connector, compare its SHA-256 with [`SHA256SUMS.txt`](https://codex-home-manager.simplezion.com/SHA256SUMS.txt) or `connector-release.json`. The following PowerShell resolves the current immutable name and fails if the downloaded bytes do not match the published hash:
+Before running the connector, use [`verify-codex-home-manager.ps1`](https://codex-home-manager.simplezion.com/verify-codex-home-manager.ps1). The verifier has the independently retained Ed25519 SPKI SHA-256 trust anchor `sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208` embedded in its source. It verifies the downloaded PEM against that fixed fingerprint, verifies `release-manifest.json.sig`, and only then reads the signed EXE or ZIP size and SHA-256 from the manifest:
 
 ```powershell
-$release = Invoke-RestMethod https://codex-home-manager.simplezion.com/connector-release.json
-$artifact = $release.artifacts | Where-Object kind -eq "exe" | Select-Object -First 1
-$downloadPath = Join-Path $env:USERPROFILE "Downloads\$($artifact.name)"
-Invoke-WebRequest https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe -OutFile $downloadPath
-$actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadPath).Hash.ToLowerInvariant()
-if ($actualSha256 -ne $artifact.sha256) { throw "Codex Home Manager SHA-256 mismatch" }
+PowerShell -NoProfile -ExecutionPolicy Bypass -File .\verify-codex-home-manager.ps1 `
+  -FilePath "$env:USERPROFILE\Downloads\codex-home-manager-local-win-x64-v1.0.6-466d00e0e09e.exe"
 ```
 
-For signature verification, validate [`release-manifest.json.sig`](https://codex-home-manager.simplezion.com/release-manifest.json.sig) as an Ed25519 signature over [`release-manifest.json`](https://codex-home-manager.simplezion.com/release-manifest.json) with the published [`release-signing-public-key.pem`](https://codex-home-manager.simplezion.com/release-signing-public-key.pem). Compare the key fingerprint in [`release-signing-public-key.sha256`](https://codex-home-manager.simplezion.com/release-signing-public-key.sha256) with a publisher fingerprint obtained independently. The signed manifest binds the source commits, immutable EXE/ZIP hashes, Cloudflare deployment, and GitHub Release identity.
+Windows PowerShell 5.1 has no native Ed25519 API, so the verifier requires an installed Python 3 interpreter with the audited `cryptography` package. If that dependency is absent, verification stops with an explicit error; it never falls back to `SHA256SUMS.txt`, `connector-release.json`, or another replaceable hash from the same origin. The published [`release-signing-public-key.sha256`](https://codex-home-manager.simplezion.com/release-signing-public-key.sha256) is informational and is not a trust anchor for this verifier.
+
+The verifier checks [`release-manifest.json.sig`](https://codex-home-manager.simplezion.com/release-manifest.json.sig) over the downloaded manifest with [`release-signing-public-key.pem`](https://codex-home-manager.simplezion.com/release-signing-public-key.pem). The signed manifest binds the source commits, immutable EXE/ZIP hashes, Cloudflare deployment, and GitHub Release identity. [`SHA256SUMS.txt`](https://codex-home-manager.simplezion.com/SHA256SUMS.txt) remains useful for transfer diagnostics after signature verification, but a same-origin checksum alone does not authenticate a release.
 
 The connector starts the full local product at `http://127.0.0.1:8765/` and registers the `codex-home-manager://start` browser protocol for the current Windows user.
 
-The current Windows build is unsigned. If Windows SmartScreen shows "Windows protected your PC", choose "More info" and then "Run anyway" to start the app.
+The current Windows build carries a local self-signed Authenticode signature. It is untrusted and must not be described as a valid public code-signing chain. Windows SmartScreen may still warn; release authenticity is established by the independently pinned Ed25519 manifest verification above.
 
 Agents can use the same local connector directly through HTTP or MCP. Thread detail reads can skip the heavier daily token timeline, then load `/api/threads/{thread_id}/daily-tokens` only when that visualization or audit data is needed. That endpoint returns numeric token usage only from auditable `token_count` events. Threads that only have SQLite `tokens_used` are marked with `unknownTokenThreads`; no token value is returned for those unknown records.
 
@@ -108,11 +106,11 @@ Release publication must select evidence from the exact source commit, verify th
 
 ## Signed release proof
 
-The release manifest signs the immutable artifact deployment, GitHub Release identity, EXE and ZIP hashes, and source commits. Release mode refuses to proceed unless `release-manifest.json`, its detached Ed25519 signature, the public key, and the published fingerprint are all present. The verifier requires `CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256` from an independently retained publisher trust record and rejects a fingerprint learned only from either download channel.
+The release manifest signs the immutable artifact deployment, GitHub Release identity, EXE and ZIP hashes, and source commits. Release mode refuses to proceed unless `release-manifest.json`, its detached Ed25519 signature, the public key, and the published fingerprint are all present. Publication gates require `CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256` from an independently retained publisher trust record. The user verifier separately embeds the same reviewed SPKI fingerprint and does not learn trust from either download channel.
 
 Final publication downloads the EXE, ZIP, manifest, detached signature, and public key independently from Cloudflare Pages and GitHub Release. It requires byte-identical metadata and artifacts, an exact GitHub asset set, valid Cloudflare deployment evidence, valid Ed25519 signing, and stable aliases that resolve to the current content-addressed files.
 
-Authenticode is reported only when the build machine already has a trusted Windows code-signing certificate with a private key and a valid chain. The release process never creates or presents a self-signed certificate as trusted. When no trusted certificate is available, metadata states `authenticode.status = "unavailable"`; the detached Ed25519 signature and independently pinned root remain mandatory in both cases.
+Authenticode metadata schema 2 separates signature presence from trust. Only a non-self-signed certificate with a validated public trust chain may use `status = "valid"` and `trust = "public-trusted"`. A self-signed signature must use `status = "self-signed"` and `trust = "untrusted"`; another non-validating chain uses `status = "untrusted"`; no signer uses `status = "unavailable"` and `trust = "none"`. The detached Ed25519 signature and independently pinned root remain mandatory in every case.
 
 ## Privacy stance
 

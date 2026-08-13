@@ -1,34 +1,33 @@
 {
-    "schemaVersion":  1,
-    "version":  "1.0.6",
-    "artifacts":  [
-                      {
-                          "name":  "codex-home-manager-local-win-x64-v1.0.6-466d00e0e09e.exe",
-                          "kind":  "exe",
-                          "sha256":  "466d00e0e09ec6b3f228aa1b3e772fa5e73342dc038d1544abacc94d971c507b",
-                          "size":  19281152,
-                          "audit":  {
-                                        "method":  "pyi-archive-viewer+strings",
-                                        "archiveEntryCount":  896,
-                                        "sourceFiles":  [
-
-                                                        ],
-                                        "sensitiveStrings":  [
-
-                                                             ]
-                                    },
-                          "authenticode":  {
-                                               "status":  "valid",
-                                               "signerThumbprint":  "48B7A26A0A8C16EC183E07E657AC73293744EEA0",
-                                               "signerSubject":  "CN=SimpleZion Codex Pagination Patch",
-                                               "detachedSignatureRequired":  true
-                                           }
-                      },
-                      {
-                          "name":  "codex-home-manager-local-win-x64-v1.0.6-08c2929b2093.zip",
-                          "kind":  "zip",
-                          "sha256":  "08c2929b2093f8f5dfa9f84a9b768c9531c48919dcdea2fded6e2cf8bc2d1fae",
-                          "size":  19201293
-                      }
-                  ]
+  "schemaVersion": 2,
+  "version": "1.0.7",
+  "artifacts": [
+    {
+      "name": "codex-home-manager-local-win-x64-v1.0.7-8f6d171c701f.exe",
+      "kind": "exe",
+      "sha256": "8f6d171c701f2ab35eecd656bd58cecb6831edd47e4c643e617501384273ccae",
+      "size": 19298021,
+      "audit": {
+        "method": "pyi-archive-viewer+strings",
+        "archiveEntryCount": 897,
+        "sourceFiles": [],
+        "sensitiveStrings": []
+      },
+      "authenticode": {
+        "status": "unavailable",
+        "trust": "none",
+        "signerThumbprint": null,
+        "signerSubject": null,
+        "selfSigned": false,
+        "chainTrusted": false,
+        "detachedSignatureRequired": true
+      }
+    },
+    {
+      "name": "codex-home-manager-local-win-x64-v1.0.7-d031baf20a17.zip",
+      "kind": "zip",
+      "sha256": "d031baf20a17fe7d2e51a0cd665e2d314dfd524268fe646824a7fc06ee3223ec",
+      "size": 19225999
+    }
+  ]
 }

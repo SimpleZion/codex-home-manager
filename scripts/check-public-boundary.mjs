@@ -166,8 +166,11 @@ function assertSafeZip(relativePath, content) {
 
 const releaseManifestPath = join(siteDirectory, "connector-release.json");
 const releaseManifest = JSON.parse(await readFile(releaseManifestPath, "utf8"));
-if (releaseManifest.schemaVersion !== 1 || !/^\d+\.\d+\.\d+$/.test(releaseManifest.version || "")) {
+if (![1, 2].includes(releaseManifest.schemaVersion) || !/^\d+\.\d+\.\d+$/.test(releaseManifest.version || "")) {
   throw new Error("connector-release.json has an invalid schema or version");
+}
+if (releaseMode && releaseManifest.schemaVersion !== 2) {
+  throw new Error("release mode requires connector-release.json schema 2 Authenticode trust evidence");
 }
 if (!Array.isArray(releaseManifest.artifacts)) throw new Error("connector-release.json artifacts must be an array");
 
@@ -186,11 +189,24 @@ for (const artifact of releaseManifest.artifacts) {
       throw new Error(`EXE lacks passing PyInstaller and strings boundary evidence: ${artifact.name}`);
     }
     const authenticode = artifact.authenticode;
-    const validTrustedAuthenticode = authenticode?.status === "valid" &&
-      /^[0-9A-F]{40}$/i.test(authenticode.signerThumbprint || "") && typeof authenticode.signerSubject === "string" && authenticode.signerSubject;
-    const explicitlyUnavailable = authenticode?.status === "unavailable" &&
-      authenticode.signerThumbprint == null && authenticode.signerSubject == null;
-    if (authenticode?.detachedSignatureRequired !== true || (!validTrustedAuthenticode && !explicitlyUnavailable)) {
+    const hasSigner = /^[0-9A-F]{40}$/.test(authenticode?.signerThumbprint || "") &&
+      typeof authenticode?.signerSubject === "string" && Boolean(authenticode.signerSubject.trim());
+    const validPublicChain = authenticode?.status === "valid" && authenticode?.trust === "public-trusted" &&
+      hasSigner && authenticode?.selfSigned === false && authenticode?.chainTrusted === true;
+    const explicitSelfSigned = authenticode?.status === "self-signed" && authenticode?.trust === "untrusted" &&
+      hasSigner && authenticode?.selfSigned === true && authenticode?.chainTrusted === false;
+    const explicitUntrusted = authenticode?.status === "untrusted" && authenticode?.trust === "untrusted" &&
+      hasSigner && authenticode?.selfSigned === false && authenticode?.chainTrusted === false;
+    const explicitlyUnavailable = authenticode?.status === "unavailable" && authenticode?.trust === "none" &&
+      authenticode?.signerThumbprint == null && authenticode?.signerSubject == null &&
+      authenticode?.selfSigned === false && authenticode?.chainTrusted === false;
+    const legacyEvidence = releaseManifest.schemaVersion === 1 &&
+      authenticode?.detachedSignatureRequired === true &&
+      ((authenticode?.status === "valid" && hasSigner) ||
+        (authenticode?.status === "unavailable" && authenticode?.signerThumbprint == null && authenticode?.signerSubject == null));
+    if (authenticode?.detachedSignatureRequired !== true ||
+        (releaseManifest.schemaVersion === 2 && !validPublicChain && !explicitSelfSigned && !explicitUntrusted && !explicitlyUnavailable) ||
+        (releaseManifest.schemaVersion === 1 && !legacyEvidence)) {
       throw new Error(`EXE has invalid Authenticode trust evidence or detached signature policy: ${artifact.name}`);
     }
   }
@@ -239,7 +255,14 @@ if (hasManifest || hasSignature) {
     throw new Error("pinned public key fingerprint does not match the published Ed25519 key");
   }
   const manifestBytes = signedMetadata.get("release-manifest.json");
-  const signatureBytes = Buffer.from(signedMetadata.get("release-manifest.json.sig").toString("ascii").trim(), "base64");
+  const signatureText = signedMetadata.get("release-manifest.json.sig").toString("ascii").trim();
+  if (!/^[A-Za-z0-9+/]{86}==$/.test(signatureText)) {
+    throw new Error("release manifest Ed25519 signature encoding is invalid");
+  }
+  const signatureBytes = Buffer.from(signatureText, "base64");
+  if (signatureBytes.length !== 64 || signatureBytes.toString("base64") !== signatureText) {
+    throw new Error("release manifest Ed25519 signature encoding is invalid");
+  }
   if (!verifySignature(null, manifestBytes, publicKey, signatureBytes)) {
     throw new Error("release manifest Ed25519 signature verification failed");
   }
