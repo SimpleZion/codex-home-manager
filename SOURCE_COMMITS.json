@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T21:40:46.150980+00:00",
+  "generatedAt": "2026-08-13T21:46:44.024447+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "e176701ce8f706ace5ae37c1512715d6e9820c31",
+      "commit": "fd222191a2fb0ece5370d9f0ec5af712589e30a3",
       "selection": [
         "**"
       ],
@@ -830,9 +830,9 @@
           "path": "codex_home_manager/tests/test_source_ci_workflow.py",
           "sourcePath": "tests/test_source_ci_workflow.py",
           "gitMode": "100644",
-          "gitObject": "23711b771e8f1c2f1ca7808798e49f2752e45e0d",
-          "bytes": 6863,
-          "sha256": "ecebe9a05e25d9415d902d8707c53e1702da94c44899d593987b19fc695bc9bc"
+          "gitObject": "d37e74b7f10e67d57957251983ca6737f0201189",
+          "bytes": 6864,
+          "sha256": "12d4cbaa3d7c69ea4eaf9b74cdd97e3e24e5fae225908d693fb76ccee634f049"
         },
         {
           "path": "codex_home_manager/tests/test_source_monorepo_export.py",

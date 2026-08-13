@@ -13,7 +13,7 @@ workflow_root = (
 workflow_path = workflow_root / ".github" / "workflows" / "source-ci.yml"
 codeql_path = workflow_root / ".github" / "workflows" / "codeql.yml"
 dependabot_path = workflow_root / ".github" / "dependabot.yml"
-security_path = manager_root / "SECURITY.md"
+security_path = workflow_root / "SECURITY.md"
 ci_requirements_path = workflow_root / ".github" / "workflows" / "requirements-ci.txt"
 
 
