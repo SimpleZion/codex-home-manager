@@ -672,6 +672,19 @@ const dialogFocusableSelector = [
 ].join(",");
 const activeDialogStack: HTMLElement[] = [];
 
+function isTopmostVisibleDialog(dialog: HTMLElement): boolean {
+  const visibleDialogs = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')
+  ).filter((candidate) => (
+    candidate.isConnected
+    && !candidate.hidden
+    && window.getComputedStyle(candidate).display !== "none"
+    && window.getComputedStyle(candidate).visibility !== "hidden"
+    && candidate.getClientRects().length > 0
+  ));
+  return visibleDialogs.at(-1) === dialog;
+}
+
 function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {
   return Array.from(dialog.querySelectorAll<HTMLElement>(dialogFocusableSelector)).filter((element) => (
     !element.hidden
@@ -714,13 +727,22 @@ function useModalAccessibility(
     }
 
     activeDialogStack.push(dialog);
+    let pendingFocusRecovery = 0;
     const focusFirstControl = () => {
       const preferred = dialog.querySelector<HTMLElement>("[data-dialog-initial-focus]");
       (preferred || dialogFocusableElements(dialog)[0] || dialog).focus();
     };
+    const recoverFocusIfNeeded = () => {
+      pendingFocusRecovery = 0;
+      if (isTopmostVisibleDialog(dialog) && !dialog.contains(document.activeElement)) focusFirstControl();
+    };
+    const scheduleFocusRecovery = () => {
+      if (pendingFocusRecovery) window.cancelAnimationFrame(pendingFocusRecovery);
+      pendingFocusRecovery = window.requestAnimationFrame(recoverFocusIfNeeded);
+    };
     const animationFrame = window.requestAnimationFrame(focusFirstControl);
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (activeDialogStack.at(-1) !== dialog) return;
+      if (!isTopmostVisibleDialog(dialog)) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -743,17 +765,24 @@ function useModalAccessibility(
         ? activeIndex <= 0 ? focusableElements.length - 1 : activeIndex - 1
         : activeIndex < 0 || activeIndex === focusableElements.length - 1 ? 0 : activeIndex + 1;
       focusableElements[nextIndex].focus();
+      scheduleFocusRecovery();
     };
     const handleFocusIn = (event: FocusEvent) => {
-      if (activeDialogStack.at(-1) === dialog && event.target instanceof Node && !dialog.contains(event.target)) {
+      if (isTopmostVisibleDialog(dialog) && event.target instanceof Node && !dialog.contains(event.target)) {
         focusFirstControl();
       }
     };
     document.addEventListener("keydown", handleKeyDown, true);
     document.addEventListener("focusin", handleFocusIn, true);
+    const dialogObserver = new MutationObserver(() => {
+      if (!dialog.contains(document.activeElement)) scheduleFocusRecovery();
+    });
+    dialogObserver.observe(dialog, { childList: true, subtree: true });
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      if (pendingFocusRecovery) window.cancelAnimationFrame(pendingFocusRecovery);
+      dialogObserver.disconnect();
       document.removeEventListener("keydown", handleKeyDown, true);
       document.removeEventListener("focusin", handleFocusIn, true);
       const stackIndex = activeDialogStack.lastIndexOf(dialog);

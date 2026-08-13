@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-13T18:39:29.499755+00:00",
+  "generatedAt": "2026-08-13T18:58:57.915040+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -173,7 +173,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "e5226a976df7773acf769a1cac63094c38cf7103",
+      "commit": "005687742d825dd9f99e1f2df723b408988b194b",
       "selection": [
         "**"
       ],
@@ -542,9 +542,9 @@
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "1a63cb66510add9f8f7bcf6e710cc07d324cfa0d",
-          "bytes": 365359,
-          "sha256": "18b947af7055b779a2dedfca27948a6ea3adb2c1e5a3a5d08d4d383f7295afd3"
+          "gitObject": "c0e5d4ac86a11e0d58e0bdacc283ab16f8a89b63",
+          "bytes": 366631,
+          "sha256": "c3f23c1ed1237d2bf9b937fff03bfff319bf1a47aae9294ba5ed0e91224f3b5b"
         },
         {
           "path": "codex_home_manager/src/promptClassification.ts",
