@@ -79,7 +79,7 @@ test("artifact stage accepts unsigned schema 2 artifacts before deployment metad
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("artifact stage rejects stale signed metadata", async () => {
+test("artifact stage rejects a stale signed manifest", async () => {
   const root = await createReleaseFixture();
   const { fingerprint } = await addSignedReleaseMetadata(root);
   const result = runChecker(root, {
@@ -87,7 +87,7 @@ test("artifact stage rejects stale signed metadata", async () => {
     CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /artifact stage requires signed release metadata to be absent/i);
+  assert.match(result.stderr, /artifact stage requires the signed manifest and signature to be absent/i);
 });
 
 async function addSignedReleaseMetadata(root, missingName = null, mutateManifest = null) {

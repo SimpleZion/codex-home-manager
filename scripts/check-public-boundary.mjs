@@ -264,8 +264,8 @@ let signedWindowsEvidenceNames = null;
 if (releaseMode && [...signedMetadata.values()].some((content) => content === null)) {
   throw new Error("release mode requires complete signed release metadata: manifest, detached signature, public key, and fingerprint pin");
 }
-if (artifactStageMode && [...signedMetadata.values()].some((content) => content !== null)) {
-  throw new Error("artifact stage requires signed release metadata to be absent until deployment identifiers are available");
+if (artifactStageMode && (hasManifest || hasSignature)) {
+  throw new Error("artifact stage requires the signed manifest and signature to be absent until deployment identifiers are available");
 }
 if (hasManifest || hasSignature) {
   if ([...signedMetadata.values()].some((content) => content === null)) {
