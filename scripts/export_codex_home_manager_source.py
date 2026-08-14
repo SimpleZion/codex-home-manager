@@ -38,6 +38,7 @@ required_export_paths = {
     "codex_home_manager/scripts/quality_gate.py",
     "codex_home_manager/tests/test_offline_runner_ps1.py",
 }
+source_publication_ignore_path = ".source-publication.gitignore"
 
 
 class SourceExportError(RuntimeError):
@@ -236,7 +237,12 @@ def build_manifest(
             "rootRepository": source_manifest(
                 "rootRepository",
                 root_snapshot,
-                [".gitattributes", ".gitignore", "README.md -> docs/SOURCE_EXPORT.md", "scripts/**"],
+                [
+                    ".gitattributes",
+                    f"{source_publication_ignore_path} -> .gitignore",
+                    "README.md -> docs/SOURCE_EXPORT.md",
+                    "scripts/**",
+                ],
             ),
             "managerRepository": source_manifest(
                 "managerRepository",
@@ -254,12 +260,17 @@ def export_source_monorepo(root_repository: Path, manager_repository: Path, outp
 
     root_snapshot = repository_snapshot(
         root_repository,
-        lambda source_path: source_path in {".gitattributes", ".gitignore", "README.md"}
+        lambda source_path: source_path in {".gitattributes", source_publication_ignore_path, "README.md"}
         or source_path.startswith("scripts/"),
     )
     manager_snapshot = repository_snapshot(manager_repository, lambda _source_path: True)
 
-    root_export_path = lambda source_path: "docs/SOURCE_EXPORT.md" if source_path == "README.md" else source_path
+    def root_export_path(source_path: str) -> str:
+        if source_path == "README.md":
+            return "docs/SOURCE_EXPORT.md"
+        if source_path == source_publication_ignore_path:
+            return ".gitignore"
+        return source_path
 
     def manager_export_path(source_path: str) -> str:
         if source_path in {"README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md"} or source_path.startswith(manager_github_prefix):
@@ -394,7 +405,12 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
         for file_record in source_record["files"]:
             export_path, original_source_path = validate_manifest_record(source_path, file_record)
             if source_name == "rootRepository":
-                expected_root_path = "docs/SOURCE_EXPORT.md" if original_source_path == "README.md" else original_source_path
+                if original_source_path == "README.md":
+                    expected_root_path = "docs/SOURCE_EXPORT.md"
+                elif original_source_path == source_publication_ignore_path:
+                    expected_root_path = ".gitignore"
+                else:
+                    expected_root_path = original_source_path
                 if export_path != expected_root_path or not (
                     export_path in {".gitattributes", ".gitignore", "docs/SOURCE_EXPORT.md"}
                     or export_path.startswith("scripts/")

@@ -1,0 +1,41 @@
+{
+  "name": "codex-home-manager",
+  "version": "1.0.11",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 5173",
+    "serve": "python -m backend.server",
+    "test:backend": "python -m pytest tests",
+    "test:browser-home-streaming": "node tests/browser_home_streaming.test.mjs",
+    "test:frontend-connector-contracts": "node tests/frontend_connector_contracts.test.mjs",
+    "test:frontend-review-regressions": "node tests/frontend_review_regressions.test.mjs",
+    "test:frontend-quality": "node tests/frontend_quality.test.mjs",
+    "test:frontend-accessibility": "node tests/frontend_accessibility.test.mjs",
+    "test:timeline-browser": "node tests/thread_timeline_browser.test.mjs",
+    "test:browser-contracts": "npm run test:browser-home-streaming && npm run test:frontend-connector-contracts && npm run test:frontend-review-regressions && npm run test:frontend-quality && npm run test:frontend-accessibility && npm run test:timeline-browser",
+    "test:maintainability": "python scripts/maintainability_gate.py",
+    "test": "npm run build && npm run test:maintainability && npm run test:backend && npm run test:browser-contracts",
+    "gate": "python scripts/quality_gate.py",
+    "package:connector": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-local-connector.ps1"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.14.9",
+    "@vitejs/plugin-react": "^4.7.0",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "sql.js": "^1.14.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "playwright": "^1.60.0",
+    "ws": "^8.21.0"
+  }
+}

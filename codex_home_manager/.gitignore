@@ -3,17 +3,17 @@ dist/
 build/
 .pytest_cache/
 .targeted-temp/
+.t/
+.t-release-governance/
 .tmp/
 __pycache__/
 *.pyc
 *.pyo
 *.log
 *.tsbuildinfo
-.coverage
-htmlcov/
-.env
-.env.*
-!.env.example
+.thread_*.json
+codex-doctor-*.txt
+diagnostics.*.json
 *.sqlite
 *.sqlite-*
 *.jsonl
@@ -22,3 +22,7 @@ htmlcov/
 **/*private*.pem
 **/*signing-key*.pem
 
+data/
+.env
+.env.*
+!.env.example
