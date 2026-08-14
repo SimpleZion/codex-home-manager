@@ -32,12 +32,16 @@ except ImportError:  # pragma: no cover - exercised only by an incomplete runtim
 
 from .hidden_process import run_hidden_command
 from .prompt_index import (
+    PromptIndexCancelled,
     iter_prompt_records,
     prompt_index_database_path,
+    redacted_jsonl_record_bytes,
     read_prompt_page,
+    read_timeline_search_page,
     update_prompt_index,
 )
 from .process_utils import list_windows_processes
+from .search_normalization import normalize_search_text
 
 
 @dataclass(frozen=True)
@@ -1397,15 +1401,8 @@ def build_snapshot(
     }
 
 
-def parse_rollout_stats(rollout_path_text: str) -> dict[str, Any]:
-    normalized_path = normalize_path_text(rollout_path_text)
-    path = Path(normalized_path) if normalized_path else None
-    if path and path.exists():
-        stat = path.stat()
-        cached = rollout_stats_cache.get(normalized_path)
-        if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
-            return copy.deepcopy(cached[2])
-    result = {
+def empty_rollout_stats() -> dict[str, Any]:
+    return {
         "lineCount": 0,
         "userMessages": 0,
         "assistantMessages": 0,
@@ -1416,6 +1413,27 @@ def parse_rollout_stats(rollout_path_text: str) -> dict[str, Any]:
         "firstTimestamp": None,
         "lastTimestamp": None,
     }
+
+
+def parse_rollout_stats(
+    rollout_path_text: str,
+    cancel_check: Callable[[], bool] | None = None,
+    analysis_outputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_path = normalize_path_text(rollout_path_text)
+    path = Path(normalized_path) if normalized_path else None
+    if path and path.exists():
+        stat = path.stat()
+        cached = rollout_stats_cache.get(normalized_path)
+        if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
+            if analysis_outputs is not None:
+                display_cached = rollout_display_cache.get(normalized_path)
+                daily_cached = rollout_daily_token_cache.get(normalized_path)
+                analysis_outputs["display"] = copy.deepcopy(display_cached[2]) if display_cached else None
+                analysis_outputs["daily"] = copy.deepcopy(daily_cached[2]) if daily_cached else None
+                analysis_outputs["stable"] = True
+            return copy.deepcopy(cached[2])
+    result = empty_rollout_stats()
     display_result: dict[str, Any] = {
         "status": "not_scanned",
         "responseUserMessages": 0,
@@ -1451,16 +1469,58 @@ def parse_rollout_stats(rollout_path_text: str) -> dict[str, Any]:
 
     daily_records: dict[str, dict[str, Any]] = {}
     previous_cumulative_tokens: int | None = None
-    with path.open("r", encoding="utf-8", errors="replace") as file:
-        for line in file:
+    stat_before = path.stat()
+    with path.open("rb") as file:
+        while True:
+            if cancel_check is not None and cancel_check():
+                raise PromptIndexCancelled("thread detail analysis was cancelled")
+            line_start = file.tell()
+            line_buffer = bytearray()
+            line_overflow = False
+            contains_token_count = False
+            marker_tail = b""
+            line_has_newline = False
+            while True:
+                if cancel_check is not None and cancel_check():
+                    raise PromptIndexCancelled("thread detail analysis was cancelled")
+                chunk = file.readline(1024 * 1024)
+                if not chunk:
+                    break
+                marker_probe = marker_tail + chunk
+                if b"token_count" in marker_probe:
+                    contains_token_count = True
+                marker_tail = marker_probe[-32:]
+                if not line_overflow:
+                    if len(line_buffer) + len(chunk) <= 4 * 1024 * 1024:
+                        line_buffer.extend(chunk)
+                    else:
+                        line_buffer.clear()
+                        line_overflow = True
+                if chunk.endswith(b"\n"):
+                    line_has_newline = True
+                    break
+            line_end = file.tell()
+            if line_end == line_start:
+                stat_at_end = os.fstat(file.fileno())
+                break
             result["lineCount"] += 1
+            raw_line = (
+                redacted_jsonl_record_bytes(file, line_start, line_end, cancel_check)
+                if line_overflow
+                else bytes(line_buffer)
+            )
             try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
+                item = json.loads(raw_line) if raw_line is not None else None
+                if not isinstance(item, dict):
+                    raise json.JSONDecodeError("JSONL record is not an object", "", 0)
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 result["invalidJsonLines"] += 1
                 display_result["parseErrors"] += 1
-                if "token_count" in line:
+                if contains_token_count:
                     daily_result["summary"]["parseErrors"] += 1
+                if not line_has_newline:
+                    stat_at_end = os.fstat(file.fileno())
+                    break
                 continue
             timestamp = item.get("timestamp")
             if timestamp and result["firstTimestamp"] is None:
@@ -1542,6 +1602,9 @@ def parse_rollout_stats(rollout_path_text: str) -> dict[str, Any]:
                     result["toolCalls"] += 1
                 elif payload_type == "function_call_output":
                     result["toolOutputs"] += 1
+            if not line_has_newline:
+                stat_at_end = os.fstat(file.fileno())
+                break
     response_chat_messages = int(display_result["responseUserMessages"]) + int(display_result["responseAssistantMessages"])
     visible_chat_messages = int(display_result["visibleUserMessages"]) + int(display_result["visibleAgentMessages"])
     if response_chat_messages == 0:
@@ -1564,10 +1627,22 @@ def parse_rollout_stats(rollout_path_text: str) -> dict[str, Any]:
         peak_record = max(daily_days, key=lambda record: int(record["tokens"]))
         daily_result["summary"]["peakDate"] = peak_record["date"]
         daily_result["summary"]["peakTokens"] = int(peak_record["tokens"])
-    stat = path.stat()
-    rollout_stats_cache[normalized_path] = (stat.st_size, stat.st_mtime_ns, copy.deepcopy(result))
-    rollout_display_cache[normalized_path] = (stat.st_size, stat.st_mtime_ns, copy.deepcopy(display_result))
-    rollout_daily_token_cache[normalized_path] = (stat.st_size, stat.st_mtime_ns, copy.deepcopy(daily_result))
+    stat_after = path.stat()
+    stable_snapshot = (
+        int(stat_before.st_size) == int(stat_at_end.st_size) == int(stat_after.st_size)
+        and int(stat_before.st_mtime_ns) == int(stat_at_end.st_mtime_ns) == int(stat_after.st_mtime_ns)
+        and int(getattr(stat_before, "st_ino", 0)) == int(getattr(stat_after, "st_ino", 0))
+        and int(getattr(stat_before, "st_dev", 0)) == int(getattr(stat_after, "st_dev", 0))
+    )
+    result["stableSnapshot"] = stable_snapshot
+    if analysis_outputs is not None:
+        analysis_outputs["display"] = copy.deepcopy(display_result)
+        analysis_outputs["daily"] = copy.deepcopy(daily_result)
+        analysis_outputs["stable"] = stable_snapshot
+    if stable_snapshot:
+        rollout_stats_cache[normalized_path] = (stat_after.st_size, stat_after.st_mtime_ns, copy.deepcopy(result))
+        rollout_display_cache[normalized_path] = (stat_after.st_size, stat_after.st_mtime_ns, copy.deepcopy(display_result))
+        rollout_daily_token_cache[normalized_path] = (stat_after.st_size, stat_after.st_mtime_ns, copy.deepcopy(daily_result))
     return result
 
 
@@ -2003,8 +2078,8 @@ def is_thread_delegation_prompt(text: str) -> bool:
 
 
 def is_codex_internal_context_prompt(text: str) -> bool:
-    prefix = text.lstrip()[:5000]
-    return prefix.startswith("<codex_internal_context")
+    prefix = text.lstrip()[:5000].lower()
+    return prefix.startswith("<codex_internal_context") or prefix.startswith("<goal_context")
 
 
 CODEX_RUNTIME_CONTEXT_START_MARKERS = (
@@ -2952,6 +3027,7 @@ timeline_data_url_pattern = re.compile(
     r"data:[^,\s]{1,200},[^\s<>\"'\\]*",
     flags=re.IGNORECASE,
 )
+timeline_truncation_metadata_pattern = re.compile(r"\x00CHM_ORIGINAL_CHARACTERS:(\d+)\x00")
 
 
 def timeline_redact_embedded_data_urls(value: str) -> str:
@@ -3123,7 +3199,8 @@ def iter_jsonl_lines_reverse(
     path: Path,
     before_byte: int | None = None,
     block_size: int = 65_536,
-    max_line_bytes: int = 8 * 1024 * 1024,
+    direct_line_bytes: int = 8 * 1024 * 1024,
+    max_line_bytes: int = 64 * 1024 * 1024,
 ):
     file_size = path.stat().st_size
     position = file_size if before_byte is None else max(0, min(int(before_byte), file_size))
@@ -3157,6 +3234,15 @@ def iter_jsonl_lines_reverse(
             line_bytes = line_end - line_start
             if oversized_boundary or line_bytes > max_line_bytes:
                 yield line_start, line_end, None
+            elif line_bytes > direct_line_bytes:
+                recovered = redacted_jsonl_record_bytes(
+                    file,
+                    line_start,
+                    line_end,
+                    None,
+                    include_truncation_metadata=True,
+                )
+                yield line_start, line_end, recovered.decode("utf-8", errors="replace")
             else:
                 file.seek(line_start)
                 yield line_start, line_end, file.read(line_bytes).decode("utf-8", errors="replace")
@@ -3174,16 +3260,25 @@ def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text:
         kind_matches = event["kind"] == kind_filter
     if not kind_matches:
         return False
-    marker = search_text.strip().casefold()
+    marker = normalize_search_text(search_text)
     if not marker:
         return True
-    return marker in "\n".join(str(event.get(key) or "") for key in ("kind", "label", "text", "callId")).casefold()
+    haystack = normalize_search_text(
+        "\n".join(str(event.get(key) or "") for key in ("kind", "label", "text", "callId"))
+    )
+    return marker in haystack
 
 
 def truncate_timeline_event(event: dict[str, Any], content_limit: int) -> dict[str, Any]:
     text = str(event.get("text") or "")
-    event["characterCount"] = len(text)
-    event["textTruncated"] = len(text) > content_limit
+    source_character_count = len(text)
+    truncation_match = timeline_truncation_metadata_pattern.search(text)
+    if truncation_match is not None:
+        source_character_count = max(source_character_count, int(truncation_match.group(1)))
+        text = timeline_truncation_metadata_pattern.sub("", text)
+        event["text"] = text
+    event["characterCount"] = source_character_count
+    event["textTruncated"] = source_character_count > len(text) or len(text) > content_limit
     if event["textTruncated"]:
         event["text"] = text[:content_limit]
     return event
@@ -3251,6 +3346,7 @@ def read_thread_timeline(
     scanned_bytes = 0
     scan_limited = False
     skipped_oversized_records = 0
+    recovered_oversized_records = 0
     scan_origin = rollout_path.stat().st_size if before_byte is None else max(0, min(int(before_byte), rollout_path.stat().st_size))
 
     for byte_offset, line_end, raw_line in iter_jsonl_lines_reverse(rollout_path, before_byte=before_byte):
@@ -3265,10 +3361,32 @@ def read_thread_timeline(
             break
         if raw_line is None:
             skipped_oversized_records += 1
-            has_more = byte_offset > 0
-            scan_limited = has_more
-            next_before_byte = byte_offset if has_more else None
-            break
+            placeholder_event = {
+                "id": f"byte-{byte_offset}",
+                "byteOffset": byte_offset,
+                "timestamp": None,
+                "timestampMs": 0,
+                "kind": "status",
+                "label": "超大原始记录",
+                "text": "[原始 JSONL 记录超过 64 MB；正文未载入，时间线已继续读取更早记录。]",
+                "sourceType": "oversized_record",
+                "payloadType": "",
+                "phase": "",
+                "callId": "",
+                "readable": False,
+                "encrypted": False,
+                "hasEncryptedContent": False,
+                "promptSourceType": "",
+            }
+            if timeline_event_matches(placeholder_event, normalized_kind, search_text):
+                if len(events_newest_first) >= safe_limit:
+                    has_more = True
+                    next_before_byte = line_end
+                    break
+                events_newest_first.append(truncate_timeline_event(placeholder_event, safe_content_limit))
+            continue
+        if line_end - byte_offset > 8 * 1024 * 1024:
+            recovered_oversized_records += 1
         try:
             item = json.loads(raw_line)
         except json.JSONDecodeError:
@@ -3312,6 +3430,7 @@ def read_thread_timeline(
         "scannedBytes": scanned_bytes,
         "scanLimited": scan_limited,
         "skippedOversizedRecords": skipped_oversized_records,
+        "recoveredOversizedRecords": recovered_oversized_records,
         "items": items,
         "pageCounts": prompt_source_counts([{"sourceType": item["kind"]} for item in items]),
     }
@@ -3385,34 +3504,115 @@ def get_thread_detail(
     sidebar_limit: int = 50,
     include_daily_token_usage: bool = True,
 ) -> dict[str, Any]:
-    snapshot = build_snapshot(codex_home_text=codex_home_text, sidebar_limit=sidebar_limit)
-    thread = next((item for item in snapshot["threads"] if item["id"] == thread_id), None)
-    if thread is None:
-        raise KeyError(thread_id)
     paths = resolve_codex_paths(codex_home_text)
     row = fetch_thread_row(paths, thread_id)
-    rollout_display = rollout_display_integrity(thread["rolloutPath"])
-    thread.update(
-        {
-            "rolloutDisplayStatus": rollout_display.get("status") or "not_scanned",
-            "rolloutDisplayResponseUserMessages": int(rollout_display.get("responseUserMessages") or 0),
-            "rolloutDisplayResponseAssistantMessages": int(rollout_display.get("responseAssistantMessages") or 0),
-            "rolloutDisplayVisibleUserMessages": int(rollout_display.get("visibleUserMessages") or 0),
-            "rolloutDisplayVisibleAgentMessages": int(rollout_display.get("visibleAgentMessages") or 0),
-            "rolloutDisplayEventUserMessages": int(rollout_display.get("eventUserMessages") or 0),
-            "rolloutDisplayEventAgentMessages": int(rollout_display.get("eventAgentMessages") or 0),
-        }
-    )
-    rollout_stats = parse_rollout_stats(thread["rolloutPath"])
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_stat = stat_file(row.get("rollout_path"))
+    kind_metadata = thread_kind_metadata(row, fetch_thread_spawn_edges(paths).get(thread_id))
+    archived = bool(row.get("archived"))
+    visibility = "subagent" if kind_metadata["threadKind"] == "subagent" else "archived" if archived else "visible" if rollout_stat["exists"] else "missing_file"
+    project_path = normalize_path_text(row.get("cwd"))
+    thread = {
+        "id": str(row["id"]),
+        "title": str(row.get("title") or row.get("first_user_message") or row.get("preview") or "(untitled)"),
+        "sqliteTitle": str(row.get("title") or ""),
+        "sidebarTitle": "",
+        "sessionIndexTitle": "",
+        "sessionIndexUpdatedAt": "",
+        "rolloutTitle": "",
+        "rolloutTitleTimestamp": "",
+        "rolloutTitleLine": None,
+        "preview": str(row.get("preview") or row.get("first_user_message") or ""),
+        "projectPath": project_path,
+        "projectLabel": Path(project_path).name if project_path else "",
+        "projectKind": "other",
+        "rolloutPath": rollout_stat["path"],
+        "source": str(row.get("source") or ""),
+        **kind_metadata,
+        "model": str(row.get("model") or row.get("model_provider") or ""),
+        "createdAtMs": timestamp_ms_from_row(row, "created"),
+        "updatedAtMs": timestamp_ms_from_row(row, "updated"),
+        "archived": archived,
+        "archivedAtMs": int(row["archived_at"]) * 1000 if row.get("archived_at") else None,
+        "hasUserEvent": bool(row.get("has_user_event")),
+        "hasUserSignal": row_has_user_signal(row, {}),
+        "tokensUsed": int(row.get("tokens_used") or 0),
+        "childTokensUsed": 0,
+        "totalTokensUsed": int(row.get("tokens_used") or 0),
+        "fileExists": bool(rollout_stat["exists"]),
+        "fileSizeBytes": int(rollout_stat["sizeBytes"] or 0),
+        "childThreadCount": 0,
+        "childFileSizeBytes": 0,
+        "totalFileSizeBytes": int(rollout_stat["sizeBytes"] or 0),
+        "fileModifiedAtMs": rollout_stat["modifiedAtMs"],
+        "rolloutInArchivedStore": is_archived_rollout_path(paths, rollout_stat["path"]),
+        "recentRank": None,
+        "threadListRank": None,
+        "mainThreadListRank": None,
+        "sessionIndexRank": None,
+        "isPinned": False,
+        "explicitSidebarReference": False,
+        "managerHidden": False,
+        "presentInThreadList": False,
+        "presentInSessionIndex": False,
+        "initialThreadListVisible": False,
+        "initialSessionIndexVisible": False,
+        "inInitialSidebarPage": visibility == "visible",
+        "outsideInitialLimit": False,
+        "codexVisible": visibility == "visible",
+        "visibility": visibility,
+        "hiddenReasons": [],
+        "rolloutDisplayStatus": "not_scanned",
+        "rolloutDisplayResponseUserMessages": 0,
+        "rolloutDisplayResponseAssistantMessages": 0,
+        "rolloutDisplayVisibleUserMessages": 0,
+        "rolloutDisplayVisibleAgentMessages": 0,
+        "rolloutDisplayEventUserMessages": 0,
+        "rolloutDisplayEventAgentMessages": 0,
+        "gitBranch": str(row.get("git_branch") or ""),
+        "cliVersion": str(row.get("cli_version") or ""),
+    }
     detail = {
         "thread": thread,
         "sqliteRow": row,
-        "rolloutStats": rollout_stats,
-        "backups": list_backups(codex_home_text, thread_id=thread_id),
+        "rolloutStats": None,
+        "analysisStatus": "pending",
+        "backups": [],
     }
     if include_daily_token_usage:
-        detail["dailyTokenUsage"] = build_thread_daily_token_usage(thread, snapshot["threads"])
+        detail["dailyTokenUsage"] = get_thread_daily_token_usage(codex_home_text, thread_id, sidebar_limit)
     return detail
+
+
+def get_thread_detail_analysis(
+    codex_home_text: str | None,
+    thread_id: str,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    paths = resolve_codex_paths(codex_home_text)
+    row = fetch_thread_row(paths, thread_id)
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_path = normalize_path_text(row.get("rollout_path"))
+    analysis_outputs: dict[str, Any] = {}
+    rollout_stats = parse_rollout_stats(
+        rollout_path,
+        cancel_check=cancel_check,
+        analysis_outputs=analysis_outputs,
+    )
+    if cancel_check is not None and cancel_check():
+        raise PromptIndexCancelled("thread detail analysis was cancelled")
+    rollout_display = analysis_outputs.get("display") or rollout_display_integrity(rollout_path)
+    if cancel_check is not None and cancel_check():
+        raise PromptIndexCancelled("thread detail analysis was cancelled")
+    return {
+        "threadId": thread_id,
+        "analysisStatus": "complete" if analysis_outputs.get("stable", True) else "incomplete",
+        "rolloutStats": rollout_stats,
+        "rolloutDisplay": rollout_display,
+        "backups": list_backups(codex_home_text, thread_id=thread_id),
+    }
 
 
 def backup_root_path() -> Path:
@@ -5629,7 +5829,12 @@ def replace_paths_in_jsonl(path: Path, replacements: list[tuple[str, str]]) -> d
     return {"status": "applied" if replacement_count else "no_change", "replacementCount": replacement_count}
 
 
-prompt_candidate_pattern = re.compile(rb'"(?:type|role)"\s*:\s*"(?:user_message|user)"')
+prompt_candidate_pattern = re.compile(
+    rb'"type"\s*:\s*"(?:user_message|event_msg|response_item|turn_context|compacted)"'
+)
+prompt_only_candidate_pattern = re.compile(
+    rb'"type"\s*:\s*"(?:user_message|event_msg|response_item)"'
+)
 
 
 def prompt_timestamp_ms(timestamp: Any) -> int | None:
@@ -5672,22 +5877,41 @@ def prompt_is_cross_protocol_duplicate(
     return False
 
 
+def timeline_index_is_duplicate(
+    event: dict[str, Any],
+    recent_events_by_kind: dict[str, list[tuple[int, str, str, int]]],
+) -> bool:
+    return timeline_event_is_duplicate(
+        event,
+        recent_events_by_kind.get(str(event.get("kind") or ""), []),
+    )
+
+
 def ensure_rollout_prompt_index(
     codex_home_path: Path,
     rollout_path: Path,
     *,
     max_scan_ms: int | None,
+    index_kind: str = "prompts",
     cancel_check: Callable[[], bool] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     database_path = prompt_index_database_path(codex_home_path)
+    normalized_index_kind = str(index_kind or "prompts").strip().lower()
     index_state = update_prompt_index(
         database_path,
         rollout_path,
-        candidate_check=lambda raw_line: prompt_candidate_pattern.search(raw_line) is not None,
+        candidate_check=lambda raw_line: (
+            prompt_only_candidate_pattern.search(raw_line) is not None
+            if normalized_index_kind == "prompts"
+            else prompt_candidate_pattern.search(raw_line) is not None
+        ),
         extract_prompt=prompt_text_from_item,
         classify_prompt=classify_prompt_record,
         timestamp_to_ms=prompt_timestamp_ms,
         is_duplicate=prompt_is_cross_protocol_duplicate,
+        extract_timeline_event=timeline_event_from_item if normalized_index_kind == "timeline" else None,
+        is_timeline_duplicate=timeline_index_is_duplicate if normalized_index_kind == "timeline" else None,
+        index_kind=normalized_index_kind,
         max_scan_ms=max_scan_ms,
         cancel_check=cancel_check,
     )
@@ -5766,6 +5990,48 @@ def read_thread_prompt_page(
         "scope": scope,
         "search": search,
         "sourceType": source_type,
+        **page,
+    }
+
+
+def read_thread_timeline_search_page(
+    codex_home_text: str | None,
+    thread_id: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 80,
+    kind: str = "conversation",
+    search: str = "",
+    scan_budget_ms: int = 250,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    paths = resolve_codex_paths(codex_home_text)
+    row = fetch_thread_row(paths, thread_id)
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_path = Path(normalize_path_text(row.get("rollout_path")))
+    if not rollout_path.is_file():
+        raise FileNotFoundError(str(rollout_path))
+    database_path, index_state = ensure_rollout_prompt_index(
+        paths.codex_home_path,
+        rollout_path,
+        max_scan_ms=max(1, min(5_000, int(scan_budget_ms))),
+        index_kind="timeline",
+        cancel_check=cancel_check,
+    )
+    page = read_timeline_search_page(
+        database_path,
+        rollout_path,
+        kind=kind,
+        search=search,
+        cursor=cursor,
+        limit=limit,
+        index_state=index_state,
+    )
+    return {
+        "threadId": thread_id,
+        "title": str(row.get("title") or row.get("first_user_message") or "(untitled)"),
+        "rolloutPath": str(rollout_path),
         **page,
     }
 

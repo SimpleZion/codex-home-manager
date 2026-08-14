@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,11 @@ from fastapi.testclient import TestClient
 
 from backend import server
 from backend import prompt_index as prompt_index_module
-from backend.codex_data import export_thread_prompts, read_thread_prompt_page
+from backend.codex_data import (
+    export_thread_prompts,
+    read_thread_prompt_page,
+    read_thread_timeline_search_page,
+)
 from backend.prompt_index import (
     PromptIndexCancelled,
     begin_prompt_index_request,
@@ -23,7 +29,9 @@ from backend.prompt_index import (
     iter_prompt_records,
     prompt_index_database_path,
     prompt_index_root_path,
+    redacted_jsonl_record_bytes,
 )
+from backend.search_normalization import normalize_search_text
 
 
 def create_prompt_test_home(root_path: Path, records: list[dict[str, object]] | None = None) -> tuple[Path, Path]:
@@ -138,6 +146,30 @@ def test_ten_thousand_prompts_page_search_and_incremental_tail_scan(tmp_path: Pa
     assert appended_page["promptCount"] == 10_001
 
 
+@pytest.mark.parametrize(
+    ("source", "query"),
+    [
+        ("Cafe\u0301 and café", "cafe"),
+        ("Straße", "STRASSE"),
+        ("İstanbul", "istanbul"),
+        ("顶刊研究", "顶刊"),
+        ("👩‍💻 workflow", "👩‍💻"),
+    ],
+)
+def test_unicode_search_normalization_contract(tmp_path: Path, source: str, query: str) -> None:
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record(source)])
+    page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        search=query,
+        scan_budget_ms=1_000,
+    )
+    assert page["matchCount"] == 1
+    assert page["prompts"][0]["text"] == source
+    assert normalize_search_text(query) in normalize_search_text(source)
+
+
 def test_prompt_index_schema_upgrade_rebuilds_stale_derived_rows(tmp_path: Path) -> None:
     codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record("schema upgrade prompt")])
     first_page = read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
@@ -151,7 +183,83 @@ def test_prompt_index_schema_upgrade_rebuilds_stale_derived_rows(tmp_path: Path)
     rebuilt_page = read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
     assert [prompt["text"] for prompt in rebuilt_page["prompts"]] == ["schema upgrade prompt"]
     with closing(sqlite3.connect(database_path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == prompt_index_module.prompt_index_schema_version
+
+
+def test_prompt_and_timeline_indexes_have_independent_progress(tmp_path: Path) -> None:
+    records = [
+        user_record("independent prompt"),
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:01:00Z",
+            "payload": {"type": "agent_message", "phase": "commentary", "message": "independent progress"},
+        },
+    ]
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, records)
+
+    prompt_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000
+    )
+    assert prompt_page["index"]["kind"] == "prompts"
+    assert prompt_page["index"]["complete"] is True
+    assert [item["text"] for item in prompt_page["prompts"]] == ["independent prompt"]
+
+    database_path = prompt_index_database_path(codex_home_path)
+    with closing(sqlite3.connect(database_path)) as connection:
+        row = connection.execute(
+            "SELECT scanned_offset, complete, timeline_scanned_offset, timeline_complete FROM prompt_files WHERE path = ?",
+            (str(rollout_path.resolve(strict=False)),),
+        ).fetchone()
+        assert row == (rollout_path.stat().st_size, 1, 0, 0)
+        assert connection.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0] == 0
+
+    timeline_page = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="conversation",
+        search="independent progress",
+        scan_budget_ms=1_000,
+    )
+    assert timeline_page["index"]["kind"] == "timeline"
+    assert timeline_page["index"]["complete"] is True
+    assert [item["text"] for item in timeline_page["matches"]] == ["independent progress"]
+
+    with closing(sqlite3.connect(database_path)) as connection:
+        row = connection.execute(
+            "SELECT scanned_offset, complete, timeline_scanned_offset, timeline_complete FROM prompt_files WHERE path = ?",
+            (str(rollout_path.resolve(strict=False)),),
+        ).fetchone()
+        assert row == (rollout_path.stat().st_size, 1, rollout_path.stat().st_size, 1)
+
+
+def test_prompt_index_detects_append_after_timeline_index_updates_shared_file_metadata(tmp_path: Path) -> None:
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, [user_record("first prompt")])
+    first_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000
+    )
+    assert first_page["index"]["complete"] is True
+
+    with rollout_path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(user_record("prompt appended later", 1), ensure_ascii=False) + "\n")
+
+    timeline_page = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="conversation",
+        search="prompt appended later",
+        scan_budget_ms=1_000,
+    )
+    assert timeline_page["index"]["complete"] is True
+
+    appended_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        search="prompt appended later",
+        scan_budget_ms=1_000,
+    )
+    assert appended_page["index"]["complete"] is True
+    assert [item["text"] for item in appended_page["prompts"]] == ["prompt appended later"]
 
 
 def test_two_gib_sparse_rollout_has_bounded_latency_and_memory(tmp_path: Path) -> None:
@@ -198,6 +306,33 @@ def test_two_gib_sparse_rollout_has_bounded_latency_and_memory(tmp_path: Path) -
         )
 
 
+def test_scan_budget_persists_forward_progress_inside_large_record(tmp_path: Path) -> None:
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path)
+    large_prompt = "large-record-marker " + ("x" * (16 * 1024 * 1024))
+    with rollout_path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps(user_record(large_prompt), ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    first_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1
+    )
+    second_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1
+    )
+
+    assert first_page["index"]["complete"] is False
+    assert second_page["index"]["scannedBytes"] > first_page["index"]["scannedBytes"]
+    assert second_page["index"]["scannedBytes"] < rollout_path.stat().st_size
+
+    final_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", search="large-record-marker", scan_budget_ms=5_000
+    )
+    assert final_page["index"]["complete"] is True
+    assert final_page["matchCount"] == 1
+    assert final_page["prompts"][0]["textTruncated"] is True
+    assert len(final_page["prompts"][0]["text"].encode("utf-8")) <= 64 * 1024
+    assert "large-record-marker" in final_page["prompts"][0]["text"]
+
+
 def test_prompt_page_redacts_data_urls_and_rejects_stale_cursor_after_rewrite(tmp_path: Path) -> None:
     records = [
         user_record("inspect data:image/png;base64,AAAA and keep alpha"),
@@ -239,6 +374,13 @@ def test_prompt_page_redacts_data_urls_and_rejects_stale_cursor_after_rewrite(tm
         str(codex_home_path), "thread-1", scope="all", limit=10, scan_budget_ms=1_000
     )
     assert any("bravo" in prompt["text"] for prompt in rewritten_page["prompts"])
+    database_path = prompt_index_database_path(codex_home_path)
+    derived_bytes = database_path.read_bytes()
+    for sidecar_suffix in ("-wal", "-shm"):
+        sidecar_path = Path(str(database_path) + sidecar_suffix)
+        if sidecar_path.exists():
+            derived_bytes += sidecar_path.read_bytes()
+    assert b"alpha" not in derived_bytes
 
 
 def test_large_data_url_prompt_is_redacted_before_json_materialization(tmp_path: Path) -> None:
@@ -265,6 +407,26 @@ def test_large_data_url_prompt_is_redacted_before_json_materialization(tmp_path:
     assert page["index"]["complete"] is True
     assert page["prompts"][0]["text"] == "before [附件内容已隐藏] after"
     assert "AAAA" not in page["prompts"][0]["text"]
+
+
+def test_stream_redaction_reports_unicode_source_character_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_text = "中文😀e\u0301" * 12
+    line = json.dumps({"message": source_text}, ensure_ascii=True).encode("utf-8")
+    monkeypatch.setattr(prompt_index_module, "prompt_index_sanitized_string_bytes", 24)
+
+    recovered = redacted_jsonl_record_bytes(
+        io.BytesIO(line),
+        0,
+        len(line),
+        None,
+        include_truncation_metadata=True,
+    )
+
+    assert recovered is not None
+    parsed = json.loads(recovered)
+    marker = re.search(r"\x00CHM_ORIGINAL_CHARACTERS:(\d+)\x00", parsed["message"])
+    assert marker is not None
+    assert int(marker.group(1)) == len(source_text)
 
 
 def test_prompt_page_and_streaming_copy_api_contracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,7 +476,11 @@ def test_prompt_page_and_streaming_copy_api_contracts(tmp_path: Path, monkeypatc
         "second searchable API prompt",
     ]
 
-    request_id, _ = begin_prompt_index_request("thread-1", "cancel-contract-request")
+    request_id, _ = begin_prompt_index_request(
+        "thread-1",
+        "cancel-contract-request",
+        server.prompt_request_scope_key(str(codex_home_path)),
+    )
     try:
         cancel_response = client.delete(
             f"/api/threads/thread-1/prompts/requests/{request_id}",
@@ -325,6 +491,76 @@ def test_prompt_page_and_streaming_copy_api_contracts(tmp_path: Path, monkeypatc
         assert cancel_response.json()["cancelled"] is True
     finally:
         finish_prompt_index_request(request_id)
+
+
+def test_full_timeline_search_api_indexes_all_content_and_normalizes_unicode(tmp_path: Path) -> None:
+    records = [
+        user_record("Café Straße İstanbul"),
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:01:00Z",
+            "payload": {"type": "agent_message", "phase": "commentary", "message": "顶刊检验正在运行"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:00Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "顶刊检验已经完成"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:03:00Z",
+            "payload": {"type": "function_call", "name": "shell_command", "call_id": "call-1", "arguments": "顶刊脚本"},
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+    client = TestClient(server.app)
+    token_payload = client.get("/api/auth/token", params={"codex_home": str(codex_home_path)}).json()
+    headers = {token_payload["headerName"]: token_payload["token"]}
+
+    unicode_response = client.get(
+        "/api/threads/thread-1/timeline/search/page",
+        params={
+            "codex_home": str(codex_home_path),
+            "kind": "all",
+            "search": "CAFE STRASSE ISTANBUL",
+            "scanBudgetMs": 1_000,
+            "requestId": "timeline-unicode-contract",
+        },
+        headers=headers,
+    )
+    assert unicode_response.status_code == 200
+    unicode_page = unicode_response.json()
+    assert unicode_page["matchCountComplete"] is True
+    assert unicode_page["matchCount"] == 1
+    assert unicode_page["matches"][0]["kind"] == "user"
+
+    all_response = client.get(
+        "/api/threads/thread-1/timeline/search/page",
+        params={
+            "codex_home": str(codex_home_path),
+            "kind": "all",
+            "search": "顶刊",
+            "scanBudgetMs": 1_000,
+            "requestId": "timeline-all-contract",
+        },
+        headers=headers,
+    )
+    assert all_response.status_code == 200
+    all_page = all_response.json()
+    assert all_page["matchCountComplete"] is True
+    assert {item["kind"] for item in all_page["matches"]} == {"commentary", "assistant", "tool_call"}
+
+    status = client.get(
+        "/api/prompt-index/status",
+        params={"codex_home": str(codex_home_path)},
+        headers=headers,
+    ).json()
+    assert status["database"]["timelineEventCount"] >= 4
 
 
 def test_prompt_page_http_request_can_be_cancelled_during_sparse_scan(tmp_path: Path) -> None:
@@ -581,7 +817,12 @@ def test_prompt_index_mcp_and_capability_metadata_are_explicit(tmp_path: Path) -
         "codex_prompt_index_status",
         "codex_preview_clear_prompt_index",
         "codex_clear_prompt_index",
+        "codex_thread_detail_analysis",
+        "codex_cancel_thread_read",
+        "codex_thread_prompt_page",
+        "codex_search_thread_timeline",
     } <= tools.keys()
+    assert "requestId" in tools["codex_thread_detail_analysis"]["inputSchema"]["properties"]
     clear_tool = tools["codex_clear_prompt_index"]
     assert {"apiToken", "operationPreviewId", "inputHash"} <= set(clear_tool["inputSchema"]["required"])
     assert "no cache backup" in clear_tool["description"]
@@ -602,6 +843,104 @@ def test_prompt_index_mcp_and_capability_metadata_are_explicit(tmp_path: Path) -
     structured_status = status_response["result"]["structuredContent"]
     assert structured_status["database"]["promptCount"] == 1
     assert "metadata secret" not in json.dumps(structured_status, ensure_ascii=False)
+
+    prompt_page_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_thread_prompt_page",
+                "arguments": {
+                    "codexHome": str(codex_home_path),
+                    "apiToken": api_token,
+                    "threadId": "thread-1",
+                    "scope": "all",
+                    "search": "metadata secret",
+                    "scanBudgetMs": 1_000,
+                },
+            },
+        },
+    ).json()["result"]["structuredContent"]
+    assert prompt_page_response["matchCountComplete"] is True
+    assert [item["text"] for item in prompt_page_response["prompts"]] == ["metadata secret"]
+
+    timeline_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_search_thread_timeline",
+                "arguments": {
+                    "codexHome": str(codex_home_path),
+                    "apiToken": api_token,
+                    "threadId": "thread-1",
+                    "kind": "all",
+                    "search": "metadata secret",
+                    "scanBudgetMs": 1_000,
+                },
+            },
+        },
+    ).json()["result"]["structuredContent"]
+    assert timeline_response["matchCountComplete"] is True
+    assert [item["text"] for item in timeline_response["matches"]] == ["metadata secret"]
+
+    detail_analysis_response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {
+                "name": "codex_thread_detail_analysis",
+                "arguments": {
+                    "codexHome": str(codex_home_path),
+                    "apiToken": api_token,
+                    "threadId": "thread-1",
+                    "requestId": "mcp-detail-analysis-contract",
+                },
+            },
+        },
+    ).json()["result"]["structuredContent"]
+    assert detail_analysis_response["threadId"] == "thread-1"
+    assert detail_analysis_response["requestId"] == "mcp-detail-analysis-contract"
+
+    different_codex_home_path, _ = create_prompt_test_home(tmp_path / "different")
+    active_request_id, _ = begin_prompt_index_request(
+        "thread-1",
+        "mcp-cancel-contract",
+        server.prompt_request_scope_key(str(codex_home_path)),
+    )
+    try:
+        wrong_home_cancel = server.cancel_prompt_index_request(
+            "thread-1",
+            active_request_id,
+            server.prompt_request_scope_key(str(different_codex_home_path)),
+        )
+        assert wrong_home_cancel is False
+        cancel_result = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "codex_cancel_thread_read",
+                    "arguments": {
+                        "codexHome": str(codex_home_path),
+                        "apiToken": api_token,
+                        "threadId": "thread-1",
+                        "requestId": active_request_id,
+                    },
+                },
+            },
+        ).json()["result"]["structuredContent"]
+        assert cancel_result["cancelled"] is True
+    finally:
+        finish_prompt_index_request(active_request_id)
 
     preview_response = client.post(
         "/mcp",

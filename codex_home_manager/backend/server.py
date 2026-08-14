@@ -33,6 +33,7 @@ from .codex_data import (
     get_thread_action_preview_record,
     get_thread_daily_token_usage,
     get_thread_detail,
+    get_thread_detail_analysis,
     hide_thread_from_sidebar,
     import_project_from_home,
     import_thread_from_home,
@@ -55,6 +56,7 @@ from .codex_data import (
     read_thread_logs,
     read_thread_timeline,
     read_thread_timeline_item,
+    read_thread_timeline_search_page,
     resolve_codex_paths,
     portable_backup_state_paths,
     repair_official_thread_tools_exposure,
@@ -104,6 +106,10 @@ def load_product_version() -> str:
 
 product_version = load_product_version()
 app = FastAPI(title="Codex Home Manager", version=product_version)
+
+
+def prompt_request_scope_key(codex_home: str | None) -> str:
+    return os.path.normcase(str(resolve_codex_paths(codex_home).codex_home_path.resolve(strict=False)))
 
 api_token_header_name = "X-Codex-Manager-Token"
 api_token = os.environ.get("CODEX_MANAGER_API_TOKEN") or secrets.token_urlsafe(32)
@@ -572,8 +578,17 @@ class RestoreResponse(BaseModel):
 class ThreadDetailResponse(BaseModel):
     thread: dict[str, Any]
     sqliteRow: dict[str, Any] | None = None
-    rolloutStats: dict[str, Any]
+    rolloutStats: dict[str, Any] | None = None
+    analysisStatus: str = "pending"
     dailyTokenUsage: dict[str, Any] | None = None
+    backups: list[dict[str, Any]]
+
+
+class ThreadDetailAnalysisResponse(BaseModel):
+    threadId: str
+    analysisStatus: str
+    rolloutStats: dict[str, Any]
+    rolloutDisplay: dict[str, Any]
     backups: list[dict[str, Any]]
 
 
@@ -612,6 +627,7 @@ class ThreadTimelineResponse(BaseModel):
     scannedBytes: int
     scanLimited: bool
     skippedOversizedRecords: int
+    recoveredOversizedRecords: int = 0
     items: list[dict[str, Any]]
     pageCounts: dict[str, int]
 
@@ -729,6 +745,21 @@ class ThreadPromptPageResponse(BaseModel):
     matchCount: int
     matchCountComplete: bool
     prompts: list[PromptRecord]
+    nextCursor: str | None = None
+    hasMore: bool
+    index: dict[str, Any]
+
+
+class ThreadTimelineSearchPageResponse(BaseModel):
+    threadId: str
+    title: str | None = None
+    rolloutPath: str
+    requestId: str
+    kind: str
+    search: str
+    matchCount: int
+    matchCountComplete: bool
+    matches: list[dict[str, Any]]
     nextCursor: str | None = None
     hasMore: bool
     index: dict[str, Any]
@@ -1557,10 +1588,14 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("preview_official_thread_tools_repair", "POST", "/api/codex/official-thread-tools/repair/preview", "Preview fallback shadowing, non-contiguous registry positions, and incomplete initial rollout session_meta that can hide official codex_app tools.", [], "read-only", success_fields=["operationPreviewId", "inputHash", "needsRepair", "config", "threadToolRegistry", "initialSessionMeta", "verificationSteps"]),
             item("repair_official_thread_tools", "POST", "/api/codex/official-thread-tools/repair", "Repair initial rollout tool metadata, disable the legacy fallback, and normalize thread_dynamic_tools positions. JSONL repair is validated online; SQLite normalization requires Codex Desktop to be fully closed.", ["X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "mandatory rollout backup for JSONL repair; optional home state backup for config/database rewrite", {"acknowledgeCodexRunningRisk": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["changed", "restartRequired", "backup.backupId", "initialSessionMetaRepair", "normalizedThreadToolPositions", "before", "after"]),
             item("snapshot_threads", "GET", "/api/snapshot", "List and classify all local Codex threads. Current Codex versions can show the full thread list; legacy first-page ordering is exposed only as compatibility metadata.", [], "read-only", success_fields=["summary", "threads", "projects"]),
-            item("get_thread_detail", "GET", "/api/threads/{thread_id}", "Read SQLite row, JSONL stats, file locations and backups for one thread. Use include_daily_tokens=false for a faster details shell, then call daily_token_usage when the timeline is opened.", ["thread_id"], "read-only", success_fields=["thread", "sqliteRow", "rolloutStats", "dailyTokenUsage", "backups"]),
+            item("get_thread_detail", "GET", "/api/threads/{thread_id}", "Read a target-only details shell from one SQLite row and one file stat without scanning the rollout or rebuilding the global snapshot.", ["thread_id"], "read-only", success_fields=["thread", "sqliteRow", "analysisStatus"]),
+            item("analyze_thread_detail", "GET", "/api/threads/{thread_id}/analysis", "Load JSONL statistics, visible-event integrity and backups for one thread after its fast details shell is visible. The request is cancellable.", ["thread_id", "request_id"], "read-only", success_fields=["threadId", "analysisStatus", "rolloutStats", "rolloutDisplay", "backups"]),
+            item("cancel_thread_detail_analysis", "POST", "/api/threads/{thread_id}/analysis/cancel", "Cancel an active detail analysis at the next JSONL record boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("daily_token_usage", "GET", "/api/threads/{thread_id}/daily-tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", ["thread_id"], "read-only", success_fields=["summary", "days"]),
             item("read_thread_prompts", "GET", "/api/threads/{thread_id}/prompts", "Read classified prompt-like user role records from one thread without writing an export file. pureText contains only the user's typed/request text with file lists, image tags and internal contexts stripped.", ["thread_id"], "read-only", success_fields=["threadId", "title", "rolloutPath", "promptCount", "purePromptCount", "visiblePromptCount", "hiddenPromptCount", "sourceCounts", "prompts"]),
             item("read_thread_prompt_page", "GET", "/api/threads/{thread_id}/prompts/page", "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "prompts", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
+            item("search_thread_timeline", "GET", "/api/threads/{thread_id}/timeline/search/page", "Incrementally index and search the complete thread timeline, including user input, natural-language progress, final replies, reasoning records and tools. Results use opaque cursors and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "matches", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
+            item("cancel_thread_timeline_search", "DELETE", "/api/threads/{thread_id}/timeline/search/requests/{request_id}", "Cancel an active full-timeline indexing or search request.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("cancel_thread_prompt_request", "DELETE", "/api/threads/{thread_id}/prompts/requests/{request_id}", "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("copy_thread_prompts", "GET", "/api/threads/{thread_id}/prompts/copy", "Stream filtered prompt text or NDJSON without materializing the complete result in process memory.", ["thread_id"], "read-only persistent cache", success_fields=[]),
             item("prompt_index_status", "GET", "/api/prompt-index/status", "Read prompt-index lifecycle metadata for one Codex Home. The response contains the local derived-index root plus counts, sizes, timestamps, retention limits, readability and in-use state; it never includes prompt text or source rollout paths.", [], "read-only", success_fields=["databaseExists", "database.sizeBytes", "database.inUse", "database.readable", "database.inspectionState", "database.promptCount", "storage.rootPath", "storage.maxTotalBytes", "storage.maxIdleSeconds"]),
@@ -1830,7 +1865,7 @@ def thread_detail(
     thread_id: str,
     codex_home: str | None = Query(default=None),
     sidebar_limit: int = Query(default=50, ge=1, le=1000),
-    include_daily_tokens: bool = Query(default=True),
+    include_daily_tokens: bool = Query(default=False),
 ) -> dict[str, Any]:
     try:
         return get_thread_detail(
@@ -1845,6 +1880,50 @@ def thread_detail(
         raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.get("/api/threads/{thread_id}/analysis", response_model=ThreadDetailAnalysisResponse)
+def thread_detail_analysis(
+    thread_id: str,
+    codex_home: str | None = Query(default=None),
+    request_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    active_request_id = ""
+    try:
+        active_request_id, cancel_event = begin_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        )
+        return get_thread_detail_analysis(codex_home, thread_id, cancel_check=cancel_event.is_set)
+    except PromptIndexCancelled as error:
+        raise HTTPException(status_code=499, detail=str(error)) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    finally:
+        if active_request_id:
+            finish_prompt_index_request(active_request_id)
+
+
+@app.post("/api/threads/{thread_id}/analysis/cancel")
+def cancel_thread_detail_analysis(
+    thread_id: str,
+    request_id: str = Query(..., min_length=1, max_length=128),
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    return {
+        "threadId": thread_id,
+        "requestId": request_id,
+        "cancelled": cancel_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        ),
+    }
 
 
 @app.get("/api/threads/{thread_id}/daily-tokens", response_model=ThreadDailyTokenUsageResponse)
@@ -1946,6 +2025,75 @@ def thread_timeline_item(
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
+@app.get("/api/threads/{thread_id}/timeline/search/page", response_model=ThreadTimelineSearchPageResponse)
+async def thread_timeline_search_page_endpoint(
+    thread_id: str,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=80, ge=1, le=200),
+    kind: str = Query(default="conversation", pattern="^(conversation|user|commentary|assistant|reasoning|tool|all)$"),
+    search: str = Query(default="", max_length=20_000),
+    scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
+    request_id: str | None = Query(default=None, alias="requestId", max_length=128),
+) -> dict[str, Any]:
+    active_request_id = ""
+    try:
+        active_request_id, cancel_event = begin_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        )
+        worker = asyncio.create_task(asyncio.to_thread(
+            read_thread_timeline_search_page,
+            codex_home,
+            thread_id,
+            cursor=cursor,
+            limit=limit,
+            kind=kind,
+            search=search,
+            scan_budget_ms=scan_budget_ms,
+            cancel_check=cancel_event.is_set,
+        ))
+        while not worker.done():
+            await asyncio.wait({worker}, timeout=0.05)
+            if not worker.done() and await http_request.is_disconnected():
+                cancel_event.set()
+        result = await worker
+        result["requestId"] = active_request_id
+        return result
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PromptIndexCancelled as error:
+        raise HTTPException(status_code=499, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    finally:
+        if active_request_id:
+            finish_prompt_index_request(active_request_id)
+
+
+@app.delete("/api/threads/{thread_id}/timeline/search/requests/{request_id}")
+def cancel_thread_timeline_search_request_endpoint(
+    thread_id: str,
+    request_id: str,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    return {
+        "threadId": thread_id,
+        "requestId": request_id,
+        "cancelled": cancel_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        ),
+    }
+
+
 @app.get("/api/threads/{thread_id}/prompts", response_model=ThreadPromptsResponse)
 def thread_prompts_endpoint(
     thread_id: str,
@@ -1974,7 +2122,11 @@ async def thread_prompt_page_endpoint(
 ) -> dict[str, Any]:
     active_request_id = ""
     try:
-        active_request_id, cancel_event = begin_prompt_index_request(thread_id, request_id)
+        active_request_id, cancel_event = begin_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        )
         worker = asyncio.create_task(
             asyncio.to_thread(
                 read_thread_prompt_page,
@@ -2015,12 +2167,16 @@ async def thread_prompt_page_endpoint(
 def cancel_thread_prompt_request_endpoint(
     thread_id: str,
     request_id: str,
-    _codex_home: str | None = Query(default=None, alias="codex_home"),
+    codex_home: str | None = Query(default=None),
 ) -> dict[str, Any]:
     return {
         "threadId": thread_id,
         "requestId": request_id,
-        "cancelled": cancel_prompt_index_request(thread_id, request_id),
+        "cancelled": cancel_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        ),
     }
 
 
@@ -2038,7 +2194,11 @@ def copy_thread_prompts_endpoint(
         source = get_thread_action_preview_record(codex_home, thread_id)
         if not source["fileExists"]:
             raise FileNotFoundError(source["rolloutPath"])
-        active_request_id, cancel_event = begin_prompt_index_request(thread_id, request_id)
+        active_request_id, cancel_event = begin_prompt_index_request(
+            thread_id,
+            request_id,
+            prompt_request_scope_key(codex_home),
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
     except FileNotFoundError as error:
@@ -3040,6 +3200,7 @@ def mcp_manual_write_properties(extra: dict[str, Any] | None = None) -> dict[str
 
 def mcp_tool_definitions() -> list[dict[str, Any]]:
     thread_id = {"threadId": {"type": "string", "description": "Codex thread UUID."}}
+    request_id = {"requestId": {"type": "string", "description": "Optional caller-provided request id used for cancellation."}}
     target_project = {"targetProjectPath": {"type": "string", "description": "Target project cwd/path for the operation."}}
     workspace_move_options = {
         "includeSameSourceCwdThreads": {"type": "boolean", "default": True, "description": "Also move all threads whose cwd exactly matches the selected thread source cwd."},
@@ -3064,11 +3225,15 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_home_overview", "Inventory CODEX_HOME resources, memories, skills, config and logs.", mcp_base_properties()),
         mcp_tool("codex_read_resource", "Read a text resource or list a directory inside CODEX_HOME.", mcp_preview_properties(resource_path), ["relativePath"]),
         mcp_tool("codex_thread_detail", "Read SQLite row, JSONL stats, file locations and backups for one thread. Set includeDailyTokens=false when an agent wants a faster detail shell.", mcp_preview_properties({**thread_id, "sidebarLimit": sidebar_limit_schema, "includeDailyTokens": {"type": "boolean", "default": True}}), ["threadId"]),
+        mcp_tool("codex_thread_detail_analysis", "Run the deferred complete JSONL analysis for one thread after reading the fast detail shell. This is read-only, cancellable by requestId, and can take time for very large rollouts.", mcp_preview_properties({**thread_id, **request_id}), ["threadId"]),
+        mcp_tool("codex_cancel_thread_read", "Cancel an active detail analysis, full-timeline search, or prompt-page scan in the same Codex Home by threadId and requestId.", mcp_preview_properties({**thread_id, **request_id}), ["threadId", "requestId"]),
         mcp_tool("codex_thread_daily_tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", mcp_preview_properties({**thread_id, "sidebarLimit": sidebar_limit_schema}), ["threadId"]),
         mcp_tool("codex_thread_logs", "Read structured JSONL/app logs for one thread with pagination and filters.", mcp_preview_properties({**thread_id, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}, "kind": {"type": "string", "default": "all"}, "search": {"type": "string", "default": ""}, "source": {"type": "string", "enum": ["all", "rollout", "app"], "default": "all"}}), ["threadId"]),
         mcp_tool("codex_thread_timeline", "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.", mcp_preview_properties({**thread_id, "beforeByte": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 500000, "default": 120000}}), ["threadId"]),
+        mcp_tool("codex_search_thread_timeline", "Incrementally search the entire thread timeline, not only loaded DOM or the JSONL tail. Returns explicit index completeness, match count and an opaque result cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_thread_timeline_item", "Read the complete semantic content for one timeline record by the byteOffset returned from codex_thread_timeline.", mcp_preview_properties({**thread_id, "byteOffset": {"type": "integer", "minimum": 0}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 5000000, "default": 2000000}}), ["threadId", "byteOffset"]),
         mcp_tool("codex_thread_prompts", "Read all user prompts from one thread without writing an export file.", mcp_preview_properties(thread_id), ["threadId"]),
+        mcp_tool("codex_thread_prompt_page", "Incrementally page and search all classified user inputs with source filters, explicit index completeness and an opaque cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}, "sourceType": {"type": "string"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_list_backups", "List rollback backups, optionally filtered by thread id.", {"threadId": {"type": "string"}}),
         mcp_tool("codex_preview_thread_action", "Preview show, hide, repair, archive or duplicate before writing.", mcp_preview_properties({**thread_id, "action": {"type": "string", "enum": ["show", "hide", "repair_user_event", "archive", "duplicate"]}, **target_project, "sidebarLimit": sidebar_limit_schema}), ["threadId", "action"]),
         mcp_tool("codex_preview_slim_thread", "Preview JSONL slimming impact for selected scopes.", mcp_preview_properties({**thread_id, "removeImages": {"type": "boolean", "default": True}, "keepLatestCompacted": {"type": "boolean", "default": True}}), ["threadId"]),
@@ -3186,6 +3351,23 @@ def mcp_require_write(arguments: dict[str, Any]) -> None:
     require_api_token(mcp_str(arguments, "apiToken"))
 
 
+@contextmanager
+def mcp_cancellable_thread_request(
+    codex_home: str | None,
+    thread_id: str,
+    requested_id: str | None,
+) -> Iterator[tuple[str, threading.Event]]:
+    active_request_id, cancel_event = begin_prompt_index_request(
+        thread_id,
+        requested_id,
+        prompt_request_scope_key(codex_home),
+    )
+    try:
+        yield active_request_id, cancel_event
+    finally:
+        finish_prompt_index_request(active_request_id)
+
+
 def mcp_thread_action_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     codex_home = mcp_str(arguments, "codexHome")
     thread_id = mcp_required_str(arguments, "threadId")
@@ -3291,6 +3473,30 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                 sidebar_limit=mcp_int(arguments, "sidebarLimit", 50, 1, 1000),
                 include_daily_token_usage=bool(arguments.get("includeDailyTokens", True)),
             ))
+        if name == "codex_thread_detail_analysis":
+            thread_id = mcp_required_str(arguments, "threadId")
+            with mcp_cancellable_thread_request(codex_home, thread_id, mcp_str(arguments, "requestId")) as (
+                active_request_id,
+                cancel_event,
+            ):
+                result = get_thread_detail_analysis(
+                    codex_home_text=codex_home,
+                    thread_id=thread_id,
+                    cancel_check=cancel_event.is_set,
+                )
+                return mcp_result({**result, "requestId": active_request_id})
+        if name == "codex_cancel_thread_read":
+            thread_id = mcp_required_str(arguments, "threadId")
+            request_id = mcp_required_str(arguments, "requestId")
+            return mcp_result({
+                "threadId": thread_id,
+                "requestId": request_id,
+                "cancelled": cancel_prompt_index_request(
+                    thread_id,
+                    request_id,
+                    prompt_request_scope_key(codex_home),
+                ),
+            })
         if name == "codex_thread_daily_tokens":
             return mcp_result(get_thread_daily_token_usage(
                 codex_home_text=codex_home,
@@ -3318,6 +3524,23 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                 search_text=mcp_str(arguments, "search", "") or "",
                 content_limit=mcp_int(arguments, "contentLimit", 120000, 2000, 500000),
             ))
+        if name == "codex_search_thread_timeline":
+            thread_id = mcp_required_str(arguments, "threadId")
+            with mcp_cancellable_thread_request(codex_home, thread_id, mcp_str(arguments, "requestId")) as (
+                active_request_id,
+                cancel_event,
+            ):
+                result = read_thread_timeline_search_page(
+                    codex_home,
+                    thread_id,
+                    cursor=mcp_str(arguments, "cursor"),
+                    limit=mcp_int(arguments, "limit", 80, 1, 200),
+                    kind=mcp_str(arguments, "kind", "conversation") or "conversation",
+                    search=mcp_str(arguments, "search", "") or "",
+                    scan_budget_ms=mcp_int(arguments, "scanBudgetMs", 1200, 1, 5000),
+                    cancel_check=cancel_event.is_set,
+                )
+                return mcp_result({**result, "requestId": active_request_id})
         if name == "codex_thread_timeline_item":
             return mcp_result(read_thread_timeline_item(
                 codex_home,
@@ -3327,6 +3550,24 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
             ))
         if name == "codex_thread_prompts":
             return mcp_result(read_thread_prompts(codex_home_text=codex_home, thread_id=mcp_required_str(arguments, "threadId")))
+        if name == "codex_thread_prompt_page":
+            thread_id = mcp_required_str(arguments, "threadId")
+            with mcp_cancellable_thread_request(codex_home, thread_id, mcp_str(arguments, "requestId")) as (
+                active_request_id,
+                cancel_event,
+            ):
+                result = read_thread_prompt_page(
+                    codex_home,
+                    thread_id,
+                    cursor=mcp_str(arguments, "cursor"),
+                    limit=mcp_int(arguments, "limit", 80, 1, 200),
+                    search=mcp_str(arguments, "search", "") or "",
+                    scope=mcp_str(arguments, "scope", "pure") or "pure",
+                    source_type=mcp_str(arguments, "sourceType"),
+                    scan_budget_ms=mcp_int(arguments, "scanBudgetMs", 1200, 1, 5000),
+                    cancel_check=cancel_event.is_set,
+                )
+                return mcp_result({**result, "requestId": active_request_id})
         if name == "codex_list_backups":
             return mcp_result({"backups": list_backups(codex_home, thread_id=mcp_str(arguments, "threadId"))})
         if name == "codex_preview_thread_action":

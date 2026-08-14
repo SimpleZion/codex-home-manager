@@ -19,6 +19,7 @@ class PromptIndexDatabaseStatus(BaseModel):
     sourceRolloutCount: int | None = None
     missingSourceRolloutCount: int | None = None
     promptCount: int | None = None
+    timelineEventCount: int | None = None
 
 
 class PromptIndexStorageStatus(BaseModel):

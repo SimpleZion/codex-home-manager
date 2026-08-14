@@ -1663,6 +1663,31 @@ def test_thread_detail_can_skip_daily_token_usage_and_read_it_separately(tmp_pat
     assert daily_usage["days"][2]["date"] == "2026-06-05"
 
 
+def test_thread_detail_shell_does_not_build_global_snapshot_or_scan_rollout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+
+    def reject_global_snapshot(*_args, **_kwargs):
+        raise AssertionError("detail shell must not build the global snapshot")
+
+    def reject_rollout_scan(*_args, **_kwargs):
+        raise AssertionError("detail shell must not scan the rollout")
+
+    monkeypatch.setattr("backend.codex_data.build_snapshot", reject_global_snapshot)
+    monkeypatch.setattr("backend.codex_data.parse_rollout_stats", reject_rollout_scan)
+    started_at = time.perf_counter()
+    detail = get_thread_detail(str(codex_home_path), "thread-0", include_daily_token_usage=False)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.5
+    assert detail["thread"]["id"] == "thread-0"
+    assert detail["thread"]["fileExists"] is True
+    assert detail["rolloutStats"] is None
+    assert detail["analysisStatus"] == "pending"
+
+
 def test_daily_token_usage_marks_sqlite_only_threads_as_unknown(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     thread_updated_at_ms = int(datetime_module.datetime(2026, 6, 4, 13, 30, tzinfo=datetime_module.UTC).timestamp() * 1000)
@@ -2328,17 +2353,30 @@ def test_read_thread_prompts_extracts_pure_user_text_from_attachment_context_and
             )
             + "\n"
         )
+        output.write(
+            json.dumps(
+                {
+                    "type": "user_message",
+                    "timestamp": "2026-06-03T00:03:00Z",
+                    "payload": {
+                        "text": "<goal_context>Continue working toward the active thread goal.</goal_context>"
+                    },
+                }
+            )
+            + "\n"
+        )
 
     result = read_thread_prompts(str(codex_home_path), "thread-1")
 
     attachment_prompt = result["prompts"][1]
     goal_prompt = result["prompts"][2]
+    legacy_goal_prompt = result["prompts"][3]
 
-    assert result["promptCount"] == 3
+    assert result["promptCount"] == 4
     assert result["purePromptCount"] == 2
     assert result["visiblePromptCount"] == 2
-    assert result["hiddenPromptCount"] == 1
-    assert result["sourceCounts"] == {"user": 1, "attachment": 1, "goal": 1}
+    assert result["hiddenPromptCount"] == 2
+    assert result["sourceCounts"] == {"user": 1, "attachment": 1, "goal": 2}
     assert attachment_prompt["sourceType"] == "attachment"
     assert attachment_prompt["sourceLabel"] == "附件上下文"
     assert attachment_prompt["visibleByDefault"] is True
@@ -2350,6 +2388,9 @@ def test_read_thread_prompts_extracts_pure_user_text_from_attachment_context_and
     assert goal_prompt["visibleByDefault"] is False
     assert goal_prompt["pureText"] == ""
     assert goal_prompt["hasPureText"] is False
+    assert legacy_goal_prompt["sourceType"] == "goal"
+    assert legacy_goal_prompt["visibleByDefault"] is False
+    assert legacy_goal_prompt["pureText"] == ""
 
 
 def test_export_thread_prompts_defaults_to_pure_text_and_can_export_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2623,7 +2664,7 @@ def test_thread_timeline_supports_tool_search_and_mixed_encrypted_reasoning(tmp_
     assert reasoning["hasEncryptedContent"] is True
 
 
-def test_thread_timeline_skips_oversized_jsonl_record_before_decoding(tmp_path: Path) -> None:
+def test_thread_timeline_recovers_large_jsonl_record_with_stream_redaction(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
     oversized_text = "x" * (9 * 1024 * 1024)
@@ -2634,10 +2675,13 @@ def test_thread_timeline_skips_oversized_jsonl_record_before_decoding(tmp_path: 
     page = read_thread_timeline(str(codex_home_path), "thread-1", kind_filter="all", limit=20)
 
     assert any(item["text"] == "安全读取" for item in page["items"])
-    assert page["skippedOversizedRecords"] == 1
+    assert page["skippedOversizedRecords"] == 0
+    assert page["recoveredOversizedRecords"] == 1
     assert page["scannedRecords"] >= 2
-    assert page["hasMore"] is True
-    assert page["nextBeforeByte"] is not None
+    compacted_item = next(item for item in page["items"] if item["label"] == "上下文压缩")
+    assert compacted_item["characterCount"] >= len(oversized_text)
+    assert compacted_item["textTruncated"] is True
+    assert len(compacted_item["text"]) <= 120_000
 
 
 def test_reverse_jsonl_reader_bounds_io_for_virtual_1_4_gb_record() -> None:
@@ -2676,9 +2720,41 @@ def test_reverse_jsonl_reader_bounds_io_for_virtual_1_4_gb_record() -> None:
     line_start, line_end, raw_line = next(codex_data_module.iter_jsonl_lines_reverse(virtual_path))
 
     assert line_end == virtual_size
-    assert line_start == virtual_size - (8 * 1024 * 1024)
+    assert line_start == virtual_size - (64 * 1024 * 1024)
     assert raw_line is None
-    assert virtual_path.file.bytes_read <= (8 * 1024 * 1024) + 1
+    assert virtual_path.file.bytes_read <= (64 * 1024 * 1024) + 1
+
+
+def test_thread_timeline_continues_before_unrecoverable_oversized_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    older_record = json.dumps(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "phase": "commentary",
+                "message": "超大记录之前的内容仍然可见",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    def fake_reverse_reader(_path: Path, before_byte: int | None = None):
+        assert before_byte is None
+        yield 900, 1_000, None
+        yield 100, 200, older_record
+
+    monkeypatch.setattr(codex_data_module, "iter_jsonl_lines_reverse", fake_reverse_reader)
+
+    page = read_thread_timeline(str(codex_home_path), "thread-1", kind_filter="all", limit=20)
+
+    assert page["skippedOversizedRecords"] == 1
+    assert page["scannedRecords"] == 2
+    assert any(item["label"] == "超大原始记录" for item in page["items"])
+    assert any(item["text"] == "超大记录之前的内容仍然可见" for item in page["items"])
 
 
 def test_thread_timeline_search_stops_at_scan_budget_and_can_continue(tmp_path: Path) -> None:

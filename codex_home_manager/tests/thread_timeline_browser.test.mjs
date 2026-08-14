@@ -12,7 +12,36 @@ const bundle = await build({
   write: false
 });
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`;
-const { isVisibleCommentaryItem, isVisibleCommentaryRecord, timelineItemFromJson, readBrowserTimelineItem, readBrowserTimelinePage } = await import(moduleUrl);
+const { isVisibleCommentaryItem, isVisibleCommentaryRecord, timelineItemFromJson, readBrowserTimelineItem, readBrowserTimelinePage, scanBrowserTimelineSearchPages } = await import(moduleUrl);
+const searchBundle = await build({
+  entryPoints: [path.join(projectRoot, "src", "threadContentSearch.ts")],
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  write: false
+});
+const searchModuleUrl = `data:text/javascript;base64,${Buffer.from(searchBundle.outputFiles[0].contents).toString("base64")}`;
+const { findSearchMatches, maxSearchMatchesPerText, normalizeSearchText } = await import(searchModuleUrl);
+
+assert.equal(normalizeSearchText("ﬀ ﬃ ﭏ Straße Σς Cafe\u0301 İZMİR"), "ff ffi אל strasse σσ cafe izmir");
+const unicodeSearchCases = [
+  ["A ﬀ ligature", "ff", "ﬀ"],
+  ["A ﬃ ligature", "ffi", "ﬃ"],
+  ["Hebrew ﭏ ligature", "אל", "ﭏ"],
+  ["Straße", "STRASSE", "Straße"],
+  ["ΟΣ", "οσ", "ΟΣ"],
+  ["ος", "ΟΣ", "ος"],
+  ["Cafe\u0301", "CAFÉ", "Cafe\u0301"],
+  ["İZMİR", "izmir", "İZMİR"]
+];
+for (const [source, query, expectedHighlight] of unicodeSearchCases) {
+  const matches = findSearchMatches(source, query);
+  assert.equal(matches.length, 1, `${JSON.stringify(query)} must match ${JSON.stringify(source)}`);
+  assert.equal(source.slice(matches[0].start, matches[0].end), expectedHighlight);
+}
+const denseMatches = findSearchMatches("a".repeat(20_000), "a");
+assert.equal(denseMatches.length, maxSearchMatchesPerText, "per-item highlighting must have a hard upper bound");
+assert.deepEqual(denseMatches.at(-1), { start: maxSearchMatchesPerText - 1, end: maxSearchMatchesPerText });
 
 const commentary = timelineItemFromJson({
   type: "response_item",
@@ -203,5 +232,61 @@ assert.equal(virtualPage.skippedOversizedRecords, 1);
 assert.equal(virtualPage.hasMore, true);
 assert.equal(virtualPage.nextBeforeByte, virtualSize - (64 * 1024 * 1024));
 assert.ok(virtualBytesRead <= (64 * 1024 * 1024) + 1, `virtual reader read ${virtualBytesRead} bytes`);
+
+function userMessageLine(text) {
+  return JSON.stringify({
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] }
+  });
+}
+
+async function assertAutomaticBudgetContinuation({ file, query, expectedBudget }) {
+  const progress = [];
+  const cursors = [];
+  const result = await scanBrowserTimelineSearchPages(
+    async (beforeByte) => {
+      cursors.push(beforeByte);
+      return readBrowserTimelinePage(file, `thread-${expectedBudget}`, "Budget", `${expectedBudget}.jsonl`, {
+        beforeByte,
+        kind: "all",
+        search: query
+      });
+    },
+    {
+      onProgress: (pageResult) => progress.push({
+        itemCount: pageResult.items.length,
+        nextBeforeByte: pageResult.nextBeforeByte,
+        scanLimited: pageResult.scanLimited,
+        scannedBytes: pageResult.scannedBytes,
+        scannedRecords: pageResult.scannedRecords
+      })
+    }
+  );
+  assert.ok(progress.length >= 2, `${expectedBudget} scan must continue to another page`);
+  assert.deepEqual(progress[0].itemCount, 0, `${expectedBudget} first partial page must retain a truthful zero match count`);
+  assert.equal(progress[0].scanLimited, true, `${expectedBudget} first partial page must be marked incomplete`);
+  assert.ok(progress[0].nextBeforeByte > 0, `${expectedBudget} first partial page must expose nextBeforeByte`);
+  assert.equal(cursors[0], null);
+  for (let index = 1; index < cursors.length; index += 1) {
+    assert.ok(cursors[index] < (cursors[index - 1] ?? file.size), `${expectedBudget} cursors must decrease monotonically`);
+  }
+  assert.equal(result.scanLimited, false, `${expectedBudget} final page must be complete`);
+  assert.equal(result.hasMore, false, `${expectedBudget} scan must reach the beginning of the file`);
+  assert.deepEqual(result.items.map((item) => item.text), [query]);
+}
+
+const recordBudgetTarget = "record-budget-target";
+const recordBudgetFile = new File([
+  `${userMessageLine(recordBudgetTarget)}\n`,
+  `${userMessageLine("ordinary record without the target")}\n`.repeat(10_005)
+], "record-budget.jsonl", { type: "application/jsonl" });
+await assertAutomaticBudgetContinuation({ file: recordBudgetFile, query: recordBudgetTarget, expectedBudget: "record" });
+
+const byteBudgetTarget = "byte-budget-target";
+const byteBudgetFile = new File([
+  `${userMessageLine(byteBudgetTarget)}\n`,
+  `${userMessageLine("x".repeat(4_096))}\n`.repeat(8_250)
+], "byte-budget.jsonl", { type: "application/jsonl" });
+await assertAutomaticBudgetContinuation({ file: byteBudgetFile, query: byteBudgetTarget, expectedBudget: "byte" });
 
 console.log("thread timeline browser tests passed");

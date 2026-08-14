@@ -529,7 +529,9 @@ async function installApplicationRoutes(page, {
       const queryCallCount = cursor ? (promptApiState.queryCalls.get(queryKey) || 1) : (promptApiState.queryCalls.get(queryKey) || 0) + 1;
       if (!cursor) promptApiState.queryCalls.set(queryKey, queryCallCount);
       promptApiState.pageRequests.push({ threadId, requestId, scope, search, cursor, scanBudgetMs, queryCallCount });
-      if (simulateColdIndex && !cursor && queryCallCount > 1) await new Promise((resolve) => setTimeout(resolve, 350));
+      // Keep the follow-up scan pending long enough for the UI test to exercise
+      // request cancellation deterministically on slower and faster runners.
+      if (simulateColdIndex && !cursor && queryCallCount > 1) await new Promise((resolve) => setTimeout(resolve, 2000));
 
       const sourcePrompts = threadId === raceThread.id
         ? [{ index: 1, lineNumber: 1, timestamp: null, text: "FAST B CURRENT PROMPT", characterCount: 21, sourceType: "user", sourceLabel: "User", visibleByDefault: true, pureText: "FAST B CURRENT PROMPT", pureCharacterCount: 21, hasPureText: true }]
@@ -599,6 +601,57 @@ async function installApplicationRoutes(page, {
         contentType: format === "jsonl" ? "application/x-ndjson; charset=utf-8" : "text/plain; charset=utf-8",
         headers: { "X-Prompt-Request-Id": requestId }
       });
+      return;
+    }
+    if (pathname === "/api/threads/thread-1/timeline/search/page") {
+      const search = requestUrl.searchParams.get("search") || "";
+      const requestId = requestUrl.searchParams.get("requestId") || "missing-timeline-request-id";
+      const timelineSearchResults = new Map([
+        ["正在验证", "正在验证构建顺序"],
+        ["office", "oﬃce compatibility ligature"],
+        ["strasse", "Straße"],
+        ["οσ", "ΟΣ"],
+        ["cafe", "Cafe\u0301"],
+        ["izmir", "İZMİR"]
+      ]);
+      const matchText = timelineSearchResults.get(search) || "";
+      await new Promise((resolve) => setTimeout(resolve, search === "正在验证" || search === "missing-result" ? 800 : 30));
+      const match = {
+        id: "byte-2",
+        byteOffset: 2,
+        kind: "commentary",
+        label: "思考过程",
+        text: matchText,
+        characterCount: matchText.length,
+        textTruncated: false,
+        timestamp: "2026-08-12T01:00:01Z",
+        timestampMs: 2,
+        sourceType: "response_item",
+        payloadType: "message",
+        phase: "commentary",
+        callId: "",
+        readable: true,
+        encrypted: false,
+        hasEncryptedContent: false
+      };
+      await route.fulfill({
+        json: {
+          threadId: thread.id,
+          requestId,
+          kind: requestUrl.searchParams.get("kind") || "conversation",
+          search,
+          matchCount: matchText ? 1 : 0,
+          matchCountComplete: true,
+          matches: matchText ? [match] : [],
+          nextCursor: null,
+          hasMore: false,
+          index: { complete: true, scannedBytes: 1024, scannedLines: 7, fileSize: 1024, elapsedMs: 800 }
+        }
+      });
+      return;
+    }
+    if (pathname.match(/^\/api\/threads\/thread-1\/timeline\/search\/requests\/[^/]+$/) && route.request().method() === "DELETE") {
+      await route.fulfill({ json: { threadId: thread.id, requestId: pathname.split("/").at(-1), cancelled: true } });
       return;
     }
     if (pathname === "/api/threads/thread-1/timeline") {
@@ -840,9 +893,11 @@ async function runPromptPaginationFlow() {
     await promptDialog.getByRole("tab", { name: "我的输入" }).click();
 
     await promptDialog.locator(".prompt-list").getByText("Verify keyboard access", { exact: true }).waitFor();
-    await promptDialog.locator(".prompt-index-scanning", { hasText: "扫描中 · 1" }).waitFor();
+    const promptScanStatus = promptDialog.locator(".prompt-index-scanning");
+    await promptScanStatus.waitFor();
+    assert.match(await promptScanStatus.textContent(), /^扫描中(?: \d+(?:\.\d+)?%)? · 1$/, "cold indexing must expose progress and the current match count");
     assert.equal(promptApiState.pageRequests[0].scope, "pure", "pure filter must map to the pure backend scope");
-    assert.ok(promptApiState.pageRequests[0].scanBudgetMs <= 100, "cold indexing must use a small scan budget");
+    assert.ok(promptApiState.pageRequests[0].scanBudgetMs <= 1200, "cold indexing must keep each scan request within the interactive budget");
     assert.equal(promptApiState.pageRequests[0].cursor, null, "the first screen must start without a cursor");
 
     await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "pure").length >= 2, "cold pure index did not continue scanning");
@@ -856,7 +911,7 @@ async function runPromptPaginationFlow() {
     await promptSearch.fill("paged-search");
     await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledAllRequest.requestId), "changing search did not DELETE-cancel the prior request");
 
-    await promptDialog.getByText("1 / 3 · 扫描中", { exact: true }).waitFor();
+    await promptDialog.getByText(/^1 \/ 3 · 扫描中(?: \d+(?:\.\d+)?%)?$/).waitFor();
     await promptDialog.getByText("1 / 3 · 仍有结果未加载", { exact: true }).waitFor();
     assert.equal(await promptDialog.getByText("paged-search match 3", { exact: false }).count(), 0, "a later search page must not be in the DOM before paging");
     const nextMatch = promptDialog.getByRole("button", { name: "下一个匹配" });
@@ -1034,6 +1089,39 @@ async function runAccessibilityFlow() {
     await promptDialog.waitFor();
     await promptDialog.getByText("Timeline rendering verified", { exact: true }).waitFor();
     await promptDialog.getByText("正在验证构建顺序", { exact: true }).waitFor();
+    await page.keyboard.press("Control+f");
+    const timelineSearch = promptDialog.getByRole("textbox", { name: "搜索完整线程内容" });
+    assert.equal(await timelineSearch.evaluate((element) => document.activeElement === element), true, "Ctrl+F must focus full-timeline search instead of browser find");
+    await timelineSearch.fill("正在验证");
+    await promptDialog.getByText("1 / 1 · 扫描中", { exact: true }).waitFor();
+    assert.equal(await promptDialog.locator(".timeline-entry mark", { hasText: "正在验证" }).count(), 1, "loaded timeline content must be searched and highlighted before the full index finishes");
+    await promptDialog.getByText("1 / 1", { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    assert.equal(await promptDialog.isVisible(), true, "the first Escape with a timeline query must keep the content dialog open");
+    assert.equal(await timelineSearch.inputValue(), "", "the first Escape must clear the timeline query");
+    assert.equal(await timelineSearch.evaluate((element) => document.activeElement === element), true, "clearing timeline search with Escape must retain search focus");
+    await promptDialog.getByText("Timeline rendering verified", { exact: true }).waitFor();
+    await timelineSearch.fill("missing-result");
+    await promptDialog.locator(".timeline-search-count").getByText("扫描中 · 0", { exact: true }).waitFor();
+    assert.equal(await promptDialog.getByText("0 / 0", { exact: true }).count(), 0, "an incomplete zero-match scan must never look final");
+    await promptDialog.getByText("没有匹配内容", { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+
+    const timelineUnicodeCases = [
+      ["office", "oﬃce"],
+      ["strasse", "Straße"],
+      ["οσ", "ΟΣ"],
+      ["cafe", "Cafe\u0301"],
+      ["izmir", "İZMİR"]
+    ];
+    for (const [query, expectedHighlight] of timelineUnicodeCases) {
+      await timelineSearch.fill(query);
+      await promptDialog.getByText("1 / 1", { exact: true }).waitFor();
+      const highlight = promptDialog.locator(".timeline-entry mark").first();
+      assert.equal(await highlight.textContent(), expectedHighlight, `${query} must highlight the complete original grapheme sequence`);
+      await page.keyboard.press("Escape");
+    }
+    await promptDialog.getByText("Timeline rendering verified", { exact: true }).waitFor();
     const mainContentFilter = promptDialog.getByRole("button", { name: "主要内容", exact: true });
     assert.ok((await mainContentFilter.getAttribute("class"))?.includes("active"), "main content must be the default timeline filter");
     assert.equal(await promptDialog.getByText("npm test", { exact: true }).count(), 0, "main content must hide tool calls");

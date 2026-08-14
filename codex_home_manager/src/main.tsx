@@ -59,7 +59,15 @@ import {
   type BrowserCodexWorkspace
 } from "./browserHome";
 import { classifyPromptText, isCodexRuntimeContextPrompt } from "./promptClassification";
-import { isVisibleCommentaryItem, type ThreadTimeline, type TimelineFilter, type TimelineItem } from "./threadTimeline";
+import { isVisibleCommentaryItem, scanBrowserTimelineSearchPages, type ThreadTimeline, type TimelineFilter, type TimelineItem } from "./threadTimeline";
+import {
+  createThreadTimelineSearchCancelPath,
+  createThreadTimelineSearchPagePath,
+  findSearchMatches,
+  normalizeSearchText,
+  type SearchMatch,
+  type ThreadTimelineSearchPage
+} from "./threadContentSearch";
 
 type Visibility =
   | "visible"
@@ -196,7 +204,8 @@ type ThreadDetail = {
     invalidJsonLines: number;
     firstTimestamp: string | null;
     lastTimestamp: string | null;
-  };
+  } | null;
+  analysisStatus?: "pending" | "loading" | "complete" | "error";
   dailyTokenUsage?: ThreadDailyTokenUsage;
   backups: BackupRecord[];
 };
@@ -684,6 +693,7 @@ type PromptIndexStatus = {
     sourceRolloutCount: number | null;
     missingSourceRolloutCount: number | null;
     promptCount: number | null;
+    timelineEventCount: number | null;
   } | null;
   storage: {
     rootPath: string;
@@ -1158,11 +1168,13 @@ const englishText: Record<string, string> = {
   "按标题": "Sort by title",
   "双击查看完整详情": "Double-click to open full details",
   "完整线程详情": "Full thread details",
+  "解析中": "Analyzing",
   "关闭详情窗口": "Close detail window",
   "容量构成": "Storage composition",
   "Token 构成": "Token composition",
   "SQLite 原始记录构成": "SQLite raw record composition",
   "每日 Token 消耗": "Daily token usage",
+  "时间线事件": "Timeline events",
   "覆盖天数": "Covered days",
   "有消耗日期": "Usage days",
   "活动日期": "Activity days",
@@ -1186,6 +1198,7 @@ const englishText: Record<string, string> = {
   "展开图表": "Expand chart",
   "收起图表": "Collapse chart",
   "读取每日 Token 时间线": "Load daily token timeline",
+  "搜索完整线程内容": "Search the full thread",
   "正在读取每日 Token 时间线": "Loading daily token timeline",
   "已读取每日 Token 时间线": "Daily token timeline loaded",
   "打开后再读取完整时间线，避免大线程详情被阻塞。": "The full timeline loads only after opening this panel so large thread details are not blocked.",
@@ -2427,6 +2440,37 @@ async function fetchThreadTimelineItemFromLocalApi(
 ): Promise<TimelineItem> {
   const params = new URLSearchParams({ codex_home: codexHome, byte_offset: String(byteOffset), content_limit: "5000000" });
   return fetchJson<TimelineItem>(`/api/threads/${thread.id}/timeline/item?${params.toString()}`);
+}
+
+async function fetchThreadTimelineSearchPageFromLocalApi(
+  thread: ThreadRecord,
+  codexHome: string,
+  options: {
+    cursor?: string | null;
+    kind: TimelineFilter;
+    search: string;
+    limit: number;
+    scanBudgetMs: number;
+    requestId: string;
+  },
+  signal: AbortSignal
+): Promise<ThreadTimelineSearchPage> {
+  const path = createThreadTimelineSearchPagePath({
+    threadId: thread.id,
+    codexHome,
+    ...options
+  });
+  return fetchJson<ThreadTimelineSearchPage>(path, { cache: "no-store", signal });
+}
+
+async function cancelThreadTimelineSearchRequest(threadId: string, requestId: string, codexHome: string): Promise<void> {
+  const path = createThreadTimelineSearchCancelPath(threadId, requestId, codexHome);
+  const resolvedUrl = resolveApiUrl(path);
+  await fetch(resolvedUrl, apiRequestOptions(resolvedUrl, {
+    method: "DELETE",
+    cache: "no-store",
+    keepalive: true
+  })).catch(() => undefined);
 }
 
 function useSnapshot(codexHome: string, sidebarLimit: number, enabled: boolean) {
@@ -3732,10 +3776,10 @@ function DetailPanel({
         <div><span>{t("线程类型")}</span><strong>{thread.threadKind === "subagent" ? t("子agent") : t("主线程")}</strong></div>
         <div><span>{t("文件大小")}</span><strong>{formatBytes(thread.fileSizeBytes)}</strong></div>
         <div><span>{t("更新时间")}</span><strong>{formatDate(thread.updatedAtMs)}</strong></div>
-        <div><span>{t("JSONL 行数")}</span><strong>{formatCount(rolloutStats.lineCount)}</strong></div>
-        <div><span>{t("用户消息")}</span><strong>{formatCount(rolloutStats.userMessages)}</strong></div>
-        <div><span>{t("工具调用")}</span><strong>{formatCount(rolloutStats.toolCalls)}</strong></div>
-        <div><span>{t("工具输出")}</span><strong>{formatCount(rolloutStats.toolOutputs)}</strong></div>
+        <div><span>{t("JSONL 行数")}</span><strong>{rolloutStats ? formatCount(rolloutStats.lineCount) : t("解析中")}</strong></div>
+        <div><span>{t("用户消息")}</span><strong>{rolloutStats ? formatCount(rolloutStats.userMessages) : "-"}</strong></div>
+        <div><span>{t("工具调用")}</span><strong>{rolloutStats ? formatCount(rolloutStats.toolCalls) : "-"}</strong></div>
+        <div><span>{t("工具输出")}</span><strong>{rolloutStats ? formatCount(rolloutStats.toolOutputs) : "-"}</strong></div>
       </section>
 
       <section className="detail-section">
@@ -4420,7 +4464,7 @@ function ThreadFullDetailModal({
                   <article key={child.id} className="child-thread-row">
                     <span className={`status ${child.visibility}`}>{statusIcon(child.visibility)}{statusLabel(child.visibility, t)}</span>
                     <div>
-                      <strong>{child.title}</strong>
+                      <strong title={child.title}>{compactPromptText(child.title, 180)}</strong>
                       <em>{child.id}</em>
                     </div>
                     <div>
@@ -5768,11 +5812,13 @@ function ThreadLogModal({
 function ThreadTimelinePanel({
   thread,
   codexHome,
-  browserWorkspace
+  browserWorkspace,
+  active
 }: {
   thread: ThreadRecord;
   codexHome: string;
   browserWorkspace: BrowserCodexWorkspace | null;
+  active: boolean;
 }) {
   const { t, language } = useI18n();
   const [kind, setKind] = React.useState<TimelineFilter>("conversation");
@@ -5787,31 +5833,130 @@ function ThreadTimelinePanel({
   const [fullItems, setFullItems] = React.useState<Record<string, TimelineItem>>({});
   const [loadingFullItems, setLoadingFullItems] = React.useState<Set<string>>(new Set());
   const [copied, setCopied] = React.useState(false);
+  const [searchPage, setSearchPage] = React.useState<ThreadTimelineSearchPage | null>(null);
+  const [activeSearchIndex, setActiveSearchIndex] = React.useState(-1);
   const parentRef = React.useRef<HTMLDivElement>(null);
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
   const requestSequence = React.useRef(0);
   const timelineAbortController = React.useRef<AbortController | null>(null);
+  const timelineSearchTimerRef = React.useRef<number | null>(null);
+  const timelineSearchRequestRef = React.useRef<{ threadId: string; requestId: string } | null>(null);
+  const timelineQueryKeyRef = React.useRef("");
+  const recentTimelineItemsRef = React.useRef<{ kind: TimelineFilter; items: TimelineItem[] }>({ kind, items: [] });
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 320);
     return () => window.clearTimeout(timer);
   }, [searchDraft]);
 
+  React.useEffect(() => {
+    if (!active) return undefined;
+    const focusTimelineSearch = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && (searchDraft || search)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setSearchDraft("");
+        setSearch("");
+        setActiveSearchIndex(-1);
+        window.requestAnimationFrame(() => searchInputRef.current?.focus());
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== "f") return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener("keydown", focusTimelineSearch, true);
+    return () => window.removeEventListener("keydown", focusTimelineSearch, true);
+  }, [active, search, searchDraft]);
+
   const loadPage = React.useCallback(async (beforeByte: number | null = null) => {
+    const queryKey = `${thread.id}\u0000${kind}\u0000${search}`;
+    const queryChanged = timelineQueryKeyRef.current !== queryKey;
+    if (queryChanged) timelineQueryKeyRef.current = queryKey;
+    const previousSearchRequest = timelineSearchRequestRef.current;
     timelineAbortController.current?.abort();
+    if (previousSearchRequest) {
+      timelineSearchRequestRef.current = null;
+      void cancelThreadTimelineSearchRequest(previousSearchRequest.threadId, previousSearchRequest.requestId, codexHome);
+    }
     const controller = new AbortController();
     timelineAbortController.current = controller;
     const sequence = ++requestSequence.current;
+    let activeRequestId: string | null = null;
     beforeByte === null ? setLoading(true) : setLoadingOlder(true);
     setError("");
+    if (queryChanged && beforeByte === null) {
+      setTimeline(null);
+      setSearchPage(null);
+      const recentItems = search && recentTimelineItemsRef.current.kind === kind
+        ? recentTimelineItemsRef.current.items.filter((item) => findSearchMatches(item.text, search).length > 0)
+        : [];
+      setItems(recentItems);
+      setActiveSearchIndex(recentItems.length ? 0 : -1);
+    }
     try {
-      const result = browserWorkspace
-        ? await readBrowserThreadTimeline(browserWorkspace, thread.id, { beforeByte, kind, search, limit: 80, contentLimit: 120_000, signal: controller.signal })
-        : await fetchThreadTimelineFromLocalApi(thread, codexHome, kind, search, beforeByte, controller.signal);
+      const indexedSearch = Boolean(search && !browserWorkspace);
+      const searchRequestId = `timeline-${thread.id}-${sequence}-${Date.now()}`;
+      activeRequestId = indexedSearch ? searchRequestId : null;
+      if (indexedSearch) timelineSearchRequestRef.current = { threadId: thread.id, requestId: searchRequestId };
+      const indexedResult = indexedSearch
+        ? await fetchThreadTimelineSearchPageFromLocalApi(thread, codexHome, {
+            cursor: beforeByte === null ? null : String(beforeByte),
+            kind,
+            search,
+            limit: 80,
+            scanBudgetMs: queryChanged ? 1_200 : 5_000,
+            requestId: searchRequestId
+          }, controller.signal)
+        : null;
+      const publishBrowserSearchProgress = (partialResult: ThreadTimeline) => {
+        if (sequence !== requestSequence.current) return;
+        const safeItems = partialResult.items.filter((item) => item.kind !== "commentary" || isVisibleCommentaryItem(item));
+        setTimeline({ ...partialResult, items: safeItems });
+        setItems((current) => {
+          if (beforeByte === null) return safeItems;
+          const incomingIds = new Set(safeItems.map((item) => item.id));
+          return [...safeItems, ...current.filter((item) => !incomingIds.has(item.id))];
+        });
+        setActiveSearchIndex((current) => safeItems.length ? Math.max(0, Math.min(current, safeItems.length - 1)) : -1);
+      };
+      const result = indexedResult
+        ? {
+            threadId: indexedResult.threadId,
+            title: thread.title,
+            rolloutPath: "",
+            fileSize: indexedResult.index.fileSize || 0,
+            beforeByte: null,
+            nextBeforeByte: null,
+            limit: 80,
+            kind,
+            search,
+            hasMore: indexedResult.hasMore,
+            scannedRecords: indexedResult.index.scannedLines || 0,
+            scannedBytes: indexedResult.index.scannedBytes || 0,
+            scanLimited: !indexedResult.matchCountComplete,
+            skippedOversizedRecords: 0,
+            recoveredOversizedRecords: 0,
+            items: indexedResult.matches,
+            pageCounts: {}
+          } as ThreadTimeline
+        : browserWorkspace
+          ? search
+            ? await scanBrowserTimelineSearchPages(
+                (pageBeforeByte) => readBrowserThreadTimeline(browserWorkspace, thread.id, { beforeByte: pageBeforeByte, kind, search, limit: 80, contentLimit: 120_000, signal: controller.signal }),
+                { beforeByte, onProgress: publishBrowserSearchProgress }
+              )
+            : await readBrowserThreadTimeline(browserWorkspace, thread.id, { beforeByte, kind, search, limit: 80, contentLimit: 120_000, signal: controller.signal })
+          : await fetchThreadTimelineFromLocalApi(thread, codexHome, kind, "", beforeByte, controller.signal);
       if (sequence !== requestSequence.current) return;
       const safeItems = result.items.filter((item) => item.kind !== "commentary" || isVisibleCommentaryItem(item));
       setTimeline({ ...result, items: safeItems });
-      setItems((current) => beforeByte === null ? safeItems : [...safeItems, ...current]);
+      setSearchPage(indexedResult);
+      setItems((current) => beforeByte === null ? safeItems : indexedResult ? [...current, ...safeItems] : [...safeItems, ...current]);
+      if (!search && beforeByte === null) recentTimelineItemsRef.current = { kind, items: safeItems };
       if (beforeByte === null) {
+        setActiveSearchIndex(indexedResult && safeItems.length ? 0 : -1);
         setExpanded(new Set(safeItems.filter((item) => (
           (item.kind === "user" || item.kind === "commentary" || item.kind === "assistant") && !item.textTruncated
         )).map((item) => item.id)));
@@ -5819,11 +5964,21 @@ function ThreadTimelinePanel({
         setLoadingFullItems(new Set());
         window.requestAnimationFrame(() => parentRef.current?.scrollTo({ top: parentRef.current.scrollHeight }));
       }
+      if (indexedResult && !indexedResult.matchCountComplete && beforeByte === null) {
+        if (timelineSearchTimerRef.current !== null) window.clearTimeout(timelineSearchTimerRef.current);
+        timelineSearchTimerRef.current = window.setTimeout(() => {
+          timelineSearchTimerRef.current = null;
+          void loadPage(null);
+        }, 80);
+      }
     } catch (loadError) {
       if (loadError instanceof DOMException && loadError.name === "AbortError") return;
       if (sequence === requestSequence.current) setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       if (sequence === requestSequence.current) {
+        if (activeRequestId && timelineSearchRequestRef.current?.requestId === activeRequestId) {
+          timelineSearchRequestRef.current = null;
+        }
         setLoading(false);
         setLoadingOlder(false);
       }
@@ -5831,7 +5986,12 @@ function ThreadTimelinePanel({
   }, [browserWorkspace, codexHome, kind, search, thread]);
 
   React.useEffect(() => { void loadPage(null); }, [loadPage]);
-  React.useEffect(() => () => timelineAbortController.current?.abort(), []);
+  React.useEffect(() => () => {
+    timelineAbortController.current?.abort();
+    const searchRequest = timelineSearchRequestRef.current;
+    if (searchRequest) void cancelThreadTimelineSearchRequest(searchRequest.threadId, searchRequest.requestId, codexHome);
+    if (timelineSearchTimerRef.current !== null) window.clearTimeout(timelineSearchTimerRef.current);
+  }, [codexHome]);
 
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -5841,8 +6001,47 @@ function ThreadTimelinePanel({
     getItemKey: (index) => items[index]?.id || index
   });
 
-  async function loadOlder() {
-    if (!timeline?.hasMore || timeline.nextBeforeByte === null || loadingOlder) return;
+  React.useEffect(() => {
+    if (activeSearchIndex < 0 || activeSearchIndex >= items.length) return;
+    virtualizer.scrollToIndex(activeSearchIndex, { align: "center" });
+  }, [activeSearchIndex, items.length, virtualizer]);
+
+  async function loadOlder(): Promise<number> {
+    if (search && !browserWorkspace) {
+      if (!searchPage?.matchCountComplete || !searchPage.nextCursor || loadingOlder) return 0;
+      const encodedCursor = searchPage.nextCursor;
+      timelineAbortController.current?.abort();
+      const controller = new AbortController();
+      timelineAbortController.current = controller;
+      const sequence = ++requestSequence.current;
+      const requestId = `timeline-more-${thread.id}-${sequence}-${Date.now()}`;
+      timelineSearchRequestRef.current = { threadId: thread.id, requestId };
+      setLoadingOlder(true);
+      try {
+        const page = await fetchThreadTimelineSearchPageFromLocalApi(thread, codexHome, {
+          cursor: encodedCursor,
+          kind,
+          search,
+          limit: 80,
+          scanBudgetMs: 2_000,
+          requestId
+        }, controller.signal);
+        if (sequence !== requestSequence.current) return 0;
+        const nextItems = page.matches.filter((item) => item.kind !== "commentary" || isVisibleCommentaryItem(item));
+        setItems((current) => [...current, ...nextItems]);
+        setSearchPage(page);
+        return nextItems.length;
+      } catch (loadError) {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      } finally {
+        if (timelineSearchRequestRef.current?.requestId === requestId) timelineSearchRequestRef.current = null;
+        if (sequence === requestSequence.current) setLoadingOlder(false);
+      }
+      return 0;
+    }
+    if (!timeline?.hasMore || timeline.nextBeforeByte === null || loadingOlder) return 0;
     const container = parentRef.current;
     const priorHeight = container?.scrollHeight || 0;
     const priorTop = container?.scrollTop || 0;
@@ -5850,6 +6049,23 @@ function ThreadTimelinePanel({
     window.requestAnimationFrame(() => {
       if (container) container.scrollTop = priorTop + Math.max(0, container.scrollHeight - priorHeight);
     });
+    return 0;
+  }
+
+  async function selectSearchResult(direction: -1 | 1) {
+    if (!search || !items.length) return;
+    const currentIndex = activeSearchIndex < 0 ? 0 : activeSearchIndex;
+    if (direction < 0) {
+      setActiveSearchIndex(currentIndex === 0 ? items.length - 1 : currentIndex - 1);
+      return;
+    }
+    if (currentIndex < items.length - 1) {
+      setActiveSearchIndex(currentIndex + 1);
+      return;
+    }
+    const previousLength = items.length;
+    const loadedCount = searchPage?.matchCountComplete && searchPage.nextCursor ? await loadOlder() : 0;
+    setActiveSearchIndex(loadedCount > 0 ? previousLength : 0);
   }
 
   async function expandItem(item: TimelineItem) {
@@ -5905,6 +6121,22 @@ function ThreadTimelinePanel({
     { value: "tool", label: t("工具") },
     { value: "all", label: t("全部") }
   ];
+  const searchIsScanning = Boolean(search && (
+    browserWorkspace
+      ? loading && (!timeline || timeline.scanLimited)
+      : (loading && !searchPage) || (searchPage && !searchPage.matchCountComplete)
+  ));
+  const searchHasUnloadedResults = Boolean(search && !searchIsScanning && (
+    browserWorkspace ? timeline?.hasMore : searchPage?.nextCursor
+  ));
+  const searchMatchCount = searchPage?.matchCount || items.length;
+  const searchCountText = !search
+    ? ""
+    : items.length
+      ? `${formatCount(activeSearchIndex + 1)} / ${formatCount(searchMatchCount)}${searchIsScanning ? ` · ${t("扫描中")}` : searchHasUnloadedResults ? ` · ${t("仍有结果未加载")}` : ""}`
+      : searchIsScanning
+        ? `${t("扫描中")} · 0`
+        : t("没有匹配内容");
 
   return (
     <div className="thread-timeline-panel">
@@ -5914,17 +6146,29 @@ function ThreadTimelinePanel({
             <button key={option.value} className={kind === option.value ? "active" : ""} onClick={() => setKind(option.value)} type="button">{option.label}</button>
           ))}
         </div>
-        <label className="timeline-search">
-          <Search size={15} />
-          <input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder={t("搜索回复、进度说明、推理记录或工具内容")} />
-        </label>
-        <button className="secondary-action" onClick={() => void copyLoaded()} disabled={!items.length} type="button"><Copy size={15} />{copied ? t("已复制") : t("复制已加载")}</button>
-        <button className="icon-button" onClick={() => void loadPage(null)} title={t("刷新时间线")} aria-label={t("刷新时间线")} type="button"><RefreshCcw size={15} /></button>
+        <div className="timeline-search-controls">
+          <label className="timeline-search">
+            <Search size={15} />
+            <input aria-label={t("搜索完整线程内容")} ref={searchInputRef} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void selectSearchResult(event.shiftKey ? -1 : 1);
+              }
+            }} placeholder={t("搜索完整线程内容")} />
+          </label>
+          {search ? <span className="timeline-search-count" role="status" aria-live="polite">{searchCountText}</span> : null}
+          <button className="icon-button" onClick={() => void selectSearchResult(-1)} disabled={!search || !items.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={15} /></button>
+          <button className="icon-button" onClick={() => void selectSearchResult(1)} disabled={!search || !items.length} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={15} /></button>
+        </div>
+        <div className="timeline-toolbar-actions">
+          <button className="secondary-action" onClick={() => void copyLoaded()} disabled={!items.length} type="button"><Copy size={15} />{copied ? t("已复制") : t("复制已加载")}</button>
+          <button className="icon-button" onClick={() => void loadPage(null)} title={t("刷新时间线")} aria-label={t("刷新时间线")} type="button"><RefreshCcw size={15} /></button>
+        </div>
       </div>
       <div className="timeline-meta">
         <span>{formatCount(items.length)} {t("条已加载")}</span>
         <span>{timeline ? `${t("本页扫描")} ${formatCount(timeline.scannedRecords)} ${t("条原始记录")}` : ""}</span>
-        {timeline?.scanLimited ? <span>{t("已到本次扫描预算，可继续读取更早内容。")}</span> : null}
+        {timeline?.scanLimited && !searchIsScanning ? <span>{t("已到本次扫描预算，可继续读取更早内容。")}</span> : null}
         {timeline?.recoveredOversizedRecords ? <span>{t("已从超大原始记录中安全恢复可显示文本。")} {formatCount(timeline.recoveredOversizedRecords)}</span> : null}
         {timeline?.skippedOversizedRecords ? <span>{t("部分超大原始记录超过恢复预算，未载入正文。")} {formatCount(timeline.skippedOversizedRecords)}</span> : null}
         {timeline?.rolloutPath ? <code title={timeline.rolloutPath}>{timeline.rolloutPath}</code> : null}
@@ -5932,7 +6176,7 @@ function ThreadTimelinePanel({
       <div ref={parentRef} className="timeline-scroll" data-testid="thread-timeline-list">
         {error ? <div className="inline-error" role="alert">{error}</div> : null}
         {loading ? <div className="panel-loading" role="status">{t("读取线程时间线...")}</div> : null}
-        {!loading && timeline?.hasMore ? <button className="load-older-button" onClick={() => void loadOlder()} disabled={loadingOlder} type="button">{loadingOlder ? t("正在读取更早内容...") : t("读取更早内容")}</button> : null}
+        {!loading && (search ? searchHasUnloadedResults : timeline?.hasMore) ? <button className="load-older-button" onClick={() => void loadOlder()} disabled={loadingOlder} type="button">{loadingOlder ? t("正在读取更早内容...") : search ? t("加载更多") : t("读取更早内容")}</button> : null}
         {!loading && !items.length ? <div className="empty-state">{t("当前筛选没有可显示的线程内容")}</div> : null}
         <div className="timeline-virtual-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
           {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -5945,7 +6189,7 @@ function ThreadTimelinePanel({
                 key={item.id}
                 ref={virtualizer.measureElement}
                 data-index={virtualRow.index}
-                className={`timeline-entry timeline-entry-${item.kind} ${isExpanded ? "expanded" : "collapsed"}`}
+                className={`timeline-entry timeline-entry-${item.kind} ${isExpanded ? "expanded" : "collapsed"} ${virtualRow.index === activeSearchIndex ? "timeline-entry-active-match" : ""}`}
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
               >
                 <button className="timeline-entry-head" onClick={() => canExpand && void expandItem(item)} aria-expanded={isExpanded} type="button">
@@ -5957,13 +6201,13 @@ function ThreadTimelinePanel({
                 </button>
                 {isExpanded ? (
                   <div className="timeline-entry-body">
-                    {item.encrypted && !displayItem.text ? <p className="encrypted-reasoning-note">{t("该条推理只存储了加密内容，无法读取正文。")}</p> : <pre tabIndex={0} aria-label={`${language === "en" ? (englishText[item.label] || item.label) : item.label} ${t("正文")}`}>{displayItem.text}</pre>}
+                    {item.encrypted && !displayItem.text ? <p className="encrypted-reasoning-note">{t("该条推理只存储了加密内容，无法读取正文。")}</p> : <pre tabIndex={0} aria-label={`${language === "en" ? (englishText[item.label] || item.label) : item.label} ${t("正文")}`}>{highlightSearchMatches(displayItem.text, search)}</pre>}
                     {item.hasEncryptedContent && displayItem.text ? <p className="encrypted-reasoning-note">{t("该记录另含加密推理正文；这里只显示可读摘要。")}</p> : null}
                     {loadingFullItems.has(item.id) ? <span className="timeline-loading-full">{t("正在读取完整内容...")}</span> : null}
                     {item.textTruncated && !fullItems[item.id] && !loadingFullItems.has(item.id) ? <span className="timeline-loading-full">{t("当前为内容预览；折叠后重新展开可重试完整读取。")}</span> : null}
                     {fullItems[item.id]?.textTruncated ? <span className="timeline-loading-full">{t("该记录超过单次读取上限，已显示可安全读取的部分。")}</span> : null}
                   </div>
-                ) : displayItem.text ? <p className="timeline-preview">{displayItem.text.slice(0, 180)}</p> : null}
+                ) : displayItem.text ? <p className="timeline-preview">{highlightSearchMatches(displayItem.text.slice(0, 180), search)}</p> : null}
               </article>
             );
           })}
@@ -5973,65 +6217,18 @@ function ThreadTimelinePanel({
   );
 }
 
-type PromptSearchMatch = { start: number; end: number };
-
-const promptSearchSegmenter = new Intl.Segmenter("und", { granularity: "grapheme" });
-
-function foldPromptSearchText(text: string): string {
-  return Array.from(promptSearchSegmenter.segment(text), ({ segment }) => (
-    segment.normalize("NFD").toLocaleLowerCase("und").replace(/\p{M}/gu, "")
-  )).join("");
-}
-
-function findPromptSearchMatches(text: string, query: string): PromptSearchMatch[] {
-  const foldedQuery = foldPromptSearchText(query.trim());
-  if (!foldedQuery) return [];
-
-  const ranges: Array<{ foldedStart: number; foldedEnd: number; originalStart: number; originalEnd: number }> = [];
-  let foldedText = "";
-  for (const { segment, index } of promptSearchSegmenter.segment(text)) {
-    const foldedSegment = foldPromptSearchText(segment);
-    if (!foldedSegment) continue;
-    const foldedStart = foldedText.length;
-    foldedText += foldedSegment;
-    ranges.push({
-      foldedStart,
-      foldedEnd: foldedText.length,
-      originalStart: index,
-      originalEnd: index + segment.length
-    });
-  }
-
-  const matches: PromptSearchMatch[] = [];
-  let searchFrom = 0;
-  let foldedMatchIndex = foldedText.indexOf(foldedQuery, searchFrom);
-  while (foldedMatchIndex >= 0) {
-    const foldedMatchEnd = foldedMatchIndex + foldedQuery.length;
-    const firstRange = ranges.find((range) => range.foldedEnd > foldedMatchIndex);
-    let lastRange: (typeof ranges)[number] | undefined;
-    for (let rangeIndex = ranges.length - 1; rangeIndex >= 0; rangeIndex -= 1) {
-      if (ranges[rangeIndex].foldedStart < foldedMatchEnd) {
-        lastRange = ranges[rangeIndex];
-        break;
-      }
-    }
-    if (firstRange && lastRange) {
-      matches.push({ start: firstRange.originalStart, end: lastRange.originalEnd });
-    }
-    searchFrom = foldedMatchEnd;
-    foldedMatchIndex = foldedText.indexOf(foldedQuery, searchFrom);
-  }
-  return matches;
-}
-
-function highlightPromptSearchMatch(text: string, query: string): React.ReactNode {
-  const matches = findPromptSearchMatches(text, query);
+function highlightSearchMatches(text: string, query: string, activeMatchIndex = -1): React.ReactNode {
+  const matches = findSearchMatches(text, query);
   if (!matches.length) return text;
   const fragments: React.ReactNode[] = [];
   let cursor = 0;
-  for (const match of matches) {
+  for (const [index, match] of matches.entries()) {
     if (match.start > cursor) fragments.push(text.slice(cursor, match.start));
-    fragments.push(<mark key={`${match.start}-${match.end}`}>{text.slice(match.start, match.end)}</mark>);
+    fragments.push(
+      <mark key={`${match.start}-${match.end}`} aria-current={index === activeMatchIndex ? "true" : undefined}>
+        {text.slice(match.start, match.end)}
+      </mark>
+    );
     cursor = match.end;
   }
   if (cursor < text.length) fragments.push(text.slice(cursor));
@@ -6100,7 +6297,7 @@ function PromptVirtualList({
                   {prompt.sourceLabel ? <span className="prompt-source-badge">{prompt.sourceLabel}</span> : null}
                   <em>{formatCount(displayText.length)} {t("字符")}</em>
                 </div>
-                <pre>{highlightPromptSearchMatch(displayText, searchQuery)}</pre>
+                <pre>{highlightSearchMatches(displayText, searchQuery)}</pre>
               </article>
             </div>
           );
@@ -6361,7 +6558,7 @@ function ThreadPromptModal({
           limit: 60,
           search,
           scope,
-          scanBudgetMs: 75,
+          scanBudgetMs: 1_200,
           requestId
         }, controller.signal);
         const ownsRequest = ownsQuery() && !controller.signal.aborted && promptPageRequestRef.current === request;
@@ -6465,11 +6662,16 @@ function ThreadPromptModal({
   );
   const searchedPrompts = React.useMemo(() => {
     if (!isBrowserPromptMode) return filteredPrompts;
-    if (!foldPromptSearchText(promptSearchQuery)) return filteredPrompts;
-    return filteredPrompts.filter((prompt) => findPromptSearchMatches(promptTextForFilter(prompt, filterMode), promptSearchQuery).length > 0);
+    if (!normalizeSearchText(promptSearchQuery)) return filteredPrompts;
+    return filteredPrompts.filter((prompt) => findSearchMatches(promptTextForFilter(prompt, filterMode), promptSearchQuery).length > 0);
   }, [filterMode, filteredPrompts, isBrowserPromptMode, promptSearchQuery]);
   const promptMatchCount = isBrowserPromptMode ? searchedPrompts.length : currentLocalPage?.matchCount || 0;
   const promptMatchCountComplete = isBrowserPromptMode || Boolean(currentLocalPage?.matchCountComplete);
+  const promptScanPercent = !isBrowserPromptMode
+    && currentLocalPage?.index.fileSize
+    && typeof currentLocalPage.index.scannedBytes === "number"
+    ? Math.min(100, Math.max(0, currentLocalPage.index.scannedBytes / currentLocalPage.index.fileSize * 100))
+    : null;
   const promptsHaveMore = !isBrowserPromptMode && Boolean(currentLocalPage?.hasMore && localNextCursor);
   const promptDataReady = isBrowserPromptMode ? Boolean(currentBrowserPrompts) : Boolean(currentLocalPage);
   const hiddenByFilterCount = isBrowserPromptMode
@@ -6784,7 +6986,9 @@ function ThreadPromptModal({
             <strong>{formatCount(searchedPrompts.length)}</strong>
             <span>{t("条已加载")}</span>
             <span className={promptMatchCountComplete ? "prompt-index-complete" : "prompt-index-scanning"}>
-              {promptMatchCountComplete ? t("匹配数完整") : t("扫描中")} · {formatCount(promptMatchCount)}
+              {promptMatchCountComplete
+                ? t("匹配数完整")
+                : `${t("扫描中")}${promptScanPercent === null ? "" : ` ${promptScanPercent.toFixed(1)}%`}`} · {formatCount(promptMatchCount)}
             </span>
             {hiddenByFilterCount ? <span>{t("已隐藏")} {formatCount(hiddenByFilterCount)}</span> : null}
             {(currentBrowserPrompts?.rolloutPath || currentLocalPage?.rolloutPath) ? (
@@ -6866,7 +7070,7 @@ function ThreadPromptModal({
                       <div><dt>{t("全部索引大小")}</dt><dd>{formatBytes(promptIndexStorage.totalSizeBytes)}</dd></div>
                       <div><dt>{t("数据库数")}</dt><dd>{formatCount(promptIndexStorage.databaseCount)}<small>{t("活跃数据库")} {formatCount(promptIndexStorage.activeDatabaseCount)}</small></dd></div>
                       <div><dt>{t("当前索引大小")}</dt><dd>{promptIndexDatabase ? formatBytes(promptIndexDatabase.sizeBytes) : t("没有当前索引")}</dd></div>
-                      <div><dt>{t("索引 prompt")}</dt><dd>{promptIndexDatabase?.promptCount == null ? "-" : formatCount(promptIndexDatabase.promptCount)}</dd></div>
+                      <div><dt>{t("索引 prompt")}</dt><dd>{promptIndexDatabase?.promptCount == null ? "-" : formatCount(promptIndexDatabase.promptCount)}<small>{t("时间线事件")} {promptIndexDatabase?.timelineEventCount == null ? "-" : formatCount(promptIndexDatabase.timelineEventCount)}</small></dd></div>
                       <div><dt>{t("源 rollout")}</dt><dd>{promptIndexDatabase?.sourceRolloutCount == null ? "-" : formatCount(promptIndexDatabase.sourceRolloutCount)}<small>{t("缺失源 rollout")} {promptIndexDatabase?.missingSourceRolloutCount == null ? "-" : formatCount(promptIndexDatabase.missingSourceRolloutCount)}</small></dd></div>
                       <div><dt>{t("空闲回收")}</dt><dd>{formatRetentionSeconds(promptIndexStorage.maxIdleSeconds, t)}<small>{t("容量上限")} {formatBytes(promptIndexStorage.maxTotalBytes)}</small></dd></div>
                     </dl>
@@ -6930,9 +7134,9 @@ function ThreadPromptModal({
           <span className="prompt-search-count" role="status" aria-live="polite">
             <span>{promptSearchQuery
               ? searchedPrompts.length
-                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? t("扫描中") : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`
-                : promptMatchCountComplete ? t("没有匹配内容") : `${t("扫描中")} · 0`
-              : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? t("扫描中") : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`}</span>
+                ? `${formatCount(activePromptSearchIndex + 1)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? `${t("扫描中")}${promptScanPercent === null ? "" : ` ${promptScanPercent.toFixed(1)}%`}` : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`
+                : promptMatchCountComplete ? t("没有匹配内容") : `${t("扫描中")}${promptScanPercent === null ? "" : ` ${promptScanPercent.toFixed(1)}%`} · 0`
+              : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? `${t("扫描中")}${promptScanPercent === null ? "" : ` ${promptScanPercent.toFixed(1)}%`}` : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`}</span>
             {promptNavigationStatus ? <span className="prompt-navigation-note">{promptNavigationStatus}</span> : null}
           </span>
           <button onClick={() => void selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
@@ -6950,7 +7154,7 @@ function ThreadPromptModal({
           ) : null}
         </div></div>
         <div id="thread-content-panel-timeline" role="tabpanel" aria-labelledby="thread-content-tab-timeline" hidden={contentMode !== "timeline"} className="thread-timeline-view">
-          {thread ? <ThreadTimelinePanel thread={thread} codexHome={codexHome} browserWorkspace={browserWorkspace} /> : null}
+          {thread ? <ThreadTimelinePanel thread={thread} codexHome={codexHome} browserWorkspace={browserWorkspace} active={contentMode === "timeline"} /> : null}
         </div>
       </section>
     </div>
@@ -7373,16 +7577,52 @@ function App() {
       return;
     }
     const threadId = selectedThreadId;
+    const analysisRequestId = `detail-${threadId}-${Date.now()}`;
+    const controller = new AbortController();
     let cancelled = false;
     async function loadDetail() {
       setDetailLoading(true);
       try {
-        const nextDetail = browserWorkspace
-          ? await readBrowserThreadDetail(browserWorkspace, threadId) as ThreadDetail
-          : await fetchJson<ThreadDetail>(`/api/threads/${threadId}?${new URLSearchParams({ codex_home: codexHome, sidebar_limit: String(sidebarLimit), include_daily_tokens: "false" }).toString()}`);
-        if (!cancelled) setDetail(nextDetail);
+        if (browserWorkspace) {
+          const browserDetail = await readBrowserThreadDetail(browserWorkspace, threadId) as ThreadDetail;
+          if (!cancelled) setDetail({ ...browserDetail, analysisStatus: "complete" });
+          return;
+        }
+        const shell = await fetchJson<ThreadDetail>(`/api/threads/${threadId}?${new URLSearchParams({ codex_home: codexHome, sidebar_limit: String(sidebarLimit), include_daily_tokens: "false" }).toString()}`, { signal: controller.signal });
+        if (cancelled) return;
+        const mergedThread = selectedThread ? { ...shell.thread, ...selectedThread } : shell.thread;
+        setDetail({ ...shell, thread: mergedThread, analysisStatus: "loading" });
+        setDetailLoading(false);
+        const analysis = await fetchJson<{
+          threadId: string;
+          analysisStatus: "complete";
+          rolloutStats: NonNullable<ThreadDetail["rolloutStats"]>;
+          rolloutDisplay: Record<string, number | string>;
+          backups: BackupRecord[];
+        }>(`/api/threads/${threadId}/analysis?${new URLSearchParams({ codex_home: codexHome, request_id: analysisRequestId }).toString()}`, { signal: controller.signal });
+        if (!cancelled) {
+          setDetail((current) => current?.thread.id === threadId ? {
+            ...current,
+            rolloutStats: analysis.rolloutStats,
+            backups: analysis.backups,
+            analysisStatus: "complete",
+            thread: {
+              ...current.thread,
+              rolloutDisplayStatus: String(analysis.rolloutDisplay.status || "not_scanned"),
+              rolloutDisplayResponseUserMessages: Number(analysis.rolloutDisplay.responseUserMessages || 0),
+              rolloutDisplayResponseAssistantMessages: Number(analysis.rolloutDisplay.responseAssistantMessages || 0),
+              rolloutDisplayVisibleUserMessages: Number(analysis.rolloutDisplay.visibleUserMessages || 0),
+              rolloutDisplayVisibleAgentMessages: Number(analysis.rolloutDisplay.visibleAgentMessages || 0),
+              rolloutDisplayEventUserMessages: Number(analysis.rolloutDisplay.eventUserMessages || 0),
+              rolloutDisplayEventAgentMessages: Number(analysis.rolloutDisplay.eventAgentMessages || 0)
+            }
+          } : current);
+        }
       } catch (error) {
-        if (!cancelled) setActionError(error instanceof Error ? error.message : String(error));
+        if (!cancelled && !(error instanceof DOMException && error.name === "AbortError")) {
+          setDetail((current) => current?.thread.id === threadId ? { ...current, analysisStatus: "error" } : current);
+          setActionError(error instanceof Error ? error.message : String(error));
+        }
       } finally {
         if (!cancelled) setDetailLoading(false);
       }
@@ -7390,8 +7630,15 @@ function App() {
     void loadDetail();
     return () => {
       cancelled = true;
+      controller.abort();
+      if (!browserWorkspace) {
+        void fetch(`/api/threads/${threadId}/analysis/cancel?${new URLSearchParams({
+          codex_home: codexHome,
+          request_id: analysisRequestId
+        }).toString()}`, { method: "POST" });
+      }
     };
-  }, [browserWorkspace, codexHome, selectedThreadId, sidebarLimit]);
+  }, [browserWorkspace, codexHome, selectedThread, selectedThreadId, sidebarLimit]);
 
   const loadDailyTokenUsage = React.useCallback(async (thread: ThreadRecord, force = false) => {
     if (!force && detail?.thread.id === thread.id && detail.dailyTokenUsage) return;
@@ -7674,14 +7921,12 @@ function App() {
     if (!requireLocalConnector(language === "en" ? "Creating a backup" : "创建备份")) return;
     await runAction(async () => {
       ensureApiToken();
-      await fetchAuthorizedJson(`/api/threads/${thread.id}/backup?${actionParams.toString()}`, { method: "POST" });
+      const createdBackup = await fetchAuthorizedJson<BackupRecord>(`/api/threads/${thread.id}/backup?${actionParams.toString()}`, { method: "POST" });
       setNotice(t("已创建线程状态备份。"));
       if (selectedThreadId === thread.id) {
-        const params = new URLSearchParams({ codex_home: codexHome, sidebar_limit: String(sidebarLimit), include_daily_tokens: "false" });
-        const refreshedDetail = await fetchJson<ThreadDetail>(`/api/threads/${thread.id}?${params.toString()}`);
-        setDetail((currentDetail) => currentDetail?.thread.id === thread.id && currentDetail.dailyTokenUsage
-          ? { ...refreshedDetail, dailyTokenUsage: currentDetail.dailyTokenUsage }
-          : refreshedDetail);
+        setDetail((currentDetail) => currentDetail?.thread.id === thread.id
+          ? { ...currentDetail, backups: [createdBackup, ...currentDetail.backups.filter((backup) => backup.backupId !== createdBackup.backupId)] }
+          : currentDetail);
       }
     });
   }

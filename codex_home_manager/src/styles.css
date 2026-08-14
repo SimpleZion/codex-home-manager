@@ -2137,11 +2137,40 @@ body:has(.modal-backdrop),
 .timeline-toolbar {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(220px, 360px) auto auto;
+  grid-template-columns: minmax(300px, 1fr) minmax(320px, 520px) auto;
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
+}
+
+.timeline-search-controls,
+.timeline-toolbar-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-search-controls .timeline-search {
+  flex: 1 1 220px;
+}
+
+.timeline-search-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.timeline-toolbar-actions {
+  justify-content: flex-end;
+}
+
+.timeline-entry-active-match {
+  border-color: color-mix(in srgb, var(--blue) 72%, var(--line));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 16%, transparent);
 }
 
 .timeline-filter-tabs {
@@ -5995,8 +6024,17 @@ pre {
   }
 
   .timeline-filter-tabs,
-  .timeline-search {
+  .timeline-search-controls {
     grid-column: 1 / -1;
+  }
+
+  .timeline-search-controls {
+    flex-wrap: wrap;
+  }
+
+  .timeline-toolbar-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
   }
 
   .timeline-meta {

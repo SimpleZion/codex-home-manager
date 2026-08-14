@@ -1,4 +1,5 @@
 import { classifyPromptText } from "./promptClassification";
+import { normalizeSearchText } from "./threadContentSearch";
 
 export type TimelineKind =
   | "user"
@@ -247,8 +248,8 @@ function matches(item: TimelineItem, kind: TimelineFilter, search: string): bool
     || (kind === "tool" && (item.kind === "tool_call" || item.kind === "tool_output"))
     || item.kind === kind;
   if (!kindMatches) return false;
-  const marker = search.trim().toLocaleLowerCase();
-  return !marker || [item.kind, item.label, item.text, item.callId].join("\n").toLocaleLowerCase().includes(marker);
+  const marker = normalizeSearchText(search.trim());
+  return !marker || normalizeSearchText([item.kind, item.label, item.text, item.callId].join("\n")).includes(marker);
 }
 
 function duplicate(item: TimelineItem, seen: Map<string, Array<[number, string, string, number]>>): boolean {
@@ -373,43 +374,65 @@ async function* reverseJsonlLines(
   maxLineBytes = inlineRecordByteLimit
 ): AsyncGenerator<[number, number, string | null, boolean]> {
   let position = beforeByte == null ? file.size : Math.max(0, Math.min(beforeByte, file.size));
-  while (position > 0) {
-    signal?.throwIfAborted();
+  if (position > 0) {
     const tail = new Uint8Array(await file.slice(position - 1, position).arrayBuffer());
     if (tail[0] === 10) position -= 1;
-    if (position <= 0) break;
-    const lineEnd = position;
-    let searchPosition = position;
-    let lineStart = 0;
-    let crossedInlineLimit = false;
-    let completeRecord = true;
-    while (searchPosition > 0) {
-      const blockStart = Math.max(0, searchPosition - recoveryChunkBytes, lineEnd - recoverableRecordByteLimit);
-      signal?.throwIfAborted();
-      const bytes = new Uint8Array(await file.slice(blockStart, searchPosition).arrayBuffer());
-      let newlineIndex = -1;
-      for (let index = bytes.length - 1; index >= 0; index -= 1) {
-        if (bytes[index] === 10) { newlineIndex = index; break; }
-      }
-      if (newlineIndex >= 0) { lineStart = blockStart + newlineIndex + 1; break; }
-      if (lineEnd - blockStart >= maxLineBytes) crossedInlineLimit = true;
-      if (lineEnd - blockStart >= recoverableRecordByteLimit) {
-        lineStart = blockStart;
-        completeRecord = false;
-        break;
-      }
-      if (blockStart === 0) { lineStart = 0; break; }
-      searchPosition = blockStart;
-    }
-    const lineBytes = lineEnd - lineStart;
-    yield [
-      lineStart,
-      lineEnd,
-      crossedInlineLimit || lineBytes > maxLineBytes ? null : decoder.decode(await file.slice(lineStart, lineEnd).arrayBuffer()),
-      completeRecord
-    ];
-    position = lineStart;
   }
+  let lineEnd = position;
+  let retainedFragments: Uint8Array[] = [];
+  let retainedBytes = 0;
+  let crossedInlineLimit = false;
+
+  const prependFragment = (fragment: Uint8Array) => {
+    if (fragment.length === 0 || crossedInlineLimit) return;
+    retainedFragments.unshift(fragment);
+    retainedBytes += fragment.length;
+    if (retainedBytes > maxLineBytes) {
+      retainedFragments = [];
+      retainedBytes = 0;
+      crossedInlineLimit = true;
+    }
+  };
+  const decodeRetained = () => {
+    if (crossedInlineLimit) return null;
+    if (retainedFragments.length === 1) return decoder.decode(retainedFragments[0]);
+    const combined = new Uint8Array(retainedBytes);
+    let offset = 0;
+    for (const fragment of retainedFragments) {
+      combined.set(fragment, offset);
+      offset += fragment.length;
+    }
+    return decoder.decode(combined);
+  };
+  const resetLine = (nextLineEnd: number) => {
+    lineEnd = nextLineEnd;
+    retainedFragments = [];
+    retainedBytes = 0;
+    crossedInlineLimit = false;
+  };
+
+  while (position > 0) {
+    signal?.throwIfAborted();
+    const blockStart = Math.max(0, position - recoveryChunkBytes, lineEnd - recoverableRecordByteLimit);
+    const bytes = new Uint8Array(await file.slice(blockStart, position).arrayBuffer());
+    let segmentEnd = bytes.length;
+    for (let index = bytes.length - 1; index >= 0; index -= 1) {
+      if (bytes[index] !== 10) continue;
+      prependFragment(bytes.subarray(index + 1, segmentEnd));
+      const lineStart = blockStart + index + 1;
+      yield [lineStart, lineEnd, decodeRetained(), true];
+      resetLine(blockStart + index);
+      segmentEnd = index;
+    }
+    prependFragment(bytes.subarray(0, segmentEnd));
+    position = blockStart;
+    if (lineEnd - blockStart >= recoverableRecordByteLimit && blockStart > 0) {
+      yield [blockStart, lineEnd, null, false];
+      resetLine(blockStart);
+      break;
+    }
+  }
+  if (lineEnd > 0 && position === 0) yield [0, lineEnd, decodeRetained(), true];
 }
 
 export async function readBrowserTimelinePage(
@@ -458,7 +481,7 @@ export async function readBrowserTimelinePage(
     } else {
       try { parsed = JSON.parse(rawLine) as Record<string, unknown>; } catch { continue; }
     }
-    if (scannedRecords % 250 === 0) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    if (scannedRecords % 250 === 0) await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
     const item = timelineItemFromJson(parsed, byteOffset);
     if (!item || !matches(item, kind, search) || (!item.text && item.kind !== "reasoning") || duplicate(item, seen)) continue;
     if (newest.length >= limit) { hasMore = true; nextBeforeByte = lineEnd; break; }
@@ -480,6 +503,52 @@ export async function readBrowserTimelinePage(
     limit, kind, search, hasMore, scannedRecords, scannedBytes, scanLimited, skippedOversizedRecords, recoveredOversizedRecords, items,
     pageCounts: items.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] || 0) + 1 }), {})
   };
+}
+
+export async function scanBrowserTimelineSearchPages(
+  readPage: (beforeByte: number | null) => Promise<ThreadTimeline>,
+  options: {
+    beforeByte?: number | null;
+    onProgress?: (timeline: ThreadTimeline) => void;
+  } = {}
+): Promise<ThreadTimeline> {
+  const initialBeforeByte = options.beforeByte ?? null;
+  let beforeByte = initialBeforeByte;
+  let accumulatedItems: TimelineItem[] = [];
+  let scannedRecords = 0;
+  let scannedBytes = 0;
+  let skippedOversizedRecords = 0;
+  let recoveredOversizedRecords = 0;
+
+  while (true) {
+    const page = await readPage(beforeByte);
+    const seenIds = new Set(accumulatedItems.map((item) => item.id));
+    const pageItems = page.items.filter((item) => !seenIds.has(item.id));
+    accumulatedItems = [...pageItems, ...accumulatedItems];
+    scannedRecords += page.scannedRecords;
+    scannedBytes += page.scannedBytes;
+    skippedOversizedRecords += page.skippedOversizedRecords;
+    recoveredOversizedRecords += page.recoveredOversizedRecords || 0;
+    const accumulated: ThreadTimeline = {
+      ...page,
+      beforeByte: initialBeforeByte,
+      scannedRecords,
+      scannedBytes,
+      skippedOversizedRecords,
+      recoveredOversizedRecords,
+      items: accumulatedItems,
+      pageCounts: accumulatedItems.reduce<Record<string, number>>((counts, item) => {
+        counts[item.kind] = (counts[item.kind] || 0) + 1;
+        return counts;
+      }, {})
+    };
+    options.onProgress?.(accumulated);
+
+    const nextBeforeByte = page.nextBeforeByte;
+    const scanBoundary = beforeByte ?? page.fileSize;
+    if (!page.scanLimited || !page.hasMore || nextBeforeByte === null || nextBeforeByte >= scanBoundary) return accumulated;
+    beforeByte = nextBeforeByte;
+  }
 }
 
 export async function readBrowserTimelineItem(file: File, byteOffset: number, signal?: AbortSignal): Promise<TimelineItem> {
