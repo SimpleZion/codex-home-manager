@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-14T21:46:08.405194+00:00",
+  "generatedAt": "2026-08-14T22:10:34.583546+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "77983d43cdccf8ce61763bbd555d91ddccdd84ec",
+      "commit": "de84e21d5870e5fbeb8584a63e84d3ab9bc8793f",
       "selection": [
         "**"
       ],
@@ -287,9 +287,9 @@
           "path": "codex_home_manager/backend/codex_data.py",
           "sourcePath": "backend/codex_data.py",
           "gitMode": "100644",
-          "gitObject": "62fd43b178edba44ebe85e1a23040dfaf5e7a1ba",
-          "bytes": 417706,
-          "sha256": "79630b65c5f4868b15fec9bf1cca7f6d2a0327bd3eadb0a678aa2dfdc05e3e18"
+          "gitObject": "ebb45bc1590a2cd7943370042a3099222db7c147",
+          "bytes": 418150,
+          "sha256": "0937260eb0d85b31cd0ae0b97be01cf7fb6149044c2eab19aafd5f91aa816b11"
         },
         {
           "path": "codex_home_manager/backend/diagnostics.py",
@@ -375,9 +375,9 @@
           "path": "codex_home_manager/backend/server.py",
           "sourcePath": "backend/server.py",
           "gitMode": "100644",
-          "gitObject": "433cb8add40dcc16d3f38fde904a3b01a466281f",
-          "bytes": 210523,
-          "sha256": "59cb3c2ad65d9edcb53957d89deebbcefdd1f2f24adffa561420481da06b07b4"
+          "gitObject": "30cb1b7e49cc49d2bcb77a407b3a4e998561388c",
+          "bytes": 210591,
+          "sha256": "51a8da85431ed150062fb85977a964915965ef81eb30f00a55399583ae590efd"
         },
         {
           "path": "codex_home_manager/backend/stale_subagent_edges.py",
@@ -386,6 +386,14 @@
           "gitObject": "d55432aa3efc3ea79add26c9c5e5f846994c474e",
           "bytes": 8963,
           "sha256": "a726f671d681ff78baaee976250cc0c30a42b10e0b3885ca514da8e82a19df56"
+        },
+        {
+          "path": "codex_home_manager/backend/thread_detail.py",
+          "sourcePath": "backend/thread_detail.py",
+          "gitMode": "100644",
+          "gitObject": "2d935dfe27084bd55063bff98b563ee96c4720c7",
+          "bytes": 3746,
+          "sha256": "18f56d6d10342c99d6b8f4e79b72c2eb49eab5d5959562623e34ce05ec18a2cc"
         },
         {
           "path": "codex_home_manager/backend/thread_history_repair.py",
@@ -631,9 +639,9 @@
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "499404d21a1a63b3077371e81c15c358ffc4fd49",
-          "bytes": 417374,
-          "sha256": "a5c63c68e845bdf60ae05f0369d089c390f9db13f6184ad500fcd1657845be68"
+          "gitObject": "cc85a0f79dcca11d9ecaafc94354619a9a573271",
+          "bytes": 417464,
+          "sha256": "fef3aa7e3a6c408e50aa149e730396f4ede79fe32867c3b58181a98e4d833e37"
         },
         {
           "path": "codex_home_manager/src/promptClassification.ts",
@@ -727,9 +735,9 @@
           "path": "codex_home_manager/tests/test_codex_data.py",
           "sourcePath": "tests/test_codex_data.py",
           "gitMode": "100644",
-          "gitObject": "798ecdc1cb649b41ab780258e4612c00798708b3",
-          "bytes": 387819,
-          "sha256": "5ae9a9d82f908b368f48de46bd0052baeeedf97d42fbe8045e34818cc453e253"
+          "gitObject": "d7645eb568b554146aa8ac2d443846f23cbc9a96",
+          "bytes": 388460,
+          "sha256": "cfa4d8b0d1bb0e074d530e2f5708252a746f3824d51a0a8bedeff08bb0272000"
         },
         {
           "path": "codex_home_manager/tests/test_codex_plugin_state_snapshot.py",

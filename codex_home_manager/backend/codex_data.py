@@ -43,6 +43,7 @@ from .prompt_index import (
 )
 from .process_utils import list_windows_processes
 from .search_normalization import normalize_search_text
+from .thread_detail import assemble_thread_detail_tree
 
 
 @dataclass(frozen=True)
@@ -3905,22 +3906,15 @@ def get_thread_action_preview_record(codex_home_text: str | None, thread_id: str
     }
 
 
-def get_thread_detail(
-    codex_home_text: str | None,
-    thread_id: str,
-    sidebar_limit: int = 50,
-    include_daily_token_usage: bool = True,
-) -> dict[str, Any]:
-    paths = resolve_codex_paths(codex_home_text)
-    row = fetch_thread_row(paths, thread_id)
-    if row is None:
-        raise KeyError(thread_id)
+def build_thread_detail_record(paths: CodexPaths, row: dict[str, Any], spawn_edge: dict[str, str] | None) -> dict[str, Any]:
     rollout_stat = stat_file(row.get("rollout_path"))
-    kind_metadata = thread_kind_metadata(row, fetch_thread_spawn_edges(paths).get(thread_id))
+    kind_metadata = thread_kind_metadata(row, spawn_edge)
     archived = bool(row.get("archived"))
     visibility = "subagent" if kind_metadata["threadKind"] == "subagent" else "archived" if archived else "visible" if rollout_stat["exists"] else "missing_file"
     project_path = normalize_path_text(row.get("cwd"))
-    thread = {
+    file_size_bytes = int(rollout_stat["sizeBytes"] or 0)
+    tokens_used = int(row.get("tokens_used") or 0)
+    return {
         "id": str(row["id"]),
         "title": str(row.get("title") or row.get("first_user_message") or row.get("preview") or "(untitled)"),
         "sqliteTitle": str(row.get("title") or ""),
@@ -3944,14 +3938,14 @@ def get_thread_detail(
         "archivedAtMs": int(row["archived_at"]) * 1000 if row.get("archived_at") else None,
         "hasUserEvent": bool(row.get("has_user_event")),
         "hasUserSignal": row_has_user_signal(row, {}),
-        "tokensUsed": int(row.get("tokens_used") or 0),
+        "tokensUsed": tokens_used,
         "childTokensUsed": 0,
-        "totalTokensUsed": int(row.get("tokens_used") or 0),
+        "totalTokensUsed": tokens_used,
         "fileExists": bool(rollout_stat["exists"]),
-        "fileSizeBytes": int(rollout_stat["sizeBytes"] or 0),
+        "fileSizeBytes": file_size_bytes,
         "childThreadCount": 0,
         "childFileSizeBytes": 0,
-        "totalFileSizeBytes": int(rollout_stat["sizeBytes"] or 0),
+        "totalFileSizeBytes": file_size_bytes,
         "fileModifiedAtMs": rollout_stat["modifiedAtMs"],
         "rolloutInArchivedStore": is_archived_rollout_path(paths, rollout_stat["path"]),
         "recentRank": None,
@@ -3980,8 +3974,27 @@ def get_thread_detail(
         "gitBranch": str(row.get("git_branch") or ""),
         "cliVersion": str(row.get("cli_version") or ""),
     }
+
+
+def get_thread_detail(
+    codex_home_text: str | None,
+    thread_id: str,
+    sidebar_limit: int = 50,
+    include_daily_token_usage: bool = True,
+) -> dict[str, Any]:
+    paths = resolve_codex_paths(codex_home_text)
+    rows = fetch_thread_rows(paths)
+    spawn_edges = fetch_thread_spawn_edges(paths)
+    thread, descendants, row = assemble_thread_detail_tree(
+        thread_id,
+        rows,
+        spawn_edges,
+        thread_kind_metadata,
+        lambda current_row, spawn_edge: build_thread_detail_record(paths, current_row, spawn_edge),
+    )
     detail = {
         "thread": thread,
+        "descendants": descendants,
         "sqliteRow": row,
         "rolloutStats": None,
         "analysisStatus": "pending",

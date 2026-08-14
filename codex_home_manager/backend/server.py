@@ -611,6 +611,7 @@ class RestoreResponse(BaseModel):
 
 class ThreadDetailResponse(BaseModel):
     thread: dict[str, Any]
+    descendants: list[dict[str, Any]] = Field(default_factory=list)
     sqliteRow: dict[str, Any] | None = None
     rolloutStats: dict[str, Any] | None = None
     analysisStatus: str = "pending"

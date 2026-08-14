@@ -209,6 +209,7 @@ type BackupRecord = {
 
 type ThreadDetail = {
   thread: ThreadRecord;
+  descendants?: ThreadRecord[];
   sqliteRow: Record<string, unknown>;
   rolloutStats: {
     lineCount: number;
@@ -4440,7 +4441,10 @@ function ThreadFullDetailModal({
   onRenameProject: () => void;
 }) {
   const { t, formatDate } = useI18n();
-  const descendants = React.useMemo(() => thread ? collectDescendantThreads(thread, allThreads) : [], [allThreads, thread]);
+  const descendants = React.useMemo(
+    () => detail?.descendants ?? (thread ? collectDescendantThreads(thread, allThreads) : []),
+    [allThreads, detail?.descendants, thread]
+  );
   const dialogRef = useModalAccessibility(Boolean(thread), onClose);
   if (!thread) return null;
 

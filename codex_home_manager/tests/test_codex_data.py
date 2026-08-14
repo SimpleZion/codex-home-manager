@@ -1698,6 +1698,16 @@ def test_thread_detail_includes_daily_token_usage_for_thread_tree(tmp_path: Path
     detail = get_thread_detail(str(codex_home_path), "thread-0", sidebar_limit=10)
     usage = detail["dailyTokenUsage"]
     rows_by_date = {row["date"]: row for row in usage["days"]}
+    descendants_by_id = {thread["id"]: thread for thread in detail["descendants"]}
+
+    assert list(descendants_by_id) == ["thread-1", "thread-2"]
+    assert detail["thread"]["childThreadCount"] == 2
+    assert detail["thread"]["childTokensUsed"] == sum(
+        int(thread["tokensUsed"]) for thread in descendants_by_id.values()
+    )
+    assert descendants_by_id["thread-1"]["parentThreadId"] == "thread-0"
+    assert descendants_by_id["thread-1"]["childThreadCount"] == 1
+    assert descendants_by_id["thread-2"]["parentThreadId"] == "thread-1"
 
     assert rows_by_date["2026-06-03"]["ownTokens"] == 160
     assert rows_by_date["2026-06-03"]["childTokens"] == 30
@@ -1763,6 +1773,7 @@ def test_thread_detail_shell_does_not_build_global_snapshot_or_scan_rollout(
         raise AssertionError("detail shell must not scan the rollout")
 
     monkeypatch.setattr("backend.codex_data.build_snapshot", reject_global_snapshot)
+    monkeypatch.setattr("backend.codex_data.build_snapshot_catalog", reject_global_snapshot)
     monkeypatch.setattr("backend.codex_data.parse_rollout_stats", reject_rollout_scan)
     started_at = time.perf_counter()
     detail = get_thread_detail(str(codex_home_path), "thread-0", include_daily_token_usage=False)
