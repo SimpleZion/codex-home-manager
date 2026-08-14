@@ -573,9 +573,21 @@ const readmeReferencedAssets = new Set([...readmeMarkdown.matchAll(/\(site\/asse
 const currentScriptName = [...htmlReferencedAssets].find((name) => name.endsWith(".js"));
 const currentStyleName = [...htmlReferencedAssets].find((name) => name.endsWith(".css"));
 const scriptReferencedAssets = new Set();
-if (currentScriptName) {
-  const currentScriptText = await readFile(join(assetsDirectory, currentScriptName), "utf8").catch(() => "");
-  for (const match of currentScriptText.matchAll(/\/assets\/([^"'\s)]+)/g)) scriptReferencedAssets.add(match[1]);
+const scriptAssetQueue = [...htmlReferencedAssets].filter((name) => name.endsWith(".js"));
+const scannedScriptAssets = new Set();
+const scriptAssetReferencePattern = /(?:\/assets\/|\.\/)([A-Za-z0-9._-]+\.(?:css|js|wasm))/g;
+while (scriptAssetQueue.length) {
+  const scriptAssetName = scriptAssetQueue.shift();
+  if (scannedScriptAssets.has(scriptAssetName)) continue;
+  scannedScriptAssets.add(scriptAssetName);
+  const scriptText = await readFile(join(assetsDirectory, scriptAssetName), "utf8").catch(() => "");
+  for (const match of scriptText.matchAll(scriptAssetReferencePattern)) {
+    const referencedAssetName = match[1];
+    scriptReferencedAssets.add(referencedAssetName);
+    if (referencedAssetName.endsWith(".js") && !scannedScriptAssets.has(referencedAssetName)) {
+      scriptAssetQueue.push(referencedAssetName);
+    }
+  }
 }
 const allowedAssetNames = new Set([...htmlReferencedAssets, ...scriptReferencedAssets, ...readmeReferencedAssets]);
 const obsoleteAssetShimPattern = /^index-[A-Za-z0-9_-]+\.(?:js|css)$/;

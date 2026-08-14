@@ -322,6 +322,27 @@ test("rejects an unlisted file even when its name and content look harmless", as
   assert.match(result.stderr, /not in the public release allowlist/i);
 });
 
+test("accepts a WASM asset reached through a transitive JavaScript dependency", async () => {
+  const root = await createReleaseFixture();
+  await writeFile(join(root, "site", "assets", "app-abc123.js"), 'import "./sql-runtime-abc123.js";\n');
+  await writeFile(join(root, "site", "assets", "sql-runtime-abc123.js"), 'export const wasmUrl = "/assets/sql-wasm-abc123.wasm";\n');
+  await writeFile(join(root, "site", "assets", "sql-wasm-abc123.wasm"), Buffer.from([0, 97, 115, 109]));
+
+  const result = runChecker(root);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects an unreferenced WASM asset", async () => {
+  const root = await createReleaseFixture();
+  await writeFile(join(root, "site", "assets", "sql-wasm-orphan.wasm"), Buffer.from([0, 97, 115, 109]));
+
+  const result = runChecker(root);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /not in the public release allowlist/i);
+});
+
 for (const extension of ["map", "ts", "tsx", "py", "pyc", "pdb"] ) {
   test(`rejects published .${extension} source or debug material`, async () => {
     const root = await createReleaseFixture();
