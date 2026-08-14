@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-14T17:30:26.792553+00:00",
+  "generatedAt": "2026-08-14T18:17:43.997445+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "a336f7c7ef9822a4d5abd63a26d419dbcfbf3070",
+      "commit": "c368a41ed6b2295383565c509286b92eef2d27e6",
       "selection": [
         "**"
       ],
@@ -511,9 +511,9 @@
           "path": "codex_home_manager/scripts/package-local-connector.ps1",
           "sourcePath": "scripts/package-local-connector.ps1",
           "gitMode": "100644",
-          "gitObject": "af8b45b32d8ea9b521b24fcae26a334f4f60e47b",
-          "bytes": 55241,
-          "sha256": "e165b0dba5ceff15f881d46f0b0d28ddc819d142629b385959235923f7c57af1"
+          "gitObject": "d9f354b88c382226185077d0a5bfa163c6bac2ce",
+          "bytes": 55248,
+          "sha256": "7cdc91600d7a5b48e406684c29bfc5aca4bce21bfbb67026ace5ad10403e2b5c"
         },
         {
           "path": "codex_home_manager/scripts/quality_gate.py",
@@ -831,9 +831,9 @@
           "path": "codex_home_manager/tests/test_release_packaging_policy.py",
           "sourcePath": "tests/test_release_packaging_policy.py",
           "gitMode": "100644",
-          "gitObject": "1649dac51d612496968cb79b1ff4813f65ecd140",
-          "bytes": 15979,
-          "sha256": "c3ff040380d09ea52953cd2a73a78c644eeeb9278fca7731ec28b65324f3d391"
+          "gitObject": "e6e81450ca45230ecd660d09a0e10a1492c6f760",
+          "bytes": 16067,
+          "sha256": "a5ce39101cf6c60bcae7bf3ac9005183e0c611a03b175a0608d51e89f8559208"
         },
         {
           "path": "codex_home_manager/tests/test_release_reproducibility.py",

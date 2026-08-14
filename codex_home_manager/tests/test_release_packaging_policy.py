@@ -105,7 +105,8 @@ def test_packaging_recreates_and_audits_public_node_dependencies_from_lock() -> 
     assert "$releaseNpmPath audit --audit-level=high --omit=optional" in script
     assert "$releaseNpmPath test" in script
     assert "--root $publicValidationRoot" in script
-    assert "--release" in script
+    assert "--artifact-stage" in script
+    assert "--root $publicValidationRoot `\n            --release" not in script
 
 
 def test_packaging_selects_a_complete_node_22_or_newer_toolchain() -> None:

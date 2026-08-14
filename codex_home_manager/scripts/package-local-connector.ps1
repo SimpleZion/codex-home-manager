@@ -1170,7 +1170,7 @@ $latestZipPath
         }
         & $releaseNodePath (Join-Path $publicRepository "scripts\check-public-boundary.mjs") `
             --root $publicValidationRoot `
-            --release
+            --artifact-stage
         if ($LASTEXITCODE -ne 0) {
             throw "Staged public release boundary checks failed"
         }
