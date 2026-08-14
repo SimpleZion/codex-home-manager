@@ -1,63 +1,80 @@
-# Codex Home Manager Source Monorepo
+# Codex Home Manager
 
-The GitHub `source` branch is a single repository containing every tracked source file needed to build, test, and audit Codex Home Manager:
+[中文](#中文) | [English](#english)
 
-```text
-README.md
-SOURCE_COMMITS.json
-scripts/
-codex_home_manager/
-```
+## 中文
 
-- `scripts/` contains the shared diagnostics, guarded repair, history audit, plugin repair, restart validation, source export, and source verification code used by the product.
-- `codex_home_manager/` contains the React application, local connector backend, packaging code, quality gate, and product tests.
-- `SOURCE_COMMITS.json` records the two source commits plus the Git object, byte count, mode, and SHA-256 of every exported file.
+Codex Home Manager 是一个面向本机 Codex Home 的开源管理工具，提供现代化 Web UI、REST/OpenAPI 和 MCP 接口。它可以检查和管理线程、项目、资源、插件状态、备份、导入导出与离线修复流程。
 
-The source exporter reads committed Git blobs rather than copying an arbitrary working tree. It requires both source repositories to be clean, exports only root `README.md` plus root `scripts/` and all manager-tracked files, and refuses any existing output path.
+- 在线入口：[codex-home-manager.simplezion.com](https://codex-home-manager.simplezion.com/)
+- Windows 发行版：[GitHub Releases](https://github.com/SimpleZion/codex-home-manager/releases/latest)
+- 完整源码：默认 `source` 分支
+- 部署与发行产物：`main` 分支
 
-## Export a source tree
+### 主要能力
 
-Run this from the repair workspace root. Always choose a new output directory; the exporter never deletes, cleans, merges, or overwrites an earlier directory.
+- 浏览全部主线程和子 agent 线程，按项目、状态、存储、Token 与更新时间筛选和排序。
+- 查看线程详情、子线程汇总、每日 Token 时间线、日志和纯净用户 Prompt。
+- 导出 Prompt，可选择是否包含元信息、附件上下文、自动化任务、跨线程委派和空行。
+- 预览后执行线程显示、隐藏、归档、复制、迁移、瘦身、备份与恢复。
+- 管理 `AGENTS.md`、memory、skills、插件缓存和其他 Codex Home 资源。
+- 从其他 Codex Home 导入线程、项目和资源。
+- 运行只读体检，并生成可直接交给 Codex 的修复 Prompt。
+- 通过 REST/OpenAPI 与 MCP 为其他 agent 提供同等能力。
 
-```powershell
-$sourceOutput = ".tmp\codex-home-manager-source-20260715-001"
-python .\scripts\export_codex_home_manager_source.py export `
-  --root-repository . `
-  --manager-repository .\codex_home_manager `
-  --output $sourceOutput
-```
+### 安全模型
 
-The command fails before creating the output if either repository is dirty or a required source file is not tracked. A partial directory left by an I/O failure is not reused; inspect it and select another new output path for the next run.
+- 本机连接器只监听 loopback，线上页面不能直接读取任意本机文件。
+- 浏览器文件夹模式由用户主动选择目录，并保持只读。
+- 写操作需要短期本机授权、状态绑定的预览票据和运行中 Codex 风险确认。
+- 备份可选；需要备份时默认使用受控备份根目录。
+- 修改 SQLite、全局状态、插件配置或工作区绑定的离线修复必须在 Codex 完全退出后执行。
+- 发布产物使用内容寻址文件名、SHA-256、Ed25519 分离签名和固定的独立 SPKI 公钥指纹校验；`codex-home-manager-verifier-win-x64.exe` 是随可复现 Windows 构建生成的单文件校验器，无需 Python，先验签 manifest，再核对下载产物的大小与 SHA-256。
+- Authenticode 只有在非自签名证书的公共受信任链验证通过时才标为 `valid/public-trusted`；自签名和其它不受信任签名必须显式标为不受信任。
 
-## Verify an export or clone
+### 本地开发
 
-Install the locked Python runtime dependencies in the selected Python environment, then run the verifier from the pristine export. The verifier checks the exact file inventory and every SHA-256 before it imports the exported Python modules, parses every exported PowerShell file, installs Node packages inside the export, and runs the exported core quality gate.
-
-```powershell
-python -m pip install --require-hashes --only-binary=:all: `
-  -r "$sourceOutput\codex_home_manager\packaging\windows\requirements-connector.txt"
-
-python "$sourceOutput\scripts\export_codex_home_manager_source.py" verify `
-  --source $sourceOutput `
-  --install-node-dependencies `
-  --run-gate
-```
-
-The same check applies after an independent clone:
+要求 Node.js 22 或更高版本、Python 3.12 和 PowerShell 7。
 
 ```powershell
-git clone --branch source --single-branch `
-  https://github.com/SimpleZion/codex-home-manager.git `
-  codex-home-manager-source
-cd codex-home-manager-source
-python -m pip install --require-hashes --only-binary=:all: `
-  -r .\codex_home_manager\packaging\windows\requirements-connector.txt
-python .\scripts\export_codex_home_manager_source.py verify `
-  --source . `
-  --install-node-dependencies `
-  --run-gate
+npm ci
+python -m pip install --require-hashes --only-binary=:all: -r packaging/windows/requirements-connector.txt
+npm run serve
 ```
 
-Publication should use the verified new export as the complete branch tree. Initialize or clone only inside that new directory, review `git status`, and update the remote `source` branch with an explicit force-with-lease bound to the previously observed remote commit. Do not synchronize the export into either source working directory.
+另开一个终端启动前端：
 
-The hosted Cloudflare site remains a static frontend. Local Codex data stays on the user's machine and is read only through the loopback connector after browser authorization.
+```powershell
+npm run dev
+```
+
+访问 `http://127.0.0.1:5173/`。完整质量门：
+
+```powershell
+npm run gate
+```
+
+构建 Windows 单文件连接器：
+
+```powershell
+pwsh -NoProfile -File scripts/package-local-connector.ps1
+```
+
+发布脚本会执行完整测试、两次隔离构建、字节级可复现性比较、黑盒安全验证和公开边界验证。
+
+## English
+
+Codex Home Manager is an open-source local management console for Codex Home. It provides a modern Web UI, REST/OpenAPI endpoints, and MCP tools for threads, projects, resources, diagnostics, backups, import/export, and guarded offline repair.
+
+- Hosted console: [codex-home-manager.simplezion.com](https://codex-home-manager.simplezion.com/)
+- Windows releases: [GitHub Releases](https://github.com/SimpleZion/codex-home-manager/releases/latest)
+- Complete source: default `source` branch
+- Deployed static site and release artifacts: `main` branch
+
+The local connector is loopback-only. Browser folder mode is user-selected and read-only. State-changing operations require short-lived local authorization and state-bound previews. Release artifacts are content-addressed and verified with SHA-256 plus detached Ed25519 signatures.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development requirements and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

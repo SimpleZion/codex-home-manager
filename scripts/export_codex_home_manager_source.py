@@ -25,7 +25,10 @@ required_export_paths = {
     ".github/workflows/requirements-ci.txt",
     ".github/workflows/source-ci.yml",
     "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
     "SECURITY.md",
+    "docs/SOURCE_EXPORT.md",
     "scripts/export_codex_home_manager_source.py",
     "scripts/repair_all_codex_after_exit.ps1",
     "scripts/verify_codex_after_restart.py",
@@ -233,7 +236,7 @@ def build_manifest(
             "rootRepository": source_manifest(
                 "rootRepository",
                 root_snapshot,
-                [".gitattributes", ".gitignore", "README.md", "scripts/**"],
+                [".gitattributes", ".gitignore", "README.md -> docs/SOURCE_EXPORT.md", "scripts/**"],
             ),
             "managerRepository": source_manifest(
                 "managerRepository",
@@ -256,13 +259,15 @@ def export_source_monorepo(root_repository: Path, manager_repository: Path, outp
     )
     manager_snapshot = repository_snapshot(manager_repository, lambda _source_path: True)
 
+    root_export_path = lambda source_path: "docs/SOURCE_EXPORT.md" if source_path == "README.md" else source_path
+
     def manager_export_path(source_path: str) -> str:
-        if source_path == "SECURITY.md" or source_path.startswith(manager_github_prefix):
+        if source_path in {"README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md"} or source_path.startswith(manager_github_prefix):
             return source_path
         return f"codex_home_manager/{source_path}"
 
     exported_files = [
-        *collect_export_files(root_snapshot, "rootRepository"),
+        *collect_export_files(root_snapshot, "rootRepository", export_path_mapper=root_export_path),
         *collect_export_files(manager_snapshot, "managerRepository", export_path_mapper=manager_export_path),
     ]
     exported_files.sort(key=lambda exported_file: exported_file.export_path)
@@ -389,14 +394,15 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
         for file_record in source_record["files"]:
             export_path, original_source_path = validate_manifest_record(source_path, file_record)
             if source_name == "rootRepository":
-                if export_path != original_source_path or not (
-                    export_path in {".gitattributes", ".gitignore", "README.md"}
+                expected_root_path = "docs/SOURCE_EXPORT.md" if original_source_path == "README.md" else original_source_path
+                if export_path != expected_root_path or not (
+                    export_path in {".gitattributes", ".gitignore", "docs/SOURCE_EXPORT.md"}
                     or export_path.startswith("scripts/")
                 ):
                     raise SourceExportError(f"root repository file is outside the monorepo layout: {export_path}")
-            elif original_source_path == "SECURITY.md" or original_source_path.startswith(manager_github_prefix):
+            elif original_source_path in {"README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md"} or original_source_path.startswith(manager_github_prefix):
                 if export_path != original_source_path:
-                    raise SourceExportError(f"manager GitHub configuration is outside the source GitHub root: {export_path}")
+                    raise SourceExportError(f"manager repository root metadata is outside the source root: {export_path}")
             elif export_path != f"codex_home_manager/{original_source_path}":
                 raise SourceExportError(f"manager repository file is outside the monorepo layout: {export_path}")
             if export_path in expected_files:
