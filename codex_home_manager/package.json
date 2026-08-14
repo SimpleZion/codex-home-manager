@@ -22,7 +22,7 @@
     "react-dom": "^19.2.7",
     "sql.js": "^1.14.1",
     "typescript": "^5.9.3",
-    "vite": "^6.4.3"
+    "vite": "^8.2.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
