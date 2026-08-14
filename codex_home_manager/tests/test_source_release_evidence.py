@@ -39,6 +39,21 @@ def write_source_evidence(directory: Path) -> dict[str, Path]:
     quality_status.write_text("passed\n", encoding="utf-8")
     quality_log = directory / "quality-gate.log"
     quality_log.write_text("quality gate passed\n", encoding="utf-8")
+    coverage = directory / "coverage.xml"
+    coverage.write_text(
+        '<coverage lines-valid="100" lines-covered="81" line-rate="0.81" />\n',
+        encoding="utf-8",
+    )
+    browser_contracts = directory / "browser-contracts.log"
+    browser_contracts.write_text(
+        "browser home streaming tests passed\n"
+        "frontend connector contract tests passed\n"
+        "frontend review regression tests passed\n"
+        "frontend quality PASS:\n"
+        "frontend accessibility PASS:\n"
+        "thread timeline browser tests passed\n",
+        encoding="utf-8",
+    )
     test_summary = directory / "test-summary.md"
     test_summary.write_text(
         "# Source CI test summary\n\n"
@@ -52,7 +67,7 @@ def write_source_evidence(directory: Path) -> dict[str, Path]:
         encoding="utf-8",
     )
 
-    checksum_subjects = [archive, junit, quality_log, quality_status, sbom, test_summary]
+    checksum_subjects = [archive, browser_contracts, coverage, junit, quality_log, quality_status, sbom, test_summary]
     checksum = directory / "SHA256SUMS.txt"
     checksum.write_text(
         "".join(f"{release_manifest.sha256_file(path)} *evidence/{path.name}\n" for path in sorted(checksum_subjects)),
@@ -65,6 +80,8 @@ def write_source_evidence(directory: Path) -> dict[str, Path]:
     return {
         "archive": archive,
         "junit": junit,
+        "coverage": coverage,
+        "browser_contracts": browser_contracts,
         "quality_log": quality_log,
         "quality_status": quality_status,
         "test_summary": test_summary,
@@ -114,7 +131,7 @@ def test_prepares_only_public_source_evidence_with_stable_names(tmp_path: Path) 
     assert expected_names <= {path.name for path in public_site_directory.iterdir()}
     assert files["quality_log"].name not in expected_names
     assert files["junit"].name not in expected_names
-    assert len(calls) == 7
+    assert len(calls) == 9
     assert all(call["repository"] == repository for call in calls)
     assert all(call["signer_workflow"] == signer_workflow for call in calls)
     assert all(call["source_commit"] == source_commit for call in calls)
@@ -122,7 +139,25 @@ def test_prepares_only_public_source_evidence_with_stable_names(tmp_path: Path) 
     assert proof["schema_version"] == 1
     assert proof["source_commit"] == source_commit
     assert proof["source_commits"] == {"root": root_commit, "manager": manager_commit}
-    assert proof["quality"] == {"tests": 12, "failures": 0, "errors": 0, "skipped": 1, "pytest_seconds": 2.5}
+    assert proof["quality"] == {
+        "tests": 12,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1,
+        "pytest_seconds": 2.5,
+        "coverage": {"lines_valid": 100, "lines_covered": 81, "line_rate": 0.81},
+        "browser_contracts": {
+            "suite_count": 6,
+            "suites": [
+                "browser home streaming tests passed",
+                "frontend connector contract tests passed",
+                "frontend review regression tests passed",
+                "frontend quality PASS:",
+                "frontend accessibility PASS:",
+                "thread timeline browser tests passed",
+            ],
+        },
+    }
     assert {record["name"] for record in proof["assets"]} == expected_names
     assert "quality-gate.log" not in public_site_directory.joinpath("SHA256SUMS.txt").read_text(encoding="ascii")
 
@@ -152,6 +187,29 @@ def test_rejects_checksum_tampering(tmp_path: Path) -> None:
     files["sbom"].write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(release_manifest.ReleaseManifestError, match="source evidence SHA256 mismatch"):
+        prepare_existing(directory, tmp_path)
+
+
+def test_rejects_coverage_below_ci_threshold(tmp_path: Path) -> None:
+    directory = tmp_path / "evidence"
+    files = write_source_evidence(directory)
+    files["coverage"].write_text(
+        '<coverage lines-valid="100" lines-covered="49" line-rate="0.49" />\n',
+        encoding="utf-8",
+    )
+    rewrite_checksum(files)
+
+    with pytest.raises(release_manifest.ReleaseManifestError, match="coverage report does not meet"):
+        prepare_existing(directory, tmp_path)
+
+
+def test_rejects_incomplete_browser_contract_log(tmp_path: Path) -> None:
+    directory = tmp_path / "evidence"
+    files = write_source_evidence(directory)
+    files["browser_contracts"].write_text("browser home streaming tests passed\n", encoding="utf-8")
+    rewrite_checksum(files)
+
+    with pytest.raises(release_manifest.ReleaseManifestError, match="browser contract log does not prove"):
         prepare_existing(directory, tmp_path)
 
 
@@ -239,7 +297,19 @@ def test_official_attestation_verifier_pins_repository_workflow_commit_and_runne
 
 
 def rewrite_checksum(files: dict[str, Path]) -> None:
-    subjects = [files[name] for name in ("archive", "junit", "quality_log", "quality_status", "sbom", "test_summary")]
+    subjects = [
+        files[name]
+        for name in (
+            "archive",
+            "browser_contracts",
+            "coverage",
+            "junit",
+            "quality_log",
+            "quality_status",
+            "sbom",
+            "test_summary",
+        )
+    ]
     files["checksum"].write_text(
         "".join(f"{release_manifest.sha256_file(path)} *evidence/{path.name}\n" for path in sorted(subjects)),
         encoding="ascii",

@@ -987,6 +987,40 @@ def load_passing_junit(path: Path) -> dict[str, int | float]:
     return quality
 
 
+def load_passing_coverage(path: Path) -> dict[str, int | float]:
+    try:
+        root = element_tree.parse(path).getroot()
+        lines_valid = int(root.attrib["lines-valid"])
+        lines_covered = int(root.attrib["lines-covered"])
+        line_rate = float(root.attrib["line-rate"])
+    except (OSError, KeyError, ValueError, element_tree.ParseError) as error:
+        raise ReleaseManifestError("source evidence coverage report is invalid") from error
+    if lines_valid < 1 or not 0 <= lines_covered <= lines_valid or not 0 <= line_rate <= 1:
+        raise ReleaseManifestError("source evidence coverage report is invalid")
+    calculated_rate = lines_covered / lines_valid
+    if abs(calculated_rate - line_rate) > 0.0001 or line_rate < 0.5:
+        raise ReleaseManifestError("source evidence coverage report does not meet the CI threshold")
+    return {"lines_valid": lines_valid, "lines_covered": lines_covered, "line_rate": line_rate}
+
+
+def load_passing_browser_contracts(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ReleaseManifestError("source evidence browser contract log is invalid") from error
+    expected_markers = (
+        "browser home streaming tests passed",
+        "frontend connector contract tests passed",
+        "frontend review regression tests passed",
+        "frontend quality PASS:",
+        "frontend accessibility PASS:",
+        "thread timeline browser tests passed",
+    )
+    if path.stat().st_size > 8 * 1024 * 1024 or any(content.count(marker) != 1 for marker in expected_markers):
+        raise ReleaseManifestError("source evidence browser contract log does not prove all suites passed")
+    return {"suite_count": len(expected_markers), "suites": list(expected_markers)}
+
+
 def source_test_summary_bytes(quality: dict[str, int | float]) -> bytes:
     return (
         "# Source CI test summary\n\n"
@@ -1330,6 +1364,8 @@ def prepare_source_release_evidence(
     checksum_subject_names = {
         archive_name,
         sbom_name,
+        "browser-contracts.log",
+        "coverage.xml",
         "junit.xml",
         "quality-gate.log",
         "quality-gate-status.txt",
@@ -1353,6 +1389,8 @@ def prepare_source_release_evidence(
     if (evidence_directory / "quality-gate-status.txt").read_text(encoding="utf-8").strip() != "passed":
         raise ReleaseManifestError("source evidence quality gate did not pass")
     quality = load_passing_junit(evidence_directory / "junit.xml")
+    coverage = load_passing_coverage(evidence_directory / "coverage.xml")
+    browser_contracts = load_passing_browser_contracts(evidence_directory / "browser-contracts.log")
     generated_summary = source_test_summary_bytes(quality)
     original_summary = (evidence_directory / "test-summary.md").read_bytes().replace(b"\r\n", b"\n")
     if original_summary != generated_summary:
@@ -1437,7 +1475,7 @@ def prepare_source_release_evidence(
             "sbom_predicate_type": source_sbom_predicate_type,
             "provenance_predicate_type": source_provenance_predicate_type,
         },
-        "quality": quality,
+        "quality": {**quality, "coverage": coverage, "browser_contracts": browser_contracts},
         "assets": assets,
     }
     write_bytes(proof_path, canonical_json_bytes(proof))

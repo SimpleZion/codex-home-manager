@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-14T22:10:34.583546+00:00",
+  "generatedAt": "2026-08-14T22:41:11.400245+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "de84e21d5870e5fbeb8584a63e84d3ab9bc8793f",
+      "commit": "908285f85f7cf7d8c1dd20c919840d947ea6fc5c",
       "selection": [
         "**"
       ],
@@ -567,9 +567,9 @@
           "path": "codex_home_manager/scripts/release_manifest.py",
           "sourcePath": "scripts/release_manifest.py",
           "gitMode": "100644",
-          "gitObject": "f5788a258a11d8c551696c0b54c40afea32f7d32",
-          "bytes": 149490,
-          "sha256": "027554c4b4ae445d2917e65e9776b3226d90b38fbb5299afc5c8ba5ea979a899"
+          "gitObject": "beb2194317f0b64426918d552ad255124fb5d743",
+          "bytes": 151620,
+          "sha256": "6d0e7555f2940337c8854649888227c6f9f3490cfdcc05f175478bc1044003e7"
         },
         {
           "path": "codex_home_manager/scripts/repair-official-thread-tool-session-meta.py",
@@ -951,9 +951,9 @@
           "path": "codex_home_manager/tests/test_source_release_evidence.py",
           "sourcePath": "tests/test_source_release_evidence.py",
           "gitMode": "100644",
-          "gitObject": "2b655670aedfdc95c0b583de0265c4722e96c780",
-          "bytes": 11342,
-          "sha256": "8259edf413a1551bf3e163a84fcc8b04eb20fd177261e78d83c7d94d0e82d90c"
+          "gitObject": "9141c955ce4e68c64bdaa48aef92ce8770f9f793",
+          "bytes": 13676,
+          "sha256": "8200fc0b15a909abdf620e01bb68edec6bd12c1b37f3fc6ab5deef13bb2775f9"
         },
         {
           "path": "codex_home_manager/tests/test_stale_subagent_edges.py",
