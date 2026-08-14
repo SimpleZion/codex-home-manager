@@ -2150,54 +2150,64 @@ def pure_user_text_from_prompt(text: str) -> str:
 
 
 def classify_prompt_record(text: str) -> dict[str, Any]:
-    prefix = text.lstrip()[:5000]
-    pure_text = pure_user_text_from_prompt(text)
-    if is_subagent_notification_prompt(text):
+    truncation_counts = [int(value) for value in timeline_truncation_metadata_pattern.findall(text)]
+    cleaned_text = timeline_truncation_metadata_pattern.sub("", text)
+    source_character_count = max([len(cleaned_text), *truncation_counts])
+    prefix = cleaned_text.lstrip()[:5000]
+    pure_text = pure_user_text_from_prompt(cleaned_text)
+    truncation_fields = {
+        "text": cleaned_text,
+        "characterCount": source_character_count,
+        "textTruncated": source_character_count > len(cleaned_text),
+        "pureCharacterCount": source_character_count if pure_text == cleaned_text else len(pure_text),
+        "pureTextTruncated": source_character_count > len(cleaned_text) and pure_text == cleaned_text,
+    }
+    if is_subagent_notification_prompt(cleaned_text):
         return {
             "sourceType": "subagent",
             "sourceLabel": "子 agent",
             "visibleByDefault": False,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
-    if is_automation_prompt(text):
+    if is_automation_prompt(cleaned_text):
         return {
             "sourceType": "automation",
             "sourceLabel": "自动化任务",
             "visibleByDefault": False,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
-    if is_thread_delegation_prompt(text):
+    if is_thread_delegation_prompt(cleaned_text):
         return {
             "sourceType": "delegation",
             "sourceLabel": "线程转发",
             "visibleByDefault": False,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
-    if is_codex_internal_context_prompt(text):
+    if is_codex_internal_context_prompt(cleaned_text):
         return {
             "sourceType": "goal",
             "sourceLabel": "续跑目标上下文",
             "visibleByDefault": False,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
-    if is_internal_context_prompt(text):
+    if is_internal_context_prompt(cleaned_text):
         return {
             "sourceType": "internal",
-            "sourceLabel": codex_runtime_context_prompt_label(text)
-            if is_codex_runtime_context_prompt(text)
+            "sourceLabel": codex_runtime_context_prompt_label(cleaned_text)
+            if is_codex_runtime_context_prompt(cleaned_text)
             else "内部上下文",
             "visibleByDefault": False,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
     if prefix.startswith("# In app browser:"):
         return {
@@ -2205,8 +2215,8 @@ def classify_prompt_record(text: str) -> dict[str, Any]:
             "sourceLabel": "浏览器上下文",
             "visibleByDefault": True,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
     if prefix.startswith("# Files mentioned by the user:"):
         return {
@@ -2214,16 +2224,16 @@ def classify_prompt_record(text: str) -> dict[str, Any]:
             "sourceLabel": "附件上下文",
             "visibleByDefault": True,
             "pureText": pure_text,
-            "pureCharacterCount": len(pure_text),
             "hasPureText": bool(pure_text),
+            **truncation_fields,
         }
     return {
         "sourceType": "user",
         "sourceLabel": "用户输入",
         "visibleByDefault": True,
         "pureText": pure_text,
-        "pureCharacterCount": len(pure_text),
         "hasPureText": bool(pure_text),
+        **truncation_fields,
     }
 
 
@@ -3023,15 +3033,103 @@ def timeline_safe_json_value(value: Any, key: str = "") -> Any:
     return value
 
 
-timeline_data_url_pattern = re.compile(
-    r"data:[^,\s]{1,200},[^\s<>\"'\\]*",
+timeline_data_url_header_pattern = re.compile(
+    r"data:([^,\s\"'\\]{0,200}),",
     flags=re.IGNORECASE,
 )
+timeline_data_url_payload_pattern = re.compile(r"[^\s<>\"'\\]*")
 timeline_truncation_metadata_pattern = re.compile(r"\x00CHM_ORIGINAL_CHARACTERS:(\d+)\x00")
 
 
+def timeline_xml_data_url_end(value: str, payload_start: int) -> int:
+    position = payload_start
+    root_name = ""
+    depth = 0
+    while position < len(value):
+        tag_start = value.find("<", position)
+        if tag_start < 0:
+            return len(value)
+        if value.startswith("<!--", tag_start):
+            tag_end = value.find("-->", tag_start + 4)
+            if tag_end < 0:
+                return len(value)
+            position = tag_end + 3
+            continue
+        if value.startswith("<![CDATA[", tag_start):
+            tag_end = value.find("]]>", tag_start + 9)
+            if tag_end < 0:
+                return len(value)
+            position = tag_end + 3
+            continue
+        if value.startswith("<?", tag_start):
+            tag_end = value.find("?>", tag_start + 2)
+            if tag_end < 0:
+                return len(value)
+            position = tag_end + 2
+            continue
+
+        quote = ""
+        tag_end = tag_start + 1
+        while tag_end < len(value):
+            character = value[tag_end]
+            if quote:
+                if character == quote:
+                    quote = ""
+            elif character in {"\"", "'"}:
+                quote = character
+            elif character == ">":
+                break
+            tag_end += 1
+        if tag_end >= len(value):
+            return len(value)
+
+        tag_body = value[tag_start + 1:tag_end].strip()
+        position = tag_end + 1
+        if not tag_body or tag_body.startswith("!"):
+            continue
+        closing = tag_body.startswith("/")
+        self_closing = tag_body.endswith("/")
+        name_match = re.match(r"/?\s*([A-Za-z_][\w:.-]*)", tag_body)
+        if name_match is None:
+            continue
+        tag_name = name_match.group(1).casefold()
+        if not root_name and not closing:
+            root_name = tag_name
+            depth = 1
+            if self_closing:
+                return position
+            continue
+        if tag_name != root_name:
+            continue
+        if closing:
+            depth -= 1
+            if depth <= 0:
+                return position
+        elif not self_closing:
+            depth += 1
+    return len(value)
+
+
 def timeline_redact_embedded_data_urls(value: str) -> str:
-    return timeline_data_url_pattern.sub("[附件内容已隐藏]", value)
+    parts: list[str] = []
+    cursor = 0
+    while True:
+        match = timeline_data_url_header_pattern.search(value, cursor)
+        if match is None:
+            parts.append(value[cursor:])
+            return "".join(parts)
+        parts.append(value[cursor:match.start()])
+        header = match.group(1).casefold()
+        payload_prefix = value[match.end():].lstrip()
+        if "xml" in header or "svg" in header or payload_prefix.startswith("<"):
+            payload_end = timeline_xml_data_url_end(value, match.end())
+        elif ";base64" in header:
+            payload_match = timeline_data_url_payload_pattern.match(value, match.end())
+            payload_end = payload_match.end() if payload_match is not None else match.end()
+        else:
+            payload_end = len(value)
+        parts.append("[附件内容已隐藏]")
+        cursor = max(match.end(), payload_end)
 
 
 def timeline_text_from_value(value: Any) -> str:
@@ -3195,46 +3293,53 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
     return event
 
 
+def timeline_raw_line_matches_normalized_search(line_bytes: bytes, normalized_search: str) -> bool:
+    if not normalized_search:
+        return True
+    marker_bytes = normalized_search.encode("utf-8")
+    lowered_line = line_bytes.lower()
+    if marker_bytes in lowered_line:
+        return True
+    if b"\\u" in lowered_line:
+        # JSON Unicode escapes cannot be compared without materializing the
+        # record. Keep them as candidates rather than risking a false negative.
+        return True
+    if line_bytes.isascii():
+        return False
+    decoded_line = line_bytes.decode("utf-8", errors="replace")
+    return normalized_search in normalize_search_text(decoded_line)
+
+
 def iter_jsonl_lines_reverse(
     path: Path,
     before_byte: int | None = None,
-    block_size: int = 65_536,
+    block_size: int = 1_048_576,
     direct_line_bytes: int = 8 * 1024 * 1024,
     max_line_bytes: int = 64 * 1024 * 1024,
+    normalized_search_marker: str | None = None,
 ):
     file_size = path.stat().st_size
     position = file_size if before_byte is None else max(0, min(int(before_byte), file_size))
     with path.open("rb") as file:
-        while position > 0:
+        if position > 0:
             file.seek(position - 1)
             if file.read(1) == b"\n":
                 position -= 1
-            if position <= 0:
-                break
-            line_end = position
-            search_position = position
-            oversized_boundary = False
-            while True:
-                block_start = max(0, search_position - block_size)
-                block_start = max(block_start, line_end - max_line_bytes)
-                file.seek(block_start)
-                block = file.read(search_position - block_start)
-                newline_index = block.rfind(b"\n")
-                if newline_index >= 0:
-                    line_start = block_start + newline_index + 1
-                    break
-                if line_end - block_start >= max_line_bytes:
-                    line_start = block_start
-                    oversized_boundary = True
-                    break
-                if block_start == 0:
-                    line_start = 0
-                    break
-                search_position = block_start
-            line_bytes = line_end - line_start
-            if oversized_boundary or line_bytes > max_line_bytes:
-                yield line_start, line_end, None
-            elif line_bytes > direct_line_bytes:
+        current_line_end = position
+        buffer = b""
+        buffer_start = position
+        oversized_line = False
+
+        def materialize_line(line_start: int, line_end: int, line_bytes: bytes) -> str | None:
+            byte_count = line_end - line_start
+            if byte_count > max_line_bytes:
+                return None
+            if normalized_search_marker and not timeline_raw_line_matches_normalized_search(
+                line_bytes,
+                normalized_search_marker,
+            ):
+                return ""
+            if byte_count > direct_line_bytes:
                 recovered = redacted_jsonl_record_bytes(
                     file,
                     line_start,
@@ -3242,11 +3347,47 @@ def iter_jsonl_lines_reverse(
                     None,
                     include_truncation_metadata=True,
                 )
-                yield line_start, line_end, recovered.decode("utf-8", errors="replace")
+                return recovered.decode("utf-8", errors="replace")
+            return line_bytes.decode("utf-8", errors="replace")
+
+        while position > 0:
+            block_start = max(0, position - max(4_096, int(block_size)))
+            file.seek(block_start)
+            block = file.read(position - block_start)
+            position = block_start
+
+            if oversized_line:
+                newline_index = block.rfind(b"\n")
+                if newline_index < 0:
+                    continue
+                line_start = block_start + newline_index + 1
+                yield line_start, current_line_end, None
+                current_line_end = block_start + newline_index
+                buffer = block[:newline_index]
+                buffer_start = block_start
+                oversized_line = False
             else:
-                file.seek(line_start)
-                yield line_start, line_end, file.read(line_bytes).decode("utf-8", errors="replace")
-            position = line_start
+                buffer = block + buffer
+                buffer_start = block_start
+
+            while not oversized_line:
+                newline_index = buffer.rfind(b"\n")
+                if newline_index < 0:
+                    break
+                line_start = buffer_start + newline_index + 1
+                line_bytes = buffer[newline_index + 1:]
+                yield line_start, current_line_end, materialize_line(line_start, current_line_end, line_bytes)
+                current_line_end = buffer_start + newline_index
+                buffer = buffer[:newline_index]
+
+            if not oversized_line and len(buffer) > max_line_bytes:
+                buffer = b""
+                oversized_line = True
+
+        if oversized_line:
+            yield 0, current_line_end, None
+        elif current_line_end > 0 or buffer:
+            yield 0, current_line_end, materialize_line(0, current_line_end, buffer)
 
 
 def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text: str) -> bool:
@@ -3263,9 +3404,7 @@ def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text:
     marker = normalize_search_text(search_text)
     if not marker:
         return True
-    haystack = normalize_search_text(
-        "\n".join(str(event.get(key) or "") for key in ("kind", "label", "text", "callId"))
-    )
+    haystack = normalize_search_text(str(event.get("text") or ""))
     return marker in haystack
 
 
@@ -3286,14 +3425,15 @@ def truncate_timeline_event(event: dict[str, Any], content_limit: int) -> dict[s
 
 def timeline_event_is_duplicate(
     event: dict[str, Any],
-    prior_events: list[tuple[int, str, str, int]],
+    prior_events: list[tuple[Any, ...]],
     byte_distance: int = 1_000_000,
     timestamp_distance_ms: int = 2_000,
 ) -> bool:
     text = str(event.get("text") or "").strip()
     source_type = str(event.get("sourceType") or "")
     timestamp_ms = int(event.get("timestampMs") or 0)
-    for prior_offset, prior_text, prior_source_type, prior_timestamp_ms in prior_events:
+    for prior_record in prior_events:
+        prior_offset, prior_text, prior_source_type, prior_timestamp_ms = prior_record[:4]
         # Codex may persist one semantic event in both event_msg and
         # response_item records. Repeats within one protocol are real events.
         if source_type == prior_source_type:
@@ -3306,11 +3446,7 @@ def timeline_event_is_duplicate(
             if not text and not prior_text:
                 return True
             continue
-        if text == prior_text:
-            return True
-        if event.get("kind") in {"assistant", "reasoning"} and (
-            text.startswith(prior_text) or prior_text.startswith(text)
-        ):
+        if text == prior_text or (len(prior_text) > len(text) and prior_text.startswith(text)):
             return True
     return False
 
@@ -3348,8 +3484,12 @@ def read_thread_timeline(
     skipped_oversized_records = 0
     recovered_oversized_records = 0
     scan_origin = rollout_path.stat().st_size if before_byte is None else max(0, min(int(before_byte), rollout_path.stat().st_size))
+    normalized_search_marker = normalize_search_text(search_text.strip())
 
-    for byte_offset, line_end, raw_line in iter_jsonl_lines_reverse(rollout_path, before_byte=before_byte):
+    reverse_line_options: dict[str, Any] = {"before_byte": before_byte}
+    if normalized_search_marker:
+        reverse_line_options["normalized_search_marker"] = normalized_search_marker
+    for byte_offset, line_end, raw_line in iter_jsonl_lines_reverse(rollout_path, **reverse_line_options):
         scanned_records += 1
         scanned_bytes = max(scanned_bytes, scan_origin - byte_offset)
         if scanned_records > max(100, int(scan_record_limit)) or (
@@ -3384,6 +3524,8 @@ def read_thread_timeline(
                     next_before_byte = line_end
                     break
                 events_newest_first.append(truncate_timeline_event(placeholder_event, safe_content_limit))
+            continue
+        if raw_line == "":
             continue
         if line_end - byte_offset > 8 * 1024 * 1024:
             recovered_oversized_records += 1
@@ -5832,6 +5974,10 @@ def replace_paths_in_jsonl(path: Path, replacements: list[tuple[str, str]]) -> d
 prompt_candidate_pattern = re.compile(
     rb'"type"\s*:\s*"(?:user_message|event_msg|response_item|turn_context|compacted)"'
 )
+timeline_outer_type_pattern = re.compile(rb'"type"\s*:\s*"([^"]+)"')
+timeline_payload_type_pattern = re.compile(
+    rb'"payload"\s*:\s*\{\s*"type"\s*:\s*"([^"]+)"'
+)
 prompt_only_candidate_pattern = re.compile(
     rb'"type"\s*:\s*"(?:user_message|event_msg|response_item)"'
 )
@@ -5887,6 +6033,47 @@ def timeline_index_is_duplicate(
     )
 
 
+def timeline_conversation_candidate_line(raw_line: bytes) -> bool:
+    """Identify outer conversation records without matching nested checkpoint history."""
+    record_head = raw_line[:4_096]
+    outer_match = timeline_outer_type_pattern.search(record_head)
+    if outer_match is None:
+        return False
+    outer_type = outer_match.group(1)
+    if outer_type == b"user_message":
+        return True
+    if outer_type not in {b"event_msg", b"response_item"}:
+        return False
+    payload_match = timeline_payload_type_pattern.search(record_head, outer_match.end())
+    if payload_match is None:
+        return False
+    payload_type = payload_match.group(1)
+    return (
+        outer_type == b"event_msg" and payload_type in {b"user_message", b"agent_message"}
+    ) or (
+        outer_type == b"response_item" and payload_type == b"message"
+    )
+
+
+def timeline_conversation_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str, Any] | None:
+    """Extract only the natural-language conversation used by the persistent search index."""
+    item_type = str(item.get("type") or "")
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    payload_type = str(payload.get("type") or "")
+    role = str(payload.get("role") or "")
+    supported = (
+        item_type == "user_message"
+        or (item_type == "event_msg" and payload_type in {"user_message", "agent_message"})
+        or (item_type == "response_item" and payload_type == "message" and role in {"user", "assistant"})
+    )
+    if not supported:
+        return None
+    event = timeline_event_from_item(item, byte_offset)
+    if event is None or str(event.get("kind") or "") not in timeline_default_kinds:
+        return None
+    return event
+
+
 def ensure_rollout_prompt_index(
     codex_home_path: Path,
     rollout_path: Path,
@@ -5903,13 +6090,13 @@ def ensure_rollout_prompt_index(
         candidate_check=lambda raw_line: (
             prompt_only_candidate_pattern.search(raw_line) is not None
             if normalized_index_kind == "prompts"
-            else prompt_candidate_pattern.search(raw_line) is not None
+            else timeline_conversation_candidate_line(raw_line)
         ),
         extract_prompt=prompt_text_from_item,
         classify_prompt=classify_prompt_record,
         timestamp_to_ms=prompt_timestamp_ms,
         is_duplicate=prompt_is_cross_protocol_duplicate,
-        extract_timeline_event=timeline_event_from_item if normalized_index_kind == "timeline" else None,
+        extract_timeline_event=timeline_conversation_event_from_item if normalized_index_kind == "timeline" else None,
         is_timeline_duplicate=timeline_index_is_duplicate if normalized_index_kind == "timeline" else None,
         index_kind=normalized_index_kind,
         max_scan_ms=max_scan_ms,
@@ -5982,6 +6169,7 @@ def read_thread_prompt_page(
         cursor=cursor,
         limit=limit,
         index_state=index_state,
+        cancel_check=cancel_check,
     )
     return {
         "threadId": thread_id,
@@ -6005,6 +6193,11 @@ def read_thread_timeline_search_page(
     scan_budget_ms: int = 250,
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    if kind not in {"conversation", "user", "commentary", "assistant"}:
+        raise ValueError(
+            "persistent full-thread search supports conversation, user, commentary, and assistant; "
+            "use the byte-cursor timeline endpoint for reasoning, tool, or all-content searches"
+        )
     paths = resolve_codex_paths(codex_home_text)
     row = fetch_thread_row(paths, thread_id)
     if row is None:
@@ -6027,6 +6220,7 @@ def read_thread_timeline_search_page(
         cursor=cursor,
         limit=limit,
         index_state=index_state,
+        cancel_check=cancel_check,
     )
     return {
         "threadId": thread_id,
@@ -6081,25 +6275,22 @@ def stream_thread_prompt_copy(
         first_prompt = False
 
 
-def read_thread_prompts(codex_home_text: str | None, thread_id: str) -> dict[str, Any]:
-    paths = resolve_codex_paths(codex_home_text)
-    row = fetch_thread_row(paths, thread_id)
-    if row is None:
-        raise KeyError(thread_id)
-    prompts = extract_user_prompts_from_rollout(row.get("rollout_path"), codex_home_text=codex_home_text)
-    visible_prompt_count = len(filter_prompts_for_scope(prompts, "visible"))
-    pure_prompt_count = len(filter_prompts_for_scope(prompts, "pure"))
-    return {
-        "threadId": thread_id,
-        "title": row.get("title"),
-        "rolloutPath": normalize_path_text(row.get("rollout_path")),
-        "promptCount": len(prompts),
-        "purePromptCount": pure_prompt_count,
-        "visiblePromptCount": visible_prompt_count,
-        "hiddenPromptCount": len(prompts) - visible_prompt_count,
-        "sourceCounts": prompt_source_counts(prompts),
-        "prompts": prompts,
-    }
+def read_thread_prompts(
+    codex_home_text: str | None,
+    thread_id: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Compatibility reader backed by the bounded prompt-page contract."""
+    return read_thread_prompt_page(
+        codex_home_text,
+        thread_id,
+        cursor=cursor,
+        limit=max(1, min(500, int(limit))),
+        scope="all",
+        scan_budget_ms=1_200,
+    )
 
 
 def export_root_path() -> Path:

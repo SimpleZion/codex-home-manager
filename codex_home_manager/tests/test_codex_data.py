@@ -2720,9 +2720,25 @@ def test_reverse_jsonl_reader_bounds_io_for_virtual_1_4_gb_record() -> None:
     line_start, line_end, raw_line = next(codex_data_module.iter_jsonl_lines_reverse(virtual_path))
 
     assert line_end == virtual_size
-    assert line_start == virtual_size - (64 * 1024 * 1024)
+    assert line_start == 0
     assert raw_line is None
-    assert virtual_path.file.bytes_read <= (64 * 1024 * 1024) + 1
+    assert virtual_path.file.bytes_read <= virtual_size + (64 * 1024)
+
+
+def test_reverse_jsonl_reader_emits_one_placeholder_for_one_line_larger_than_limit(tmp_path: Path) -> None:
+    rollout_path = tmp_path / "oversized.jsonl"
+    with rollout_path.open("wb") as output:
+        output.write(b'{"payload":"')
+        output.write(b"x" * (65 * 1024 * 1024))
+        output.write(b'"}\n')
+        output.write(b'{"type":"event_msg","payload":{"type":"agent_message","message":"tail"}}\n')
+
+    rows = list(codex_data_module.iter_jsonl_lines_reverse(rollout_path))
+
+    assert len(rows) == 2
+    assert rows[0][2] is not None
+    assert rows[1][0] == 0
+    assert rows[1][2] is None
 
 
 def test_thread_timeline_continues_before_unrecoverable_oversized_record(

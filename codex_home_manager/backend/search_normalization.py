@@ -1,33 +1,16 @@
 from __future__ import annotations
 
 import unicodedata
-import re
-
-
-search_normalization_sensitive_pattern = re.compile(
-    "["
-    "\\u00c0-\\u024f"
-    "\\u0300-\\u036f"
-    "\\u0370-\\u052f"
-    "\\u1ab0-\\u1aff"
-    "\\u1dc0-\\u1dff"
-    "\\u1e00-\\u1eff"
-    "\\u20d0-\\u20ff"
-    "\\ufb00-\\ufb4f"
-    "\\ufe20-\\ufe2f"
-    "\\uff00-\\uffef"
-    "]+"
-)
-
-
-def _fold_sensitive_sequence(match: re.Match[str]) -> str:
-    decomposed = unicodedata.normalize("NFKD", match.group(0))
-    return "".join(character for character in decomposed if not unicodedata.category(character).startswith("M"))
-
-
 def normalize_search_text(value: str) -> str:
-    """Normalize text without applying costly decomposition to ordinary CJK/ASCII runs."""
-    return search_normalization_sensitive_pattern.sub(_fold_sensitive_sequence, value.casefold())
+    """Match the browser's full compatibility decomposition and mark folding."""
+    if value.isascii():
+        return value.lower()
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(
+        character
+        for character in decomposed.casefold()
+        if not unicodedata.category(character).startswith("M")
+    )
 
 
 def normalized_match_original_span(value: str, normalized_query: str) -> tuple[int, int] | None:

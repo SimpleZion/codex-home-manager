@@ -17,15 +17,15 @@ from typing import Any
 
 from backend.search_normalization import normalize_search_text, normalized_match_original_span
 
-prompt_index_schema_version = 10
+prompt_index_schema_version = 15
 prompt_index_boundary_bytes = 64 * 1024
 prompt_index_commit_records = 256
 prompt_index_commit_bytes = 8 * 1024 * 1024
 prompt_index_scan_chunk_bytes = 1024 * 1024
 prompt_index_candidate_overlap_bytes = 512
-prompt_index_direct_candidate_bytes = 4 * 1024 * 1024
-prompt_index_sanitized_record_bytes = 8 * 1024 * 1024
-prompt_index_sanitized_string_bytes = 512 * 1024
+prompt_index_direct_candidate_bytes = 64 * 1024 * 1024
+prompt_index_sanitized_record_bytes = 72 * 1024 * 1024
+prompt_index_sanitized_string_bytes = 64 * 1024 * 1024
 prompt_search_result_item_characters = 64 * 1024
 prompt_search_result_page_characters = 2 * 1024 * 1024
 prompt_index_redacted_attachment = "[附件内容已隐藏]".encode("utf-8")
@@ -49,7 +49,9 @@ _file_locks_lock = threading.Lock()
 _file_locks: dict[str, threading.Lock] = {}
 _database_locks_lock = threading.Lock()
 _database_locks: dict[str, threading.RLock] = {}
+_database_read_setup_locks: dict[str, threading.Lock] = {}
 _database_active_counts: dict[str, int] = {}
+_database_read_handles: dict[str, tuple[Any, int]] = {}
 _cleanup_lock = threading.Lock()
 _cleanup_last_run_ns: dict[str, int] = {}
 
@@ -58,11 +60,9 @@ def prompt_index_root_path() -> Path:
     configured_root = os.environ.get("CODEX_HOME_MANAGER_PROMPT_INDEX_ROOT")
     if configured_root:
         return Path(configured_root).expanduser().resolve(strict=False)
-    if getattr(sys, "frozen", False):
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        user_data_root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-        return (user_data_root / "CodexHomeManager" / "prompt-indexes").resolve(strict=False)
-    return (Path(__file__).resolve().parents[1] / "data" / "prompt-indexes").resolve(strict=False)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    user_data_root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return (user_data_root / "CodexHomeManager" / "prompt-indexes").resolve(strict=False)
 
 
 def prompt_index_database_path(codex_home_path: Path) -> Path:
@@ -85,7 +85,17 @@ def _database_lock(database_path: Path) -> threading.RLock:
         return lock
 
 
-def _lock_database_file(lock_file, *, blocking: bool) -> bool:
+def _database_read_setup_lock(database_path: Path) -> threading.Lock:
+    key = _database_key(database_path)
+    with _database_locks_lock:
+        lock = _database_read_setup_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _database_read_setup_locks[key] = lock
+        return lock
+
+
+def _lock_database_file(lock_file, *, blocking: bool, exclusive: bool = True) -> bool:
     lock_file.seek(0, os.SEEK_END)
     if lock_file.tell() == 0:
         lock_file.write(b"\0")
@@ -94,7 +104,10 @@ def _lock_database_file(lock_file, *, blocking: bool) -> bool:
     if os.name == "nt":
         import msvcrt
 
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        if exclusive:
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        else:
+            mode = msvcrt.LK_RLCK if blocking else msvcrt.LK_NBRLCK
         try:
             msvcrt.locking(lock_file.fileno(), mode, 1)
         except OSError:
@@ -103,7 +116,7 @@ def _lock_database_file(lock_file, *, blocking: bool) -> bool:
 
     import fcntl
 
-    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    flags = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | (0 if blocking else fcntl.LOCK_NB)
     try:
         fcntl.flock(lock_file.fileno(), flags)
     except OSError:
@@ -138,7 +151,7 @@ def _database_use(database_path: Path, *, blocking: bool = True) -> Iterator[Non
         database_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = database_path.with_name(database_path.name + ".lock")
         lock_file = lock_path.open("a+b")
-        locked = _lock_database_file(lock_file, blocking=blocking)
+        locked = _lock_database_file(lock_file, blocking=blocking, exclusive=True)
         if not locked:
             raise PromptIndexInUse("prompt index is currently in use by another process")
         with _database_locks_lock:
@@ -161,6 +174,64 @@ def _database_use(database_path: Path, *, blocking: bool = True) -> Iterator[Non
                 else:
                     _database_active_counts[key] = active_count - 1
         local_lock.release()
+
+
+@contextmanager
+def _database_read(database_path: Path, *, blocking: bool = True) -> Iterator[None]:
+    database_path = database_path.expanduser().resolve(strict=False)
+    setup_lock = _database_read_setup_lock(database_path)
+    lock_file = None
+    registered = False
+    key = _database_key(database_path)
+    try:
+        if not setup_lock.acquire(blocking=blocking):
+            raise PromptIndexInUse("prompt index read handle is currently being prepared")
+        try:
+            with _database_locks_lock:
+                current_handle = _database_read_handles.get(key)
+            if current_handle is None:
+                lock_path = database_path.with_name(database_path.name + ".lock")
+                lock_file = lock_path.open("a+b")
+                if not _lock_database_file(lock_file, blocking=blocking, exclusive=False):
+                    lock_file.close()
+                    lock_file = None
+                    raise PromptIndexInUse("prompt index is currently being rebuilt by another process")
+            with _database_locks_lock:
+                if current_handle is None:
+                    _database_read_handles[key] = (lock_file, 1)
+                else:
+                    _database_read_handles[key] = (current_handle[0], current_handle[1] + 1)
+                _database_active_counts[key] = _database_active_counts.get(key, 0) + 1
+        finally:
+            setup_lock.release()
+        registered = True
+        yield
+    finally:
+        if registered:
+            setup_lock.acquire()
+            try:
+                lock_file_to_close = None
+                with _database_locks_lock:
+                    current_handle = _database_read_handles.get(key)
+                    if current_handle is not None:
+                        if current_handle[1] <= 1:
+                            lock_file_to_close = current_handle[0]
+                            _database_read_handles.pop(key, None)
+                        else:
+                            _database_read_handles[key] = (current_handle[0], current_handle[1] - 1)
+                    active_count = _database_active_counts.get(key, 0)
+                    if active_count <= 1:
+                        _database_active_counts.pop(key, None)
+                    else:
+                        _database_active_counts[key] = active_count - 1
+                if lock_file_to_close is not None:
+                    try:
+                        _unlock_database_file(lock_file_to_close)
+                    except OSError:
+                        pass
+                    lock_file_to_close.close()
+            finally:
+                setup_lock.release()
 
 
 def _database_active_count(database_path: Path) -> int:
@@ -261,6 +332,8 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         # local cache that can always be regenerated from the rollout JSONL.
         connection.executescript(
             """
+            DROP TABLE IF EXISTS timeline_search_fts;
+            DROP TABLE IF EXISTS prompt_search_fts;
             DROP TABLE IF EXISTS timeline_events;
             DROP TABLE IF EXISTS prompts;
             DROP TABLE IF EXISTS prompt_files;
@@ -339,6 +412,19 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS timeline_events_file_order_idx ON timeline_events(file_id, event_index);
         CREATE INDEX IF NOT EXISTS timeline_events_file_kind_idx ON timeline_events(file_id, kind, event_index);
+        CREATE VIRTUAL TABLE IF NOT EXISTS prompt_search_fts USING fts5(
+            file_id UNINDEXED,
+            prompt_index UNINDEXED,
+            search_text,
+            pure_search_text,
+            tokenize='trigram'
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS timeline_search_fts USING fts5(
+            file_id UNINDEXED,
+            event_index UNINDEXED,
+            search_text,
+            tokenize='trigram'
+        );
         CREATE TABLE IF NOT EXISTS prompt_index_metadata (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
             last_accessed_ns INTEGER NOT NULL
@@ -355,7 +441,39 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         (time.time_ns(),),
     )
     connection.commit()
+    if previous_schema_version != prompt_index_schema_version:
+        # Schema changes rebuild this derived cache from the rollout. Reclaim
+        # pages left by the old FTS tables immediately so a smaller index does
+        # not retain the previous multi-gigabyte file allocation.
+        connection.execute("VACUUM")
     return connection
+
+
+def _connect_read_only(database_path: Path) -> sqlite3.Connection:
+    uri = database_path.expanduser().resolve(strict=False).as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30.0)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA busy_timeout=30000")
+    return connection
+
+
+@contextmanager
+def _cancelable_query(
+    connection: sqlite3.Connection,
+    cancel_check: Callable[[], bool] | None,
+) -> Iterator[None]:
+    if cancel_check is not None:
+        connection.set_progress_handler(lambda: 1 if cancel_check() else 0, 1_000)
+    try:
+        yield
+    except sqlite3.OperationalError as error:
+        if cancel_check is not None and (cancel_check() or "interrupted" in str(error).lower()):
+            raise PromptIndexCancelled("prompt search was cancelled") from error
+        raise
+    finally:
+        if cancel_check is not None:
+            connection.set_progress_handler(None, 0)
 
 
 def _file_identity(stat_result: os.stat_result) -> tuple[str, str, int]:
@@ -417,6 +535,8 @@ def _reset_file_index(
             ),
         )
     else:
+        connection.execute("DELETE FROM prompt_search_fts WHERE file_id = ?", (int(existing_row["id"]),))
+        connection.execute("DELETE FROM timeline_search_fts WHERE file_id = ?", (int(existing_row["id"]),))
         connection.execute("DELETE FROM prompts WHERE file_id = ?", (int(existing_row["id"]),))
         connection.execute("DELETE FROM timeline_events WHERE file_id = ?", (int(existing_row["id"]),))
         connection.execute(
@@ -485,20 +605,21 @@ def _prepare_file_index(connection: sqlite3.Connection, rollout_path: Path) -> t
     return row, reset
 
 
-def _scope_clause(scope: str) -> tuple[str, list[Any]]:
+def _scope_clause(scope: str, table_alias: str = "") -> tuple[str, list[Any]]:
     normalized_scope = (scope or "visible").strip().lower()
+    prefix = f"{table_alias}." if table_alias else ""
     if normalized_scope in {"pure", "text", "user_text", "user-text"}:
-        return "has_pure_text = 1", []
+        return f"{prefix}has_pure_text = 1", []
     if normalized_scope == "all":
         return "1 = 1", []
     if normalized_scope in {"automation", "automations", "heartbeat", "heartbeats"}:
-        return "source_type = ?", ["automation"]
+        return f"{prefix}source_type = ?", ["automation"]
     if normalized_scope in {"delegation", "delegations", "thread_delegation", "thread-delegation", "handoff", "handoffs"}:
-        return "source_type = ?", ["delegation"]
+        return f"{prefix}source_type = ?", ["delegation"]
     if normalized_scope in {"with_agents", "with-agent", "with_agents_and_user", "agents"}:
-        return "(visible_by_default = 1 OR source_type = 'subagent')", []
+        return f"({prefix}visible_by_default = 1 OR {prefix}source_type = 'subagent')", []
     if normalized_scope == "visible":
-        return "visible_by_default = 1", []
+        return f"{prefix}visible_by_default = 1", []
     raise ValueError(f"unsupported prompt scope: {scope}")
 
 
@@ -532,17 +653,20 @@ def _prompt_from_row_with_budget(
         excerpt, truncated = _search_result_excerpt(text, normalized_query, byte_limit)
         item["text"] = excerpt
         item["pureText"] = excerpt
-        item["textTruncated"] = truncated
-        item["pureTextTruncated"] = truncated
+        source_truncated = int(item["characterCount"]) > len(text)
+        item["textTruncated"] = source_truncated or truncated
+        item["pureTextTruncated"] = int(item["pureCharacterCount"]) > len(pure_text) or truncated
         return item
     text_budget = max(1, byte_limit // 2)
     pure_budget = max(1, byte_limit - text_budget)
-    item["text"], item["textTruncated"] = _search_result_excerpt(text, normalized_query, text_budget)
-    item["pureText"], item["pureTextTruncated"] = _search_result_excerpt(
+    item["text"], text_excerpt_truncated = _search_result_excerpt(text, normalized_query, text_budget)
+    item["textTruncated"] = int(item["characterCount"]) > len(text) or text_excerpt_truncated
+    item["pureText"], pure_excerpt_truncated = _search_result_excerpt(
         pure_text,
         normalized_query,
         pure_budget,
     )
+    item["pureTextTruncated"] = int(item["pureCharacterCount"]) > len(pure_text) or pure_excerpt_truncated
     return item
 
 
@@ -567,6 +691,7 @@ def redacted_jsonl_record_bytes(
     escaped = False
     string_truncated = False
     redacting_data_url = False
+    redact_data_url_until_string_end = False
     string_character_count = 0
     string_escape_mode = ""
     unicode_escape_digits = bytearray()
@@ -663,6 +788,7 @@ def redacted_jsonl_record_bytes(
                         escaped = False
                         string_truncated = False
                         redacting_data_url = False
+                        redact_data_url_until_string_end = False
                         string_character_count = 0
                         string_escape_mode = ""
                         unicode_escape_digits.clear()
@@ -680,28 +806,35 @@ def redacted_jsonl_record_bytes(
                         return None
                     inside_string = False
                     redacting_data_url = False
+                    redact_data_url_until_string_end = False
                     continue
 
                 count_string_byte(byte_value)
                 if redacting_data_url:
-                    if byte_value in b" \t\r\n":
+                    if not redact_data_url_until_string_end and byte_value in b" \t\r\n":
                         for replacement_byte in prompt_index_redacted_attachment:
                             append_string_byte(replacement_byte)
                         append_string_byte(byte_value)
                         redacting_data_url = False
+                    if byte_value == 92 and not escaped:
+                        escaped = True
+                    else:
+                        escaped = False
                     continue
 
                 append_string_byte(byte_value)
                 if byte_value == 44 and not string_truncated:
                     probe_start = max(0, len(string_buffer) - 206)
                     marker_match = re.search(
-                        rb"data:[^,\s\"]{1,200},$",
+                        rb"data:([^,\s\"]{0,200}),$",
                         bytes(string_buffer[probe_start:]),
                         flags=re.IGNORECASE,
                     )
                     if marker_match is not None:
                         del string_buffer[probe_start + marker_match.start():]
                         redacting_data_url = True
+                        header = marker_match.group(1).lower()
+                        redact_data_url_until_string_end = b";base64" not in header
                 if byte_value == 92 and not escaped:
                     escaped = True
                 else:
@@ -797,12 +930,12 @@ def update_prompt_index(
         ) if include_timeline else 0
         recent_event_rows = connection.execute(
             """
-            SELECT byte_offset, kind, text, source_type, timestamp_ms
+            SELECT byte_offset, kind, text, source_type, timestamp_ms, event_index
             FROM timeline_events WHERE file_id = ? ORDER BY event_index DESC LIMIT 512
             """,
             (int(row["id"]),),
         ).fetchall() if include_timeline else []
-        recent_timeline_events: dict[str, list[tuple[int, str, str, int]]] = {}
+        recent_timeline_events: dict[str, list[tuple[int, str, str, int, int]]] = {}
         for item in reversed(recent_event_rows):
             recent_timeline_events.setdefault(str(item["kind"]), []).append(
                 (
@@ -810,6 +943,7 @@ def update_prompt_index(
                     str(item["text"]).strip(),
                     str(item["source_type"]),
                     int(item["timestamp_ms"] or 0),
+                    int(item["event_index"]),
                 )
             )
         scanned_offset = scan_start_offset
@@ -835,6 +969,13 @@ def update_prompt_index(
                     """,
                     batch_records,
                 )
+                connection.executemany(
+                    """
+                    INSERT INTO prompt_search_fts(file_id, prompt_index, search_text, pure_search_text)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    ((record[0], record[1], record[8], record[14]) for record in batch_records),
+                )
             if batch_event_records:
                 connection.executemany(
                     """
@@ -845,6 +986,13 @@ def update_prompt_index(
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     batch_event_records,
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO timeline_search_fts(file_id, event_index, search_text)
+                    VALUES (?, ?, ?)
+                    """,
+                    ((record[0], record[1], record[9]) for record in batch_event_records),
                 )
             current_stat = os.fstat(file.fileno())
             connection.execute(
@@ -902,19 +1050,29 @@ def update_prompt_index(
                 paused_mid_line = False
                 while True:
                     _check_cancelled(cancel_check)
+                    chunk_start = file.tell()
                     chunk = file.readline(prompt_index_scan_chunk_bytes)
                     if not chunk:
                         break
-                    if not direct_line_overflow:
-                        if len(direct_line_buffer) + len(chunk) <= prompt_index_direct_candidate_bytes:
-                            direct_line_buffer.extend(chunk)
-                        else:
-                            direct_line_buffer.clear()
-                            direct_line_overflow = True
+                    was_candidate = candidate_line
                     if not candidate_line:
                         candidate_probe = candidate_probe_tail + chunk
                         candidate_line = candidate_check(candidate_probe)
                         candidate_probe_tail = candidate_probe[-prompt_index_candidate_overlap_bytes:]
+                    if candidate_line and not direct_line_overflow:
+                        # Non-candidate rollout records dominate large files.
+                        # Avoid copying them into a second buffer merely to
+                        # discard them. A marker found after the first chunk
+                        # falls back to one bounded reread of the complete line.
+                        marker_found_after_unbuffered_prefix = not was_candidate and chunk_start != line_start
+                        if marker_found_after_unbuffered_prefix:
+                            direct_line_buffer.clear()
+                            direct_line_overflow = True
+                        elif len(direct_line_buffer) + len(chunk) <= prompt_index_direct_candidate_bytes:
+                            direct_line_buffer.extend(chunk)
+                        else:
+                            direct_line_buffer.clear()
+                            direct_line_overflow = True
                     if chunk.endswith(b"\n"):
                         line_has_newline = True
                         break
@@ -934,15 +1092,26 @@ def update_prompt_index(
                     break
                 raw_line: bytes | None = None
                 if candidate_line:
-                    if not direct_line_overflow:
-                        direct_line = bytes(direct_line_buffer)
+                    if not direct_line_overflow or line_end - line_start <= prompt_index_direct_candidate_bytes:
+                        if direct_line_overflow:
+                            file.seek(line_start)
+                            direct_line = file.read(line_end - line_start)
+                            file.seek(line_end)
+                        else:
+                            direct_line = bytes(direct_line_buffer)
                         raw_line = (
                             redacted_jsonl_record_bytes(file, line_start, line_end, cancel_check)
                             if b"data:" in direct_line.lower()
                             else direct_line
                         )
                     else:
-                        raw_line = redacted_jsonl_record_bytes(file, line_start, line_end, cancel_check)
+                            raw_line = redacted_jsonl_record_bytes(
+                                file,
+                                line_start,
+                                line_end,
+                                cancel_check,
+                                include_truncation_metadata=True,
+                            )
                 parsed_item: dict[str, Any] | None = None
                 if raw_line is not None:
                     try:
@@ -962,14 +1131,55 @@ def update_prompt_index(
                     if include_timeline and extract_timeline_event is not None:
                         timeline_event = extract_timeline_event(parsed_item, line_start)
                         if timeline_event is not None:
+                            event_text = str(timeline_event.get("text") or "")
+                            event_kind = str(timeline_event.get("kind") or "status")
+                            event_source_type = str(timeline_event.get("sourceType") or "")
+                            event_timestamp_ms = int(timeline_event.get("timestampMs") or 0)
+                            event_history = recent_timeline_events.setdefault(event_kind, [])
+                            superseded_event_indices: list[int] = []
+                            for prior_record in event_history:
+                                prior_offset, prior_text, prior_source_type, prior_timestamp_ms, prior_event_index = prior_record
+                                if prior_source_type == event_source_type or not prior_text or not event_text:
+                                    continue
+                                near_in_time = (
+                                    event_timestamp_ms > 0
+                                    and prior_timestamp_ms > 0
+                                    and abs(event_timestamp_ms - prior_timestamp_ms) <= 2_000
+                                )
+                                near_in_file = (
+                                    not event_timestamp_ms
+                                    and not prior_timestamp_ms
+                                    and abs(prior_offset - line_start) < 1_000_000
+                                )
+                                if (
+                                    (near_in_time or near_in_file)
+                                    and len(event_text.strip()) > len(prior_text)
+                                    and event_text.strip().startswith(prior_text)
+                                ):
+                                    superseded_event_indices.append(prior_event_index)
+                            if superseded_event_indices:
+                                superseded_set = set(superseded_event_indices)
+                                batch_event_records[:] = [
+                                    record for record in batch_event_records if int(record[1]) not in superseded_set
+                                ]
+                                placeholders = ",".join("?" for _ in superseded_event_indices)
+                                connection.execute(
+                                    f"DELETE FROM timeline_search_fts WHERE file_id = ? AND CAST(event_index AS INTEGER) IN ({placeholders})",
+                                    [int(row["id"]), *superseded_event_indices],
+                                )
+                                connection.execute(
+                                    f"DELETE FROM timeline_events WHERE file_id = ? AND event_index IN ({placeholders})",
+                                    [int(row["id"]), *superseded_event_indices],
+                                )
+                                event_history[:] = [
+                                    record for record in event_history if int(record[4]) not in superseded_set
+                                ]
                             duplicate_event = bool(
                                 is_timeline_duplicate
                                 and is_timeline_duplicate(timeline_event, recent_timeline_events)
                             )
                             if not duplicate_event:
                                 event_index += 1
-                                event_text = str(timeline_event.get("text") or "")
-                                event_kind = str(timeline_event.get("kind") or "status")
                                 batch_event_records.append(
                                     (
                                         int(row["id"]),
@@ -981,10 +1191,7 @@ def update_prompt_index(
                                         event_kind,
                                         str(timeline_event.get("label") or event_kind),
                                         event_text,
-                                        normalize_search_text("\n".join(
-                                            str(timeline_event.get(key) or "")
-                                            for key in ("kind", "label", "text", "callId")
-                                        )),
+                                        normalize_search_text(event_text),
                                         len(event_text),
                                         str(timeline_event.get("sourceType") or ""),
                                         str(timeline_event.get("payloadType") or ""),
@@ -996,13 +1203,13 @@ def update_prompt_index(
                                         str(timeline_event.get("promptSourceType") or ""),
                                     )
                                 )
-                                event_history = recent_timeline_events.setdefault(event_kind, [])
                                 event_history.append(
                                     (
                                         line_start,
                                         event_text.strip(),
-                                        str(timeline_event.get("sourceType") or ""),
-                                        int(timeline_event.get("timestampMs") or 0),
+                                        event_source_type,
+                                        event_timestamp_ms,
+                                        event_index,
                                     )
                                 )
                                 if len(event_history) > 256:
@@ -1015,6 +1222,7 @@ def update_prompt_index(
                         if text and not is_duplicate(text, timestamp, protocol, line_number, recent_prompts):
                             prompt_index += 1
                             classification = classify_prompt(text)
+                            text = str(classification.get("text") or text)
                             pure_text = str(classification.get("pureText") or "")
                             batch_records.append(
                                 (
@@ -1027,7 +1235,7 @@ def update_prompt_index(
                                     protocol,
                                     text,
                                     normalize_search_text(text),
-                                    len(text),
+                                    int(classification.get("characterCount") or len(text)),
                                     str(classification.get("sourceType") or "user"),
                                     str(classification.get("sourceLabel") or "用户输入"),
                                     int(classification.get("visibleByDefault") is not False),
@@ -1135,6 +1343,19 @@ def _query_signature(scope: str, search: str, source_type: str | None) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
 
+def _fts_literal(normalized_query: str, column: str) -> str:
+    escaped_query = normalized_query.replace('"', '""')
+    return f'{column} : "{escaped_query}"'
+
+
+def _use_trigram_index(normalized_query: str) -> bool:
+    return len(normalized_query) >= 3
+
+
+def _prompt_search_column(scope: str) -> str:
+    return "pure_search_text" if (scope or "").strip().lower() in {"pure", "text", "user_text", "user-text"} else "search_text"
+
+
 def read_prompt_page(
     database_path: Path,
     rollout_path: Path,
@@ -1145,10 +1366,13 @@ def read_prompt_page(
     cursor: str | None,
     limit: int,
     index_state: dict[str, Any],
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     safe_limit = max(1, min(500, int(limit)))
-    scope_sql, scope_parameters = _scope_clause(scope)
+    scope_sql, scope_parameters = _scope_clause(scope, "p")
     normalized_search = normalize_search_text(search.strip())
+    search_column = _prompt_search_column(scope)
+    use_fts = bool(normalized_search and _use_trigram_index(normalized_search))
     query_signature = _query_signature(scope, search, source_type)
     after_index = 0
     if cursor:
@@ -1160,21 +1384,31 @@ def read_prompt_page(
         after_index = max(0, int(cursor_payload.get("after") or 0))
 
     path_text = str(rollout_path.expanduser().resolve(strict=False))
-    with _database_use(database_path), closing(_connect(database_path)) as connection:
+    with _database_read(database_path), closing(_connect_read_only(database_path)) as connection, _cancelable_query(connection, cancel_check):
         file_row = connection.execute("SELECT * FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             raise RuntimeError("prompt index metadata is missing")
-        clauses = ["file_id = ?", "prompt_index > ?", scope_sql]
+        clauses = ["p.file_id = ?", "p.prompt_index > ?", scope_sql]
         parameters: list[Any] = [int(file_row["id"]), after_index, *scope_parameters]
         if source_type:
-            clauses.append("source_type = ?")
+            clauses.append("p.source_type = ?")
             parameters.append(source_type)
         if normalized_search:
-            clauses.append("(instr(search_text, ?) > 0 OR instr(pure_search_text, ?) > 0)")
-            parameters.extend([normalized_search, normalized_search])
+            if use_fts:
+                clauses.append("prompt_search_fts MATCH ?")
+                parameters.append(_fts_literal(normalized_search, search_column))
+            else:
+                clauses.append(f"instr(p.{search_column}, ?) > 0")
+                parameters.append(normalized_search)
         where_sql = " AND ".join(f"({clause})" for clause in clauses)
+        from_sql = "prompts AS p"
+        if use_fts:
+            from_sql += (
+                " JOIN prompt_search_fts AS f ON CAST(f.file_id AS INTEGER) = p.file_id"
+                " AND CAST(f.prompt_index AS INTEGER) = p.prompt_index"
+            )
         row_cursor = connection.execute(
-            f"SELECT * FROM prompts WHERE {where_sql} ORDER BY prompt_index LIMIT ?",
+            f"SELECT p.* FROM {from_sql} WHERE {where_sql} ORDER BY p.prompt_index LIMIT ?",
             (*parameters, safe_limit + 1),
         )
         prompts: list[dict[str, Any]] = []
@@ -1202,17 +1436,21 @@ def read_prompt_page(
             next_cursor = _encode_cursor(
                 {"generation": index_state["generation"], "query": query_signature, "after": last_index}
             )
-        count_clauses = ["file_id = ?", scope_sql]
+        count_clauses = ["p.file_id = ?", scope_sql]
         count_parameters: list[Any] = [int(file_row["id"]), *scope_parameters]
         if source_type:
-            count_clauses.append("source_type = ?")
+            count_clauses.append("p.source_type = ?")
             count_parameters.append(source_type)
         if normalized_search:
-            count_clauses.append("(instr(search_text, ?) > 0 OR instr(pure_search_text, ?) > 0)")
-            count_parameters.extend([normalized_search, normalized_search])
+            if use_fts:
+                count_clauses.append("prompt_search_fts MATCH ?")
+                count_parameters.append(_fts_literal(normalized_search, search_column))
+            else:
+                count_clauses.append(f"instr(p.{search_column}, ?) > 0")
+                count_parameters.append(normalized_search)
         match_count = int(
             connection.execute(
-                f"SELECT COUNT(*) FROM prompts WHERE {' AND '.join(f'({clause})' for clause in count_clauses)}",
+                f"SELECT COUNT(*) FROM {from_sql} WHERE {' AND '.join(f'({clause})' for clause in count_clauses)}",
                 count_parameters,
             ).fetchone()[0]
         )
@@ -1316,10 +1554,12 @@ def read_timeline_search_page(
     cursor: str | None,
     limit: int,
     index_state: dict[str, Any],
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     safe_limit = max(1, min(200, int(limit)))
     kind_sql, kind_parameters = _timeline_kind_clause(kind)
     normalized_search = normalize_search_text(search.strip())
+    use_fts = bool(normalized_search and _use_trigram_index(normalized_search))
     query_signature = hashlib.sha256(
         json.dumps(
             {"kind": (kind or "conversation").strip().lower(), "search": normalized_search},
@@ -1338,18 +1578,29 @@ def read_timeline_search_page(
         after_index = max(0, int(cursor_payload.get("after") or 0))
 
     path_text = str(rollout_path.expanduser().resolve(strict=False))
-    with _database_use(database_path), closing(_connect(database_path)) as connection:
+    with _database_read(database_path), closing(_connect_read_only(database_path)) as connection, _cancelable_query(connection, cancel_check):
         file_row = connection.execute("SELECT id FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             raise RuntimeError("timeline index metadata is unavailable")
-        clauses = ["file_id = ?", "event_index > ?", kind_sql]
+        qualified_kind_sql = kind_sql.replace("kind", "e.kind")
+        clauses = ["e.file_id = ?", "e.event_index > ?", qualified_kind_sql]
         parameters: list[Any] = [int(file_row["id"]), after_index, *kind_parameters]
         if normalized_search:
-            clauses.append("instr(search_text, ?) > 0")
-            parameters.append(normalized_search)
+            if use_fts:
+                clauses.append("timeline_search_fts MATCH ?")
+                parameters.append(_fts_literal(normalized_search, "search_text"))
+            else:
+                clauses.append("instr(e.search_text, ?) > 0")
+                parameters.append(normalized_search)
         where_sql = " AND ".join(f"({clause})" for clause in clauses)
+        from_sql = "timeline_events AS e"
+        if use_fts:
+            from_sql += (
+                " JOIN timeline_search_fts AS f ON CAST(f.file_id AS INTEGER) = e.file_id"
+                " AND CAST(f.event_index AS INTEGER) = e.event_index"
+            )
         row_cursor = connection.execute(
-            f"SELECT * FROM timeline_events WHERE {where_sql} ORDER BY event_index LIMIT ?",
+            f"SELECT e.* FROM {from_sql} WHERE {where_sql} ORDER BY e.event_index LIMIT ?",
             [*parameters, safe_limit + 1],
         )
         events: list[dict[str, Any]] = []
@@ -1376,12 +1627,16 @@ def read_timeline_search_page(
                 {"generation": index_state["generation"], "query": query_signature, "after": last_index}
             )
         count_parameters: list[Any] = [int(file_row["id"]), *kind_parameters]
-        count_clauses = ["file_id = ?", kind_sql]
+        count_clauses = ["e.file_id = ?", qualified_kind_sql]
         if normalized_search:
-            count_clauses.append("instr(search_text, ?) > 0")
-            count_parameters.append(normalized_search)
+            if use_fts:
+                count_clauses.append("timeline_search_fts MATCH ?")
+                count_parameters.append(_fts_literal(normalized_search, "search_text"))
+            else:
+                count_clauses.append("instr(e.search_text, ?) > 0")
+                count_parameters.append(normalized_search)
         match_count = int(connection.execute(
-            f"SELECT COUNT(*) FROM timeline_events WHERE {' AND '.join(f'({clause})' for clause in count_clauses)}",
+            f"SELECT COUNT(*) FROM {from_sql} WHERE {' AND '.join(f'({clause})' for clause in count_clauses)}",
             count_parameters,
         ).fetchone()[0])
     return {
@@ -1431,23 +1686,35 @@ def iter_prompt_records(
     fetch_size: int = 128,
     cancel_check: Callable[[], bool] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    scope_sql, scope_parameters = _scope_clause(scope)
-    clauses = ["file_id = ?", scope_sql]
+    scope_sql, scope_parameters = _scope_clause(scope, "p")
+    clauses = ["p.file_id = ?", scope_sql]
     path_text = str(rollout_path.expanduser().resolve(strict=False))
-    with _database_use(database_path), closing(_connect(database_path)) as connection:
+    with _database_read(database_path), closing(_connect_read_only(database_path)) as connection, _cancelable_query(connection, cancel_check):
         file_row = connection.execute("SELECT id FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             return
         parameters: list[Any] = [int(file_row["id"]), *scope_parameters]
         if source_type:
-            clauses.append("source_type = ?")
+            clauses.append("p.source_type = ?")
             parameters.append(source_type)
         normalized_search = normalize_search_text(search.strip())
+        search_column = _prompt_search_column(scope)
+        use_fts = bool(normalized_search and _use_trigram_index(normalized_search))
         if normalized_search:
-            clauses.append("(instr(search_text, ?) > 0 OR instr(pure_search_text, ?) > 0)")
-            parameters.extend([normalized_search, normalized_search])
+            if use_fts:
+                clauses.append("prompt_search_fts MATCH ?")
+                parameters.append(_fts_literal(normalized_search, search_column))
+            else:
+                clauses.append(f"instr(p.{search_column}, ?) > 0")
+                parameters.append(normalized_search)
+        from_sql = "prompts AS p"
+        if use_fts:
+            from_sql += (
+                " JOIN prompt_search_fts AS f ON CAST(f.file_id AS INTEGER) = p.file_id"
+                " AND CAST(f.prompt_index AS INTEGER) = p.prompt_index"
+            )
         cursor = connection.execute(
-            f"SELECT * FROM prompts WHERE {' AND '.join(f'({clause})' for clause in clauses)} ORDER BY prompt_index",
+            f"SELECT p.* FROM {from_sql} WHERE {' AND '.join(f'({clause})' for clause in clauses)} ORDER BY p.prompt_index",
             parameters,
         )
         while True:

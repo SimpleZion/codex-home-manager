@@ -1,0 +1,2 @@
+[mcp_servers.codex_thread_messenger]
+command = "legacy.exe"

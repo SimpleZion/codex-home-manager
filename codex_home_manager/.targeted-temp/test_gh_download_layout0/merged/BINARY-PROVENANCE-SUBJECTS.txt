@@ -1,0 +1,3 @@
+5070e2652720a600dc69cf64a737c1c4693dfc237daaec0879de9acafa3219dc *codex-home-manager-local-win-x64-v1.0.9-5070e2652720.zip
+cd6afe63162139cd98c82097dc2ab7a4574926513e2aa10f5a23bbfb43db0e11 *codex-home-manager-local-win-x64-v1.0.9-cd6afe631621.exe
+3e5979e8ed8bfc8a32e9dbc70906b97c7cbd91f7b9a73c6a930901f844a7e42f *codex-home-manager-windows-x64-dddddddddddddddddddddddddddddddddddddddd.cdx.json

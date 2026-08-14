@@ -102,8 +102,10 @@ def test_packaging_recreates_and_audits_public_node_dependencies_from_lock() -> 
     script = package_script_path.read_text(encoding="utf-8")
 
     assert "$releaseNpmPath ci --ignore-scripts" in script
-    assert "$releaseNpmPath audit --audit-level=high" in script
-    assert "$releaseNpmPath run check" in script
+    assert "$releaseNpmPath audit --audit-level=high --omit=optional" in script
+    assert "$releaseNpmPath test" in script
+    assert "--root $publicValidationRoot" in script
+    assert "--release" in script
 
 
 def test_packaging_selects_a_complete_node_22_or_newer_toolchain() -> None:
@@ -143,7 +145,7 @@ def test_packaging_requires_attested_source_ci_evidence_before_public_checks() -
     assert "prepare-source-evidence" in script
     assert "source-release-evidence.json" in script
     assert "codex-home-manager-source.cdx.json" in script
-    assert script.index("prepare-source-evidence") < script.index("$releaseNpmPath run check")
+    assert script.index("prepare-source-evidence") < script.index("$releaseNpmPath test")
 
 
 def test_release_consumes_same_commit_windows_ci_outputs_without_a_local_rebuild() -> None:
@@ -156,11 +158,11 @@ def test_release_consumes_same_commit_windows_ci_outputs_without_a_local_rebuild
     assert "windows-*-attestation.sigstore.json" in script
     ci_branch = script.index('if ($PSCmdlet.ParameterSetName -eq "CiBuild") {', script.index("quality_gate.py"))
     ci_build = script.index('$firstBuild = Invoke-IsolatedConnectorBuild -BuildName "build-1"', ci_branch)
-    ci_sign = script.index("Invoke-AuthenticodePolicy -Path $directExecutablePath", ci_build)
+    ci_sign = script.index("Invoke-AuthenticodePolicy -Path $firstBuild.Exe", ci_build)
     release_evidence = script.index("prepare-windows-evidence", ci_sign)
     assert ci_branch < ci_build < ci_sign < release_evidence
     assert "Assert-CiAuthenticodeEvidence" in script
-    assert script.index("prepare-windows-evidence") < script.index("$releaseNpmPath run check")
+    assert script.index("prepare-windows-evidence") < script.index("$releaseNpmPath test")
 
 
 def test_packaging_requires_two_reproducible_isolated_builds_and_canonical_zip() -> None:
@@ -195,30 +197,37 @@ def test_packaging_black_box_tests_the_final_executable_on_a_random_port() -> No
     assert "Get-RandomLoopbackPort" in script
 
 
-def test_packaging_fails_fast_when_the_release_executable_is_locked() -> None:
+def test_packaging_checks_the_stable_executable_only_at_transactional_publish() -> None:
     script = package_script_path.read_text(encoding="utf-8")
 
     assert "Assert-ReleaseDestinationAvailable" in script
     assert "[System.IO.FileShare]::None" in script
-    assert script.index("Assert-ReleaseDestinationAvailable -Path $directExecutablePath") < script.index(
-        '& python "scripts\\quality_gate.py"'
+    assert "Publish-StagedReleaseSet" in script
+    assert 'Join-Path $StableReleaseDirectory "codex-home-manager-local-win-x64.exe"' in script
+    assert script.index("Stop-VerifiedReleaseDestinationProcesses -Path (Join-Path $StableReleaseDirectory") > script.index(
+        "function Publish-StagedReleaseSet"
     )
 
 
-def test_packaging_stops_only_verified_old_connector_processes_before_final_copy() -> None:
+def test_ci_packaging_never_mutates_the_stable_release_directory() -> None:
     script = package_script_path.read_text(encoding="utf-8")
 
     assert "Stop-VerifiedReleaseDestinationProcesses" in script
     assert "ExecutablePath" in script
     assert "Stop-Process -Id $process.ProcessId -Force" in script
     ci_branch = script.index('if ($PSCmdlet.ParameterSetName -eq "CiBuild") {', script.index("quality_gate.py"))
-    stop_call = script.index("Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath", ci_branch)
-    final_copy = script.index("Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force", ci_branch)
-    compare_builds = script.index("compare-builds")
-    assert compare_builds < stop_call < final_copy
+    ci_end = script.index("\n    & python $releaseManifestScript prepare-windows-evidence", ci_branch)
+    ci_text = script[ci_branch:ci_end]
+    assert "Stop-VerifiedReleaseDestinationProcesses" not in ci_text
+    assert "-Destination $directExecutablePath" not in ci_text
+    assert "-Destination $archivePath" not in ci_text
+    assert "Copy-Item -LiteralPath $firstBuild.Exe -Destination $ciExecutablePath -Force" in ci_text
+    assert "Copy-Item -LiteralPath $firstBuild.Zip -Destination $ciArchivePath -Force" in ci_text
     release_prepare = script.index("prepare-windows-evidence")
-    release_stop = script.rindex("Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath", 0, release_prepare)
-    assert release_stop < release_prepare
+    release_publish = script.index("Publish-StagedReleaseSet `", release_prepare)
+    assert release_prepare < release_publish
+    assert '$stableReleaseRoot = Join-Path $appDirectory "build\\releases"' in script
+    assert '$releaseRoot = if ($PSCmdlet.ParameterSetName -eq "Release") { Join-Path $publicationStageRoot "release" }' in script
 
 
 def test_packaging_retires_stale_signed_metadata_before_public_release_checks() -> None:
@@ -227,8 +236,19 @@ def test_packaging_retires_stale_signed_metadata_before_public_release_checks() 
     assert '$staleSignedMetadataNames = @("release-manifest.json", "release-manifest.json.sig")' in script
     assert "SendToRecycleBin" in script
     retire_metadata = script.index("$staleSignedMetadataNames")
-    public_check = script.index("$releaseNpmPath run check")
+    public_check = script.index("$releaseNpmPath test")
     assert retire_metadata < public_check
+
+
+def test_release_publishes_only_after_staged_public_boundary_and_source_drift_checks() -> None:
+    script = package_script_path.read_text(encoding="utf-8")
+
+    staged_boundary = script.index("--root $publicValidationRoot")
+    source_drift = script.rindex("validate-build-source")
+    publish = script.index("Publish-StagedReleaseSet `", source_drift)
+    assert staged_boundary < source_drift < publish
+    assert "release-rollback" in script
+    assert "site-rollback" in script
 
 
 def test_packaging_syncs_and_verifies_public_dist_before_release_metadata() -> None:

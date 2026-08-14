@@ -1,0 +1,36 @@
+{
+  "backupId": "20260815_011851_787265_resource_backup_memories-portable-resource",
+  "createdAt": "2026-08-14T17:18:51.799635+00:00",
+  "codexHome": "C:\\ZionCloudDrive\\CodexProject\\Codex\\.tmp\\source-worktree-20260815-010503\\codex_home_manager\\.targeted-temp\\test_portable_backup_restores_0\\source-resource\\codex_home",
+  "databasePath": "C:\\ZionCloudDrive\\CodexProject\\Codex\\.tmp\\source-worktree-20260815-010503\\codex_home_manager\\.targeted-temp\\test_portable_backup_restores_0\\source-resource\\codex_home\\state_5.sqlite",
+  "threadId": null,
+  "action": "resource_backup",
+  "subject": "memories\\portable-resource",
+  "databaseBackupPath": "C:\\ZionCloudDrive\\CodexProject\\Codex\\.tmp\\source-worktree-20260815-010503\\codex_home_manager\\.targeted-temp\\test_portable_backup_restores_0\\backups\\20260815_011851_787265_resource_backup_memories-portable-resource\\state_5.sqlite.before",
+  "globalStateBackupPath": "C:\\ZionCloudDrive\\CodexProject\\Codex\\.tmp\\source-worktree-20260815-010503\\codex_home_manager\\.targeted-temp\\test_portable_backup_restores_0\\backups\\20260815_011851_787265_resource_backup_memories-portable-resource\\.codex-global-state.json.before",
+  "globalStateBakBackupPath": null,
+  "configBackupPath": "C:\\ZionCloudDrive\\CodexProject\\Codex\\.tmp\\source-worktree-20260815-010503\\codex_home_manager\\.targeted-temp\\test_portable_backup_restores_0\\backups\\20260815_011851_787265_resource_backup_memories-portable-resource\\config.toml.before",
+  "managedConfigBackupPath": null,
+  "restoreMode": "home_state",
+  "schemaVersion": 2,
+  "codexHomeKey": "ec3a5eb18bc15d761d2fe730766925b7e5887c2d260a53420cd6fad139f23e45",
+  "integrity": {
+    "version": 1,
+    "algorithm": "hmac-sha256",
+    "files": {
+      ".codex-global-state.json.before": {
+        "sha256": "8f5aef125c5aa858fe009b162d8e9ae6ad1131f70231b9642813b686041f6b05",
+        "sizeBytes": 60
+      },
+      "config.toml.before": {
+        "sha256": "9227d271c446d3e8eedecf262ed41709c06a795964bd1725738208750b870eb8",
+        "sizeBytes": 204
+      },
+      "state_5.sqlite.before": {
+        "sha256": "a66d34f63ac321760136690f3a5a3842abdfaf348707b449a5218c079b2fe277",
+        "sizeBytes": 20480
+      }
+    },
+    "hmacSha256": "1b4cc072179f9e93e47b20d78d467f2e10471b9ede857d273f5546171c3ab3bc"
+  }
+}

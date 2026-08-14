@@ -37,10 +37,14 @@ $ErrorActionPreference = "Stop"
 $appDirectory = Split-Path -Parent $PSScriptRoot
 $rootRepository = Split-Path -Parent $appDirectory
 $publicRepository = Join-Path $rootRepository "codex-home-manager-public"
-$publicSiteRoot = Join-Path $publicRepository "site"
 $buildRoot = Join-Path $appDirectory "build\local-connector"
 $reproducibleBuildRoot = Join-Path $buildRoot "reproducible"
-$releaseRoot = Join-Path $appDirectory "build\releases"
+$stablePublicSiteRoot = Join-Path $publicRepository "site"
+$stableReleaseRoot = Join-Path $appDirectory "build\releases"
+$publicationStageRoot = Join-Path $buildRoot "publication-stage"
+$publicValidationRoot = Join-Path $publicationStageRoot "public-repository"
+$publicSiteRoot = if ($PSCmdlet.ParameterSetName -eq "Release") { Join-Path $publicValidationRoot "site" } else { $stablePublicSiteRoot }
+$releaseRoot = if ($PSCmdlet.ParameterSetName -eq "Release") { Join-Path $publicationStageRoot "release" } else { $stableReleaseRoot }
 $venvRoot = Join-Path $buildRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
 $archivePath = Join-Path $releaseRoot "codex-home-manager-local-win-x64.zip"
@@ -246,6 +250,94 @@ function Stop-VerifiedReleaseDestinationProcesses {
         throw "Verified old connector processes still hold the release destination: $($remaining.ProcessId -join ', ')"
     }
     Assert-ReleaseDestinationAvailable -Path $resolvedPath
+}
+
+function Initialize-PublicValidationRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRepository,
+        [Parameter(Mandatory = $true)][string]$DestinationRepository
+    )
+    New-Item -ItemType Directory -Force -Path $DestinationRepository | Out-Null
+    $excludedRoots = @(
+        [System.IO.Path]::GetFullPath((Join-Path $SourceRepository ".git")).TrimEnd('\') + '\',
+        [System.IO.Path]::GetFullPath((Join-Path $SourceRepository "node_modules")).TrimEnd('\') + '\',
+        [System.IO.Path]::GetFullPath((Join-Path $SourceRepository "site")).TrimEnd('\') + '\'
+    )
+    foreach ($sourcePath in Get-ChildItem -LiteralPath $SourceRepository -File -Recurse -Force) {
+        $resolvedSource = [System.IO.Path]::GetFullPath($sourcePath.FullName)
+        if ($excludedRoots | Where-Object { $resolvedSource.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }) {
+            continue
+        }
+        $relativePath = [System.IO.Path]::GetRelativePath($SourceRepository, $resolvedSource)
+        $destinationPath = Join-Path $DestinationRepository $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
+        [System.IO.File]::Copy($resolvedSource, $destinationPath, $true)
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $DestinationRepository "site") | Out-Null
+}
+
+function Publish-StagedReleaseSet {
+    param(
+        [Parameter(Mandatory = $true)][string]$StagedReleaseDirectory,
+        [Parameter(Mandatory = $true)][string]$StableReleaseDirectory,
+        [Parameter(Mandatory = $true)][string]$StagedSiteDirectory,
+        [Parameter(Mandatory = $true)][string]$StableSiteDirectory
+    )
+    foreach ($requiredDirectory in @($StagedReleaseDirectory, $StagedSiteDirectory)) {
+        if (-not (Test-Path -LiteralPath $requiredDirectory -PathType Container)) {
+            throw "Publication staging directory is missing: $requiredDirectory"
+        }
+    }
+    $swapRoot = Join-Path $buildRoot "publication-swap"
+    Remove-InternalPath -Path $swapRoot
+    New-Item -ItemType Directory -Force -Path $swapRoot | Out-Null
+    $releaseRollback = Join-Path $swapRoot "release-rollback"
+    $siteRollback = Join-Path $swapRoot "site-rollback"
+    $failedRelease = Join-Path $swapRoot "failed-release"
+    $failedSite = Join-Path $swapRoot "failed-site"
+    $releasePublished = $false
+    $sitePublished = $false
+    try {
+        Stop-VerifiedReleaseDestinationProcesses -Path (Join-Path $StableReleaseDirectory "codex-home-manager-local-win-x64.exe")
+        if (Test-Path -LiteralPath $StableReleaseDirectory -PathType Container) {
+            Move-Item -LiteralPath $StableReleaseDirectory -Destination $releaseRollback
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $StableReleaseDirectory) | Out-Null
+        Move-Item -LiteralPath $StagedReleaseDirectory -Destination $StableReleaseDirectory
+        $releasePublished = $true
+
+        if (Test-Path -LiteralPath $StableSiteDirectory -PathType Container) {
+            Move-Item -LiteralPath $StableSiteDirectory -Destination $siteRollback
+        }
+        Move-Item -LiteralPath $StagedSiteDirectory -Destination $StableSiteDirectory
+        $sitePublished = $true
+    }
+    catch {
+        if ($sitePublished -and (Test-Path -LiteralPath $StableSiteDirectory)) {
+            Move-Item -LiteralPath $StableSiteDirectory -Destination $failedSite
+        }
+        if (Test-Path -LiteralPath $siteRollback) {
+            Move-Item -LiteralPath $siteRollback -Destination $StableSiteDirectory
+        }
+        if ($releasePublished -and (Test-Path -LiteralPath $StableReleaseDirectory)) {
+            Move-Item -LiteralPath $StableReleaseDirectory -Destination $failedRelease
+        }
+        if (Test-Path -LiteralPath $releaseRollback) {
+            Move-Item -LiteralPath $releaseRollback -Destination $StableReleaseDirectory
+        }
+        throw
+    }
+
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    foreach ($retiredDirectory in @($releaseRollback, $siteRollback)) {
+        if (Test-Path -LiteralPath $retiredDirectory -PathType Container) {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+                $retiredDirectory,
+                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+            )
+        }
+    }
 }
 
 function Get-ReleaseNodeToolchain {
@@ -678,8 +770,8 @@ function Assert-CiAuthenticodeEvidence {
 
 Push-Location $appDirectory
 try {
-    if ($PSCmdlet.ParameterSetName -eq "Release" -and -not (Test-Path -LiteralPath $publicSiteRoot -PathType Container)) {
-        throw "Public site repository was not found: $publicSiteRoot"
+    if ($PSCmdlet.ParameterSetName -eq "Release" -and -not (Test-Path -LiteralPath $stablePublicSiteRoot -PathType Container)) {
+        throw "Public site repository was not found: $stablePublicSiteRoot"
     }
     if (-not (Test-Path -LiteralPath $releaseManifestScript -PathType Leaf)) {
         throw "Release manifest script was not found: $releaseManifestScript"
@@ -699,6 +791,11 @@ try {
 
     Remove-InternalPath -Path $buildRoot
     New-Item -ItemType Directory -Force -Path $reproducibleBuildRoot, $releaseRoot | Out-Null
+    if ($PSCmdlet.ParameterSetName -eq "Release") {
+        Initialize-PublicValidationRoot `
+            -SourceRepository $publicRepository `
+            -DestinationRepository $publicValidationRoot
+    }
 
     if ($PSCmdlet.ParameterSetName -eq "Release") {
         & python $releaseManifestScript capture-build-source `
@@ -709,9 +806,6 @@ try {
             throw "Failed to capture clean root and manager HEADs before the build"
         }
     }
-
-    Assert-ReleaseDestinationAvailable -Path $directExecutablePath
-    Assert-ReleaseDestinationAvailable -Path $archivePath
 
     if ($PSCmdlet.ParameterSetName -eq "CiBuild" -and ($FullReleaseValidation -or $VerifyReproducibleBuild)) {
         & python "scripts\quality_gate.py"
@@ -754,24 +848,21 @@ try {
                 throw "Two isolated connector builds were not byte-for-byte reproducible"
             }
         }
-        Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath
-        Copy-Item -LiteralPath $firstBuild.Exe -Destination $directExecutablePath -Force
-        Copy-Item -LiteralPath $firstBuild.Zip -Destination $archivePath -Force
-        $authenticodeAudit = Invoke-AuthenticodePolicy -Path $directExecutablePath
-        Assert-ReleaseZipBoundary -Path $archivePath
-        $executableAudit = Assert-PyInstallerExecutableBoundary -Path $directExecutablePath
-        $versionAudit = Assert-WindowsVersionMetadata -Path $directExecutablePath
+        $authenticodeAudit = Invoke-AuthenticodePolicy -Path $firstBuild.Exe
+        Assert-ReleaseZipBoundary -Path $firstBuild.Zip
+        $executableAudit = Assert-PyInstallerExecutableBoundary -Path $firstBuild.Exe
+        $versionAudit = Assert-WindowsVersionMetadata -Path $firstBuild.Exe
         $executableAudit["versionInfo"] = $versionAudit
-        $directExecutableHash = Get-Sha256HashText -Path $directExecutablePath
-        $archiveHash = Get-Sha256HashText -Path $archivePath
+        $directExecutableHash = Get-Sha256HashText -Path $firstBuild.Exe
+        $archiveHash = Get-Sha256HashText -Path $firstBuild.Zip
         $publicExecutableName = Get-ContentAddressedReleaseName -Extension "exe" -Sha256 $directExecutableHash
         $publicArchiveName = Get-ContentAddressedReleaseName -Extension "zip" -Sha256 $archiveHash
         $resolvedCiOutputDirectory = [System.IO.Path]::GetFullPath($CiOutputDirectory)
         New-Item -ItemType Directory -Force -Path $resolvedCiOutputDirectory | Out-Null
         $ciExecutablePath = Join-Path $resolvedCiOutputDirectory $publicExecutableName
         $ciArchivePath = Join-Path $resolvedCiOutputDirectory $publicArchiveName
-        Copy-Item -LiteralPath $directExecutablePath -Destination $ciExecutablePath -Force
-        Copy-Item -LiteralPath $archivePath -Destination $ciArchivePath -Force
+        Copy-Item -LiteralPath $firstBuild.Exe -Destination $ciExecutablePath -Force
+        Copy-Item -LiteralPath $firstBuild.Zip -Destination $ciArchivePath -Force
         $ciMetadata = [ordered]@{
             schemaVersion = 1
             version = $releaseVersion
@@ -789,7 +880,6 @@ try {
         return
     }
 
-    Stop-VerifiedReleaseDestinationProcesses -Path $directExecutablePath
     & python $releaseManifestScript prepare-windows-evidence `
         --evidence-dir $WindowsEvidenceDirectory `
         --source-commit $SourceCommit `
@@ -1070,13 +1160,19 @@ $latestZipPath
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to recreate public dependencies from package-lock.json"
         }
-        & $releaseNpmPath audit --audit-level=high
+        & $releaseNpmPath audit --audit-level=high --omit=optional
         if ($LASTEXITCODE -ne 0) {
             throw "Public npm audit found a high or critical vulnerability"
         }
-        & $releaseNpmPath run check
+        & $releaseNpmPath test
         if ($LASTEXITCODE -ne 0) {
-            throw "Public release boundary checks failed"
+            throw "Public release boundary regression tests failed"
+        }
+        & $releaseNodePath (Join-Path $publicRepository "scripts\check-public-boundary.mjs") `
+            --root $publicValidationRoot `
+            --release
+        if ($LASTEXITCODE -ne 0) {
+            throw "Staged public release boundary checks failed"
         }
     }
     finally {
@@ -1088,13 +1184,19 @@ $latestZipPath
         throw "Root or manager source changed after the pre-build capture; refusing to publish artifacts from a drifting source tree"
     }
 
-    Write-Output $directExecutablePath
-    Write-Output $archivePath
-    Write-Output $publicExecutablePath
-    Write-Output $publicArchivePath
-    Write-Output $checksumPath
-    Write-Output $verifyScriptPath
-    Write-Output $releasePublicKeyPath
+    Publish-StagedReleaseSet `
+        -StagedReleaseDirectory $releaseRoot `
+        -StableReleaseDirectory $stableReleaseRoot `
+        -StagedSiteDirectory $publicSiteRoot `
+        -StableSiteDirectory $stablePublicSiteRoot
+
+    Write-Output (Join-Path $stableReleaseRoot "codex-home-manager-local-win-x64.exe")
+    Write-Output (Join-Path $stableReleaseRoot "codex-home-manager-local-win-x64.zip")
+    Write-Output (Join-Path $stablePublicSiteRoot $publicExecutableName)
+    Write-Output (Join-Path $stablePublicSiteRoot $publicArchiveName)
+    Write-Output (Join-Path $stableReleaseRoot "SHA256SUMS.txt")
+    Write-Output (Join-Path $stableReleaseRoot "verify-codex-home-manager.ps1")
+    Write-Output (Join-Path $stableReleaseRoot "release-signing-public-key.pem")
     Write-Output "Create a GitHub draft release containing exactly the content-addressed EXE and ZIP, deploy the artifact commit, then run finalize-release-manifest.ps1 with the Cloudflare deployment and GitHub release identifiers."
 }
 finally {

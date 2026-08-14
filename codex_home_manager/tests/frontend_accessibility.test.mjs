@@ -902,7 +902,7 @@ async function runPromptPaginationFlow() {
 
     await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "pure").length >= 2, "cold pure index did not continue scanning");
     const cancelledPureRequest = promptApiState.pageRequests.filter((request) => request.scope === "pure").at(-1);
-    await promptDialog.getByRole("button", { name: /全部/ }).click();
+    await promptDialog.getByRole("button", { name: /^全部 \d+$/ }).click();
     await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledPureRequest.requestId), "changing scope did not DELETE-cancel the prior request");
 
     await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "").length >= 2, "cold all-scope index did not continue scanning");
@@ -1093,9 +1093,9 @@ async function runAccessibilityFlow() {
     const timelineSearch = promptDialog.getByRole("textbox", { name: "搜索完整线程内容" });
     assert.equal(await timelineSearch.evaluate((element) => document.activeElement === element), true, "Ctrl+F must focus full-timeline search instead of browser find");
     await timelineSearch.fill("正在验证");
-    await promptDialog.getByText("1 / 1 · 扫描中", { exact: true }).waitFor();
+    await promptDialog.getByText("1 / 1 条匹配记录 · 扫描中", { exact: true }).waitFor();
     assert.equal(await promptDialog.locator(".timeline-entry mark", { hasText: "正在验证" }).count(), 1, "loaded timeline content must be searched and highlighted before the full index finishes");
-    await promptDialog.getByText("1 / 1", { exact: true }).waitFor();
+    await promptDialog.getByText("1 / 1 条匹配记录", { exact: true }).waitFor();
     await page.keyboard.press("Escape");
     assert.equal(await promptDialog.isVisible(), true, "the first Escape with a timeline query must keep the content dialog open");
     assert.equal(await timelineSearch.inputValue(), "", "the first Escape must clear the timeline query");
@@ -1116,7 +1116,7 @@ async function runAccessibilityFlow() {
     ];
     for (const [query, expectedHighlight] of timelineUnicodeCases) {
       await timelineSearch.fill(query);
-      await promptDialog.getByText("1 / 1", { exact: true }).waitFor();
+      await promptDialog.getByText("1 / 1 条匹配记录", { exact: true }).waitFor();
       const highlight = promptDialog.locator(".timeline-entry mark").first();
       assert.equal(await highlight.textContent(), expectedHighlight, `${query} must highlight the complete original grapheme sequence`);
       await page.keyboard.press("Escape");
@@ -1216,7 +1216,7 @@ async function runAccessibilityFlow() {
       "pure prompt mode must correct stale connector metadata and hide runtime-injected context"
     );
     assert.doesNotMatch(purePromptListText, /<recommended_plugins>/);
-    await promptDialog.getByRole("button", { name: /全部/ }).click();
+    await promptDialog.getByRole("button", { name: /^全部 \d+$/ }).click();
     await promptDialog.getByText("推荐插件上下文", { exact: true }).waitFor();
     await assertPromptModalLayoutAndHitTargets(page, promptDialog, "1440x1000");
     assert.equal(await promptDialog.getByText("顶刊能力建设的尾部搜索目标", { exact: false }).count(), 0, "virtualized tail content must not be present in the DOM before searching");

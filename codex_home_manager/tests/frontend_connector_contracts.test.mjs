@@ -61,11 +61,16 @@ assert.doesNotMatch(mainSource, /fetchThreadPromptsFromLocalApi/, "the frontend 
 assert.match(mainSource, /readBrowserThreadPrompts\(browserWorkspace, threadId\)/, "browser folder mode must retain its in-memory prompt reader");
 assert.match(mainSource, /if \(isBrowserPromptMode\)[\s\S]{0,300}copyTextToClipboard\(allPromptText\)/, "browser folder copy must remain in memory");
 assert.match(mainSource, /response\.body\.getReader\(\)/, "connector copy must consume the streaming response body");
+assert.match(mainSource, /maxClipboardBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024/, "clipboard copy must have a hard memory bound");
+assert.match(mainSource, /showSaveFilePicker/, "complete prompt export must use a streaming file destination");
+assert.match(mainSource, /await writer\.write\(value\)/, "complete prompt export must write response chunks without concatenating the full rollout");
+assert.match(mainSource, /条匹配记录/, "timeline search must label counts as matching records rather than text occurrences");
 assert.match(mainSource, /if \(filterMode === "focused"\) return "visible"/);
 assert.match(mainSource, /if \(filterMode === "withAgents"\) return "with_agents"/);
 const validCapabilities = {
   service: "codex-home-manager",
   version: packageVersion,
+  frontendContractVersion: 2,
   language: "en",
   openapiPath: "/openapi.json",
   mcpPath: "/mcp",

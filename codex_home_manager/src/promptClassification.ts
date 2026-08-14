@@ -50,7 +50,9 @@ function isThreadDelegationPrompt(text: string): boolean {
 }
 
 function isCodexInternalContextPrompt(text: string): boolean {
-  return promptPrefix(text).startsWith("<codex_internal_context");
+  const lowerPrefix = promptPrefix(text).toLowerCase();
+  return lowerPrefix.startsWith("<codex_internal_context")
+    || lowerPrefix.startsWith("<goal_context>");
 }
 
 function isInternalContextPrompt(text: string): boolean {

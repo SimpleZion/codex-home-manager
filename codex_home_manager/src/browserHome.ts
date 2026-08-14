@@ -1,6 +1,7 @@
 import initSqlJs, { type SqlJsDatabase } from "sql.js";
 import sqlWasmUrl from "sql.js/dist/sql-wasm.wasm?url";
 import { classifyPromptText, isRealUserPromptText } from "./promptClassification";
+import { normalizeSearchText } from "./threadContentSearch";
 import {
   readBrowserTimelineItem,
   readBrowserTimelinePage,
@@ -38,6 +39,10 @@ type BrowserDirectoryHandle = {
 declare global {
   interface Window {
     showDirectoryPicker?: (options?: { mode?: FileSystemPermissionMode; id?: string; startIn?: string }) => Promise<BrowserDirectoryHandle>;
+    showSaveFilePicker?: (options: {
+      suggestedName: string;
+      types: Array<{ description: string; accept: Record<string, string[]> }>;
+    }) => Promise<{ createWritable(): Promise<{ write(chunk: Uint8Array | string | Blob): Promise<void>; close(): Promise<void>; abort?(): Promise<void> }> }>;
   }
 }
 
@@ -205,6 +210,7 @@ export type BrowserCodexWorkspace = {
 export type BrowserPromptRecord = {
   index: number;
   lineNumber: number;
+  byteOffset?: number;
   timestamp: string | null;
   text: string;
   characterCount: number;
@@ -218,15 +224,42 @@ export type BrowserPromptRecord = {
   hasPureText: boolean;
 };
 
+export type BrowserPromptPageOptions = {
+  cursor?: string | null;
+  limit?: number;
+  scope?: "all" | "pure" | "visible" | "with_agents" | "automation" | "delegation";
+  search?: string;
+  signal?: AbortSignal;
+};
+
+type BrowserPromptFingerprint = {
+  fingerprint: string;
+  timestampMs: number | null;
+  protocol: string;
+};
+
+type BrowserPromptCursor = {
+  byteOffset: number;
+  lineNumber: number;
+  promptCount: number;
+  purePromptCount: number;
+  visiblePromptCount: number;
+  matchCount: number;
+  oversizedRecords: number;
+  sourceCounts: Record<string, number>;
+  recentPrompts: BrowserPromptFingerprint[];
+};
+
 type BrowserJsonlLine = {
   lineNumber: number;
   byteOffset: number;
+  nextByteOffset: number;
   rawLine: string | null;
   oversized: boolean;
   oversizedPrompt: BrowserOversizedPromptCandidate | null;
 };
 
-type BrowserReverseJsonlLine = Omit<BrowserJsonlLine, "lineNumber">;
+type BrowserReverseJsonlLine = Omit<BrowserJsonlLine, "lineNumber" | "nextByteOffset">;
 
 type BrowserOversizedPromptCandidate = {
   timestamp: string | null;
@@ -245,6 +278,8 @@ const browserThreadHeadSampleBytes = 2 * 1024 * 1024;
 const browserThreadTailSampleBytes = 512 * 1024;
 const browserJsonlDecoder = new TextDecoder("utf-8");
 const browserPromptMaxExtractedCharacters = 256 * 1024;
+const browserPromptPageScanBytes = 32 * 1024 * 1024;
+const browserPromptPageScanRecords = 10_000;
 const browserPromptTruncationNotice = "\n[Browser folder mode truncated this prompt text.]";
 const browserPromptDataUrlPrefixes = [
   "data:image/",
@@ -261,14 +296,27 @@ class BrowserBoundedJsonString {
   value = "";
   truncated = false;
   private hidingDataUrl = false;
+  private hiddenDataUrlAtLineStart = false;
+  private hiddenDataUrlSawClosingLine = false;
+  private hiddenDataUrlTail = "";
 
   constructor(private readonly characterLimit: number, private readonly hideDataUrls: boolean) {}
 
   append(character: string): void {
     if (this.hidingDataUrl) {
-      if ([")", "]", ">", "\"", "'"].includes(character)) {
+      const requestMarker = "## My request for Codex:";
+      this.hiddenDataUrlTail = `${this.hiddenDataUrlTail}${character}`.slice(-requestMarker.length);
+      if (character === "\n") {
+        this.hiddenDataUrlAtLineStart = true;
+      } else if (character === ")" && this.hiddenDataUrlAtLineStart) {
+        this.hiddenDataUrlSawClosingLine = true;
+        this.hiddenDataUrlAtLineStart = false;
+      } else if (this.hiddenDataUrlSawClosingLine && this.hiddenDataUrlTail.endsWith(requestMarker)) {
         this.hidingDataUrl = false;
-        this.appendVisible(character);
+        this.appendVisible(`\n${requestMarker}`);
+        this.hiddenDataUrlTail = "";
+      } else if (!/\s/.test(character)) {
+        this.hiddenDataUrlAtLineStart = false;
       }
       return;
     }
@@ -278,8 +326,12 @@ class BrowserBoundedJsonString {
       const lowerValue = this.value.slice(-32).toLowerCase();
       const matchedPrefix = browserPromptDataUrlPrefixes.find((prefix) => lowerValue.endsWith(prefix));
       if (matchedPrefix) {
-        this.value = `${this.value.slice(0, -matchedPrefix.length)}[attachment data hidden]`;
+        const textBeforeDataUrl = this.value.slice(0, -matchedPrefix.length);
+        this.value = `${textBeforeDataUrl}[attachment data hidden]`;
         this.hidingDataUrl = true;
+        this.hiddenDataUrlAtLineStart = false;
+        this.hiddenDataUrlSawClosingLine = false;
+        this.hiddenDataUrlTail = "";
       }
     }
   }
@@ -513,12 +565,18 @@ function decodeBrowserJsonlParts(parts: Uint8Array[], totalBytes: number): strin
 
 async function* readBrowserJsonlLines(
   file: Pick<File, "size" | "slice">,
-  options: { signal?: AbortSignal; stopAfterByte?: number; extractOversizedPrompts?: boolean } = {}
+  options: {
+    signal?: AbortSignal;
+    startAtByte?: number;
+    startLineNumber?: number;
+    stopAfterByte?: number;
+    extractOversizedPrompts?: boolean;
+  } = {}
 ): AsyncGenerator<BrowserJsonlLine> {
   const stopAfterByte = Math.max(0, Math.min(options.stopAfterByte ?? file.size, file.size));
-  let position = 0;
-  let lineNumber = 0;
-  let lineByteOffset = 0;
+  let position = Math.max(0, Math.min(options.startAtByte ?? 0, stopAfterByte));
+  let lineNumber = Math.max(0, options.startLineNumber ?? 0);
+  let lineByteOffset = position;
   let lineParts: Uint8Array[] = [];
   let lineBytes = 0;
   let oversized = false;
@@ -557,6 +615,7 @@ async function* readBrowserJsonlLines(
       yield {
         lineNumber,
         byteOffset: lineByteOffset,
+        nextByteOffset: position + index + 1,
         rawLine: oversized ? null : decodeBrowserJsonlParts(lineParts, lineBytes),
         oversized,
         oversizedPrompt: (oversizedPromptScanner as BrowserOversizedPromptScanner | null)?.finish() || null
@@ -577,6 +636,7 @@ async function* readBrowserJsonlLines(
     yield {
       lineNumber,
       byteOffset: lineByteOffset,
+      nextByteOffset: stopAfterByte,
       rawLine: oversized ? null : decodeBrowserJsonlParts(lineParts, lineBytes),
       oversized,
       oversizedPrompt: (oversizedPromptScanner as BrowserOversizedPromptScanner | null)?.finish() || null
@@ -655,23 +715,26 @@ export async function pickBrowserCodexDirectory(): Promise<BrowserDirectoryHandl
 export async function scanBrowserCodexHome(
   directoryHandle: BrowserDirectoryHandle,
   sidebarLimit: number,
-  language: BrowserLanguage
+  language: BrowserLanguage,
+  signal?: AbortSignal
 ): Promise<BrowserCodexWorkspace> {
-  await ensureReadPermission(directoryHandle);
+  signal?.throwIfAborted();
+  await ensureReadPermission(directoryHandle, signal);
   const generatedAtMs = Date.now();
-  const globalState = await readBrowserGlobalState(directoryHandle);
-  const sessionIndexRecords = await readSessionIndexRecords(directoryHandle);
+  const globalState = await readBrowserGlobalState(directoryHandle, signal);
+  const sessionIndexRecords = await readSessionIndexRecords(directoryHandle, signal);
   const sessionIndex = sessionIndexMapFromRecords(sessionIndexRecords);
-  const threadFiles = await listThreadJsonlFiles(directoryHandle);
+  const threadFiles = await listThreadJsonlFiles(directoryHandle, signal);
   const threadFileMap = threadFileMapById(threadFiles);
   let stateRows: BrowserSqlThreadRow[] = [];
   let stateReadError = "";
   try {
-    stateRows = await readBrowserStateThreadRows(directoryHandle);
+    stateRows = await readBrowserStateThreadRows(directoryHandle, signal);
   } catch (error) {
     stateReadError = error instanceof Error ? error.message : String(error);
   }
-  const spawnEdges = stateRows.length ? await readBrowserStateSpawnEdges(directoryHandle) : new Map<string, Record<string, string>>();
+  signal?.throwIfAborted();
+  const spawnEdges = stateRows.length ? await readBrowserStateSpawnEdges(directoryHandle, signal) : new Map<string, Record<string, string>>();
   const threads = stateRows.length
     ? await buildBrowserThreadsFromSqlite({
         rows: stateRows,
@@ -683,7 +746,8 @@ export async function scanBrowserCodexHome(
         sidebarLimit,
         language,
         generatedAtMs,
-        validateRolloutDisplay: false
+        validateRolloutDisplay: false,
+        signal
       })
     : await buildBrowserThreadsFromJsonl({
         sessionIndex,
@@ -691,7 +755,8 @@ export async function scanBrowserCodexHome(
         sidebarLimit,
         language,
         generatedAtMs,
-        validateRolloutDisplay: false
+        validateRolloutDisplay: false,
+        signal
       });
   applyThreadChildRollups(threads);
 
@@ -703,8 +768,9 @@ export async function scanBrowserCodexHome(
   const hiddenByInitialLimit = mainThreads.filter((thread) => thread.visibility === "hidden_by_initial_limit").length;
   const archivedThreads = threads.filter((thread) => thread.archived).length;
   const needsRepairThreads = mainThreads.filter((thread) => thread.visibility === "missing_file" || thread.visibility === "needs_user_event_repair").length;
-  const resources = await inventoryResources(directoryHandle, language);
-  const pluginCacheScan = await scanBrowserPluginCache(directoryHandle);
+  signal?.throwIfAborted();
+  const resources = await inventoryResources(directoryHandle, language, signal);
+  const pluginCacheScan = await scanBrowserPluginCache(directoryHandle, signal);
   const diagnostics = buildBrowserDiagnostics({
     codexHomeName: directoryHandle.name,
     generatedAtMs,
@@ -800,13 +866,15 @@ async function buildBrowserThreadsFromJsonl(input: {
   language: BrowserLanguage;
   generatedAtMs: number;
   validateRolloutDisplay: boolean;
+  signal?: AbortSignal;
 }): Promise<BrowserThreadSnapshot[]> {
   const threads: BrowserThreadSnapshot[] = [];
   for (const threadFile of input.threadFiles) {
+    input.signal?.throwIfAborted();
     const threadId = threadIdFromPath(threadFile.relativePath);
     if (!threadId) continue;
-    const file = await threadFile.handle.getFile();
-    const sample = await parseThreadSample(file);
+    const file = await abortableBrowserOperation(threadFile.handle.getFile(), input.signal);
+    const sample = await parseThreadSample(file, false, input.signal);
     const indexEntry = input.sessionIndex.get(threadId);
     const title = firstNonEmpty(indexEntry?.title, sample.title, titleFromPath(threadFile.relativePath), threadId);
     const projectPath = firstNonEmpty(sample.projectPath, indexEntry?.projectPath, "");
@@ -911,10 +979,12 @@ async function buildBrowserThreadsFromSqlite(input: {
   language: BrowserLanguage;
   generatedAtMs: number;
   validateRolloutDisplay: boolean;
+  signal?: AbortSignal;
 }): Promise<BrowserThreadSnapshot[]> {
   const rowsByThreadId = new Map(input.rows.map((row) => [String(row.id), row]));
   const kindByThreadId = new Map<string, ReturnType<typeof threadKindMetadataBrowser>>();
   for (const row of input.rows) {
+    input.signal?.throwIfAborted();
     kindByThreadId.set(String(row.id), threadKindMetadataBrowser(row, input.spawnEdges.get(String(row.id))));
   }
   const pinnedThreadIds = pinnedThreadIdsFromState(input.globalState);
@@ -934,7 +1004,7 @@ async function buildBrowserThreadsFromSqlite(input: {
   for (const row of input.rows) {
     const threadId = String(row.id);
     const threadFile = input.threadFileMap.get(threadId);
-    const fileStat = await statBrowserThreadFile(threadFile, row.rollout_path);
+    const fileStat = await statBrowserThreadFile(threadFile, row.rollout_path, input.signal);
     const rolloutInArchivedStore = Boolean(threadFile?.archivedStore || comparablePathText(fileStat.path).includes("\\archived_sessions\\"));
     const projectPath = normalizePathText(row.cwd);
     const projectKind = classifyProjectKindBrowser(
@@ -963,7 +1033,7 @@ async function buildBrowserThreadsFromSqlite(input: {
       )
     );
     const rolloutTitleEntry = shouldResolveRolloutTitle && threadFile
-      ? await readBrowserRolloutThreadTitleUpdate(threadFile, threadId)
+      ? await readBrowserRolloutThreadTitleUpdate(threadFile, threadId, input.signal)
       : { rolloutTitle: "", rolloutTitleTimestamp: "", rolloutTitleLine: null };
     const rolloutTitle = String(rolloutTitleEntry.rolloutTitle || "");
     const sidebarTitle = rolloutTitle || sessionIndexTitle;
@@ -1519,60 +1589,91 @@ export async function exportBrowserThreadPrompts(workspace: BrowserCodexWorkspac
   const threadFile = workspace.threadFiles.get(threadId);
   if (!threadFile) throw new Error(`Thread not found in selected folder: ${threadId}`);
   const file = await threadFile.handle.getFile();
-  const promptScan = await extractUserPromptRecords(file);
-  const allPrompts = promptScan.prompts;
-  const prompts: BrowserPromptRecord[] = [];
-  for (const prompt of allPrompts) if (prompt.hasPureText) prompts.push(prompt);
-  const sourceCounts = browserPromptSourceCounts(allPrompts);
   const filename = `codex-thread-prompts-${threadId}.md`;
-  const markdownParts = [
+  const initialParts = [
     `# Codex thread prompts`,
     ``,
     `Thread ID: \`${threadId}\``,
     `Source: \`${threadFile.relativePath}\``,
-    `Prompt count: ${prompts.length}`,
-    `All prompt-like records: ${allPrompts.length}`,
     `Filter scope: \`pure\``,
-    `Source counts: \`${JSON.stringify(sourceCounts)}\``,
-    ``,
-    promptScan.aggregationExact ? "" : `Aggregation exact: \`false\` (${promptScan.oversizedRecords} oversized records were scanned with bounded prompt extraction)`,
     ``
-  ];
-  for (const prompt of prompts) {
-    markdownParts.push(
-      `## Prompt ${prompt.index}`,
-      ``,
-      `- JSONL line: \`${prompt.lineNumber}\``,
-      prompt.timestamp ? `- Timestamp: \`${prompt.timestamp}\`` : "",
-      `- Source: \`${prompt.sourceLabel || prompt.sourceType}\``,
-      ``,
-      prompt.pureText,
-      ""
-    );
+  ].join("\n");
+  const useStreamingWriter = file.size > 32 * 1024 * 1024;
+  const picker = typeof window === "undefined" ? undefined : window.showSaveFilePicker;
+  if (useStreamingWriter && !picker) {
+    throw new Error("This rollout is too large for an in-memory browser export. Use Chrome or Edge with streaming file save support.");
   }
-  const markdown = markdownParts.join("\n");
-  downloadText(filename, markdown);
-  return { promptCount: prompts.length, filename };
+  const writer = useStreamingWriter && picker
+    ? await (await picker({ suggestedName: filename, types: [{ description: "Codex thread prompts", accept: { "text/markdown": [".md"] } }] })).createWritable()
+    : null;
+  const bufferedParts: BlobPart[] = [];
+  const writePart = async (part: string) => {
+    if (writer) await writer.write(part);
+    else bufferedParts.push(part);
+  };
+  let cursor: string | null = null;
+  let promptCount = 0;
+  let latestScan: Awaited<ReturnType<typeof extractUserPromptRecords>> | null = null;
+  try {
+    await writePart(initialParts);
+    do {
+      latestScan = await extractUserPromptRecords(file, { cursor, limit: 100, scope: "pure" });
+      for (const prompt of latestScan.prompts) {
+        await writePart([
+          `## Prompt ${prompt.index}`,
+          ``,
+          `- JSONL line: \`${prompt.lineNumber}\``,
+          prompt.timestamp ? `- Timestamp: \`${prompt.timestamp}\`` : "",
+          `- Source: \`${prompt.sourceLabel || prompt.sourceType}\``,
+          ``,
+          prompt.pureText,
+          ""
+        ].join("\n"));
+        promptCount += 1;
+      }
+      cursor = latestScan.nextCursor;
+    } while (cursor);
+    await writePart([
+      "",
+      `Prompt count: ${promptCount}`,
+      `All prompt-like records: ${latestScan?.promptCount || 0}`,
+      `Source counts: \`${JSON.stringify(latestScan?.sourceCounts || {})}\``,
+      latestScan?.aggregationExact ? "" : `Aggregation exact: \`false\` (${latestScan?.oversizedRecords || 0} oversized records were scanned with bounded prompt extraction)`,
+      ""
+    ].join("\n"));
+    if (writer) await writer.close();
+    else downloadBlob(filename, new Blob(bufferedParts, { type: "text/markdown;charset=utf-8" }));
+    return { promptCount, filename };
+  } catch (error) {
+    if (writer?.abort) await writer.abort().catch(() => undefined);
+    throw error;
+  }
 }
 
-export async function readBrowserThreadPrompts(workspace: BrowserCodexWorkspace, threadId: string): Promise<Record<string, unknown>> {
+export async function readBrowserThreadPrompts(
+  workspace: BrowserCodexWorkspace,
+  threadId: string,
+  options: BrowserPromptPageOptions = {}
+): Promise<Record<string, unknown>> {
   const threadFile = workspace.threadFiles.get(threadId);
   if (!threadFile) throw new Error(`Thread not found in selected folder: ${threadId}`);
   const file = await threadFile.handle.getFile();
-  const promptScan = await extractUserPromptRecords(file);
+  const promptScan = await extractUserPromptRecords(file, options);
   const prompts = promptScan.prompts;
   const thread = (workspace.snapshot.threads as Record<string, unknown>[] | undefined)?.find((item) => item.id === threadId);
-  const visiblePromptCount = prompts.filter((prompt) => prompt.visibleByDefault).length;
-  const purePromptCount = prompts.filter((prompt) => prompt.hasPureText).length;
   return {
     threadId,
     title: thread?.title || "",
     rolloutPath: threadFile.relativePath,
-    promptCount: prompts.length,
-    purePromptCount,
-    visiblePromptCount,
-    hiddenPromptCount: prompts.length - visiblePromptCount,
-    sourceCounts: browserPromptSourceCounts(prompts),
+    promptCount: promptScan.promptCount,
+    purePromptCount: promptScan.purePromptCount,
+    visiblePromptCount: promptScan.visiblePromptCount,
+    hiddenPromptCount: promptScan.promptCount - promptScan.visiblePromptCount,
+    sourceCounts: promptScan.sourceCounts,
+    matchCount: promptScan.matchCount,
+    matchCountComplete: promptScan.matchCountComplete,
+    nextCursor: promptScan.nextCursor,
+    hasMore: promptScan.hasMore,
     aggregationExact: promptScan.aggregationExact,
     oversizedRecords: promptScan.oversizedRecords,
     uncertaintyReasons: promptScan.aggregationExact ? [] : ["oversized_jsonl_record"],
@@ -1628,19 +1729,40 @@ export async function readBrowserResource(workspace: BrowserCodexWorkspace, rela
   };
 }
 
-async function ensureReadPermission(handle: BrowserDirectoryHandle | BrowserFileHandle): Promise<void> {
+async function abortableBrowserOperation<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function ensureReadPermission(handle: BrowserDirectoryHandle | BrowserFileHandle, signal?: AbortSignal): Promise<void> {
   if (!handle.queryPermission || !handle.requestPermission) return;
-  const current = await handle.queryPermission({ mode: "read" });
+  const current = await abortableBrowserOperation(handle.queryPermission({ mode: "read" }), signal);
   if (current === "granted") return;
-  const requested = await handle.requestPermission({ mode: "read" });
+  const requested = await abortableBrowserOperation(handle.requestPermission({ mode: "read" }), signal);
   if (requested !== "granted") throw new Error("Folder permission was not granted.");
 }
 
-async function readBrowserGlobalState(root: BrowserDirectoryHandle): Promise<BrowserGlobalState> {
+async function readBrowserGlobalState(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserGlobalState> {
+  signal?.throwIfAborted();
   const handle = await getPathHandle(root, ".codex-global-state.json");
   if (!handle || handle.kind !== "file") return {};
   try {
-    const parsed = JSON.parse(await (await handle.getFile()).text());
+    const file = await abortableBrowserOperation(handle.getFile(), signal);
+    const parsed = JSON.parse(await abortableBrowserOperation(file.text(), signal));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as BrowserGlobalState : {};
   } catch {
     return {};
@@ -1665,12 +1787,13 @@ function execSqliteRows(database: SqlJsDatabase, sql: string): Record<string, un
   return sqliteRowsFromResult(database.exec(sql));
 }
 
-async function readBrowserStateThreadRows(root: BrowserDirectoryHandle): Promise<BrowserSqlThreadRow[]> {
+async function readBrowserStateThreadRows(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserSqlThreadRow[]> {
+  signal?.throwIfAborted();
   const handle = await getPathHandle(root, "state_5.sqlite");
   if (!handle || handle.kind !== "file") return [];
-  const file = await handle.getFile();
-  const sql = await loadSqlJs();
-  const database = new sql.Database(new Uint8Array(await file.arrayBuffer()));
+  const file = await abortableBrowserOperation(handle.getFile(), signal);
+  const sql = await abortableBrowserOperation(loadSqlJs(), signal);
+  const database = new sql.Database(new Uint8Array(await abortableBrowserOperation(file.arrayBuffer(), signal)));
   try {
     return execSqliteRows(database, "SELECT * FROM threads ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC, id DESC")
       .filter((row) => row.id)
@@ -1680,12 +1803,13 @@ async function readBrowserStateThreadRows(root: BrowserDirectoryHandle): Promise
   }
 }
 
-async function readBrowserStateSpawnEdges(root: BrowserDirectoryHandle): Promise<Map<string, Record<string, string>>> {
+async function readBrowserStateSpawnEdges(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<Map<string, Record<string, string>>> {
+  signal?.throwIfAborted();
   const handle = await getPathHandle(root, "state_5.sqlite");
   if (!handle || handle.kind !== "file") return new Map();
-  const file = await handle.getFile();
-  const sql = await loadSqlJs();
-  const database = new sql.Database(new Uint8Array(await file.arrayBuffer()));
+  const file = await abortableBrowserOperation(handle.getFile(), signal);
+  const sql = await abortableBrowserOperation(loadSqlJs(), signal);
+  const database = new sql.Database(new Uint8Array(await abortableBrowserOperation(file.arrayBuffer(), signal)));
   try {
     const tableExists = database.exec("SELECT 1 AS exists_flag FROM sqlite_master WHERE type = 'table' AND name = 'thread_spawn_edges'");
     if (!tableExists.length || !tableExists[0]?.values?.length) return new Map();
@@ -1705,12 +1829,13 @@ async function readBrowserStateSpawnEdges(root: BrowserDirectoryHandle): Promise
   }
 }
 
-async function readSessionIndexRecords(root: BrowserDirectoryHandle): Promise<BrowserSessionIndexRecord[]> {
+async function readSessionIndexRecords(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserSessionIndexRecord[]> {
+  signal?.throwIfAborted();
   const indexHandle = await getPathHandle(root, "session_index.jsonl");
   const records: BrowserSessionIndexRecord[] = [];
   if (!indexHandle || indexHandle.kind !== "file") return records;
-  const file = await indexHandle.getFile();
-  for await (const line of readBrowserJsonlLines(file)) {
+  const file = await abortableBrowserOperation(indexHandle.getFile(), signal);
+  for await (const line of readBrowserJsonlLines(file, { signal })) {
     if (!line.rawLine?.trim()) continue;
     const parsed = parseJsonLine(line.rawLine);
     const threadId = stringValue(parsed?.id) || JSON.stringify(parsed).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] || "";
@@ -1826,12 +1951,12 @@ function threadKindMetadataBrowser(row: BrowserSqlThreadRow, spawnEdge: Record<s
   };
 }
 
-async function statBrowserThreadFile(threadFile: BrowserThreadFile | undefined, rolloutPath: unknown) {
+async function statBrowserThreadFile(threadFile: BrowserThreadFile | undefined, rolloutPath: unknown, signal?: AbortSignal) {
   const fallbackPath = normalizePathText(rolloutPath);
   if (!threadFile) {
     return { exists: false, sizeBytes: 0, modifiedAtMs: null as number | null, path: fallbackPath };
   }
-  const file = await threadFile.handle.getFile();
+    const file = await abortableBrowserOperation(threadFile.handle.getFile(), signal);
   return {
     exists: file.size > 0,
     sizeBytes: file.size,
@@ -1918,10 +2043,10 @@ function classifyThreadBrowser(input: {
   return { visibility: "hidden", hiddenReasons, codexVisible: false };
 }
 
-async function readBrowserRolloutThreadTitleUpdate(threadFile: BrowserThreadFile, threadId: string) {
+async function readBrowserRolloutThreadTitleUpdate(threadFile: BrowserThreadFile, threadId: string, signal?: AbortSignal) {
   const result = { rolloutTitle: "", rolloutTitleTimestamp: "", rolloutTitleLine: null as number | null };
-  const file = await threadFile.handle.getFile();
-  for await (const line of readBrowserJsonlLines(file)) {
+  const file = await abortableBrowserOperation(threadFile.handle.getFile(), signal);
+  for await (const line of readBrowserJsonlLines(file, { signal })) {
     if (!line.rawLine?.includes("thread_name_updated")) continue;
     const item = parseJsonLine(line.rawLine);
     if (item?.type !== "event_msg") continue;
@@ -1939,28 +2064,30 @@ async function readBrowserRolloutThreadTitleUpdate(threadFile: BrowserThreadFile
 }
 
 
-async function listThreadJsonlFiles(root: BrowserDirectoryHandle): Promise<BrowserThreadFile[]> {
+async function listThreadJsonlFiles(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserThreadFile[]> {
   const results: BrowserThreadFile[] = [];
   for (const base of ["sessions", "archived_sessions"]) {
+    signal?.throwIfAborted();
     const directory = await getPathHandle(root, base);
     if (!directory || directory.kind !== "directory") continue;
-    await walkFiles(directory, base, results, base === "archived_sessions");
+    await walkFiles(directory, base, results, base === "archived_sessions", signal);
   }
   return results;
 }
 
-async function walkFiles(directory: BrowserDirectoryHandle, relativePath: string, results: BrowserThreadFile[], archivedStore: boolean): Promise<void> {
+async function walkFiles(directory: BrowserDirectoryHandle, relativePath: string, results: BrowserThreadFile[], archivedStore: boolean, signal?: AbortSignal): Promise<void> {
   for await (const [name, handle] of directory.entries()) {
+    signal?.throwIfAborted();
     const childPath = `${relativePath}/${name}`;
     if (handle.kind === "directory") {
-      await walkFiles(handle, childPath, results, archivedStore);
+      await walkFiles(handle, childPath, results, archivedStore, signal);
     } else if (/\.jsonl$/i.test(name)) {
       results.push({ relativePath: childPath, handle, archivedStore });
     }
   }
 }
 
-async function parseThreadSample(file: File, full = false): Promise<ParsedThreadSample> {
+async function parseThreadSample(file: File, full = false, signal?: AbortSignal): Promise<ParsedThreadSample> {
   const rolloutDisplay = emptyRolloutDisplayIntegrity("empty");
   const state = {
     title: "",
@@ -2027,13 +2154,13 @@ async function parseThreadSample(file: File, full = false): Promise<ParsedThread
 
   const exactScan = full || file.size <= browserThreadHeadSampleBytes + browserThreadTailSampleBytes;
   if (exactScan) {
-    for await (const line of readBrowserJsonlLines(file)) consumeLine(line.rawLine, line.oversized);
+    for await (const line of readBrowserJsonlLines(file, { signal })) consumeLine(line.rawLine, line.oversized);
   } else {
-    for await (const line of readBrowserJsonlLines(file, { stopAfterByte: browserThreadHeadSampleBytes })) {
+    for await (const line of readBrowserJsonlLines(file, { stopAfterByte: browserThreadHeadSampleBytes, signal })) {
       consumeLine(line.rawLine, line.oversized);
     }
     const tailLines: BrowserReverseJsonlLine[] = [];
-    for await (const line of readBrowserJsonlLinesReverse(file, { stopBeforeByte: file.size - browserThreadTailSampleBytes })) {
+    for await (const line of readBrowserJsonlLinesReverse(file, { stopBeforeByte: file.size - browserThreadTailSampleBytes, signal })) {
       tailLines.push(line);
     }
     for (let index = tailLines.length - 1; index >= 0; index -= 1) {
@@ -2280,7 +2407,7 @@ function buildProjects(threads: Array<Record<string, any>>, savedProjectPaths: s
   return [...byPath.values()].sort((left, right) => right.total - left.total || String(left.label).localeCompare(String(right.label)));
 }
 
-async function inventoryResources(root: BrowserDirectoryHandle, language: BrowserLanguage) {
+async function inventoryResources(root: BrowserDirectoryHandle, language: BrowserLanguage, signal?: AbortSignal) {
   const knownResources = [
     ["AGENTS.md", "AGENTS.md", "instruction", "Agent instructions"],
     ["MEMORY.md", "MEMORY.md", "memory", "Memory entrypoint"],
@@ -2298,12 +2425,14 @@ async function inventoryResources(root: BrowserDirectoryHandle, language: Browse
   ];
   const resources = [];
   for (const [relativePath, label, category, description] of knownResources) {
-    resources.push(await describeResource(root, relativePath, label, category, language === "en" ? description : description));
+    signal?.throwIfAborted();
+    resources.push(await describeResource(root, relativePath, label, category, language === "en" ? description : description, signal));
   }
   return resources;
 }
 
-async function describeResource(root: BrowserDirectoryHandle, relativePath: string, label: string, category: string, description: string) {
+async function describeResource(root: BrowserDirectoryHandle, relativePath: string, label: string, category: string, description: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const handle = await getPathHandle(root, relativePath);
   if (!handle) {
     return {
@@ -2322,7 +2451,7 @@ async function describeResource(root: BrowserDirectoryHandle, relativePath: stri
     };
   }
   if (handle.kind === "file") {
-    const file = await handle.getFile();
+    const file = await abortableBrowserOperation(handle.getFile(), signal);
     return {
       relativePath,
       path: relativePath,
@@ -2338,7 +2467,7 @@ async function describeResource(root: BrowserDirectoryHandle, relativePath: stri
       modifiedAtMs: file.lastModified || null
     };
   }
-  const stats = await directoryStats(handle, 250);
+  const stats = await directoryStats(handle, 250, signal);
   return {
     relativePath,
     path: relativePath,
@@ -2355,20 +2484,21 @@ async function describeResource(root: BrowserDirectoryHandle, relativePath: stri
   };
 }
 
-async function directoryStats(directory: BrowserDirectoryHandle, limit: number) {
+async function directoryStats(directory: BrowserDirectoryHandle, limit: number, signal?: AbortSignal) {
   let sizeBytes = 0;
   let fileCount = 0;
   let directoryCount = 0;
   let truncated = false;
   async function walk(current: BrowserDirectoryHandle): Promise<void> {
     for await (const [, handle] of current.entries()) {
+      signal?.throwIfAborted();
       if (fileCount + directoryCount >= limit) {
         truncated = true;
         return;
       }
       if (handle.kind === "file") {
         fileCount += 1;
-        sizeBytes += (await handle.getFile()).size;
+        sizeBytes += (await abortableBrowserOperation(handle.getFile(), signal)).size;
       } else {
         directoryCount += 1;
         await walk(handle);
@@ -2379,7 +2509,8 @@ async function directoryStats(directory: BrowserDirectoryHandle, limit: number) 
   return { sizeBytes, fileCount, directoryCount, truncated };
 }
 
-async function scanBrowserPluginCache(root: BrowserDirectoryHandle): Promise<BrowserPluginCacheScan> {
+async function scanBrowserPluginCache(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserPluginCacheScan> {
+  signal?.throwIfAborted();
   const curatedRoot = await getPathHandle(root, "plugins/cache/openai-curated");
   if (!curatedRoot || curatedRoot.kind !== "directory") {
     return {
@@ -2403,8 +2534,10 @@ async function scanBrowserPluginCache(root: BrowserDirectoryHandle): Promise<Bro
   const runtimeLimit = 220;
 
   for await (const [pluginName, pluginHandle] of curatedRoot.entries()) {
+    signal?.throwIfAborted();
     if (pluginHandle.kind !== "directory") continue;
     for await (const [runtimeName, runtimeHandle] of pluginHandle.entries()) {
+      signal?.throwIfAborted();
       if (runtimeHandle.kind !== "directory") continue;
       if (scan.scannedRuntimeCount >= runtimeLimit) {
         scan.truncated = true;
@@ -2414,7 +2547,7 @@ async function scanBrowserPluginCache(root: BrowserDirectoryHandle): Promise<Bro
       const runtimePath = `plugins/cache/openai-curated/${pluginName}/${runtimeName}`;
       try {
         const hasManifest = await pathExists(runtimeHandle, ".codex-plugin/plugin.json");
-        const skillCount = await countSkillManifests(runtimeHandle, 24);
+        const skillCount = await countSkillManifests(runtimeHandle, 24, signal);
         if (hasManifest || skillCount > 0) {
           if (scan.validRuntimePaths.length < 10) scan.validRuntimePaths.push(`${runtimePath} | skills=${skillCount}`);
         } else if (scan.incompleteRuntimePaths.length < 16) {
@@ -2428,11 +2561,13 @@ async function scanBrowserPluginCache(root: BrowserDirectoryHandle): Promise<Bro
   return scan;
 }
 
-async function countSkillManifests(runtimeRoot: BrowserDirectoryHandle, limit: number): Promise<number> {
+async function countSkillManifests(runtimeRoot: BrowserDirectoryHandle, limit: number, signal?: AbortSignal): Promise<number> {
+  signal?.throwIfAborted();
   const skillsRoot = await getPathHandle(runtimeRoot, "skills");
   if (!skillsRoot || skillsRoot.kind !== "directory") return 0;
   let count = 0;
   for await (const [, skillHandle] of skillsRoot.entries()) {
+    signal?.throwIfAborted();
     if (skillHandle.kind !== "directory") continue;
     if (await pathExists(skillHandle, "SKILL.md")) {
       count += 1;
@@ -2846,19 +2981,20 @@ function browserPromptTextFromItem(value: any): BrowserOversizedPromptCandidate 
 }
 
 function hideBrowserPromptAttachmentData(text: string): string {
-  return text
-    .replace(
-      /(!\[[^\]]*]\()data:(?:(?:image|audio|video|application|font|model|text)\/|;base64,)[\s\S]*?(\))/gi,
-      "$1[attachment data hidden]$2"
-    )
-    .replace(
-      /(\b(?:src|href)\s*=\s*)(["'])data:(?:(?:image|audio|video|application|font|model|text)\/|;base64,)[\s\S]*?\2/gi,
-      "$1$2[attachment data hidden]$2"
-    )
-    .replace(
-      /data:(?:(?:image|audio|video|application|font|model|text)\/|;base64,)[^\s)\]}>"']*/gi,
-      "[attachment data hidden]"
-    );
+  const dataUrlStart = /data:(?:(?:image|audio|video|application|font|model|text)\/|;base64,)/i.exec(text);
+  if (!dataUrlStart) return text;
+  const prefix = text.slice(0, dataUrlStart.index);
+  if (/!\[[^\]]*]\([^)]*$/i.test(prefix)) {
+    const dataUrlSuffix = text.slice(dataUrlStart.index);
+    const closingPattern = /\n[ \t]*\)(?=[ \t]*(?:\r?\n|$))/g;
+    let closingLine: RegExpExecArray | null = null;
+    for (let match = closingPattern.exec(dataUrlSuffix); match; match = closingPattern.exec(dataUrlSuffix)) closingLine = match;
+    if (closingLine) {
+      const closingOffset = dataUrlStart.index + closingLine.index + closingLine[0].indexOf(")");
+      return `${prefix}[attachment data hidden]${text.slice(closingOffset)}`;
+    }
+  }
+  return `${prefix}[attachment data hidden]`;
 }
 
 function stringifyContent(content: unknown): string {
@@ -2911,15 +3047,54 @@ function countBy<T>(items: T[], keyFn: (item: T) => string): Record<string, numb
   }, {});
 }
 
-async function extractUserPromptRecords(file: Pick<File, "size" | "slice">): Promise<{
+async function extractUserPromptRecords(
+  file: Pick<File, "size" | "slice">,
+  options: BrowserPromptPageOptions = {}
+): Promise<{
   prompts: BrowserPromptRecord[];
+  promptCount: number;
+  purePromptCount: number;
+  visiblePromptCount: number;
+  sourceCounts: Record<string, number>;
+  matchCount: number;
+  matchCountComplete: boolean;
+  nextCursor: string | null;
+  hasMore: boolean;
   aggregationExact: boolean;
   oversizedRecords: number;
 }> {
+  const cursor = decodeBrowserPromptCursor(options.cursor);
+  const limit = Math.max(1, Math.min(200, options.limit || 60));
+  const scope = options.scope || "all";
+  const search = normalizeSearchText(options.search?.trim() || "");
   const prompts: BrowserPromptRecord[] = [];
-  const recentPrompts: Array<{ text: string; timestampMs: number | null; protocol: string }> = [];
-  let oversizedRecords = 0;
-  for await (const line of readBrowserJsonlLines(file, { extractOversizedPrompts: true })) {
+  const recentPrompts = [...cursor.recentPrompts];
+  let promptCount = cursor.promptCount;
+  let purePromptCount = cursor.purePromptCount;
+  let visiblePromptCount = cursor.visiblePromptCount;
+  let matchCount = cursor.matchCount;
+  let oversizedRecords = cursor.oversizedRecords;
+  const sourceCounts = { ...cursor.sourceCounts };
+  let nextByteOffset = cursor.byteOffset;
+  let nextLineNumber = cursor.lineNumber;
+  let hasMore = false;
+  let scannedRecords = 0;
+  for await (const line of readBrowserJsonlLines(file, {
+    signal: options.signal,
+    startAtByte: cursor.byteOffset,
+    startLineNumber: cursor.lineNumber,
+    extractOversizedPrompts: true
+  })) {
+    options.signal?.throwIfAborted();
+    if (scannedRecords >= browserPromptPageScanRecords || line.byteOffset - cursor.byteOffset >= browserPromptPageScanBytes) {
+      nextByteOffset = line.byteOffset;
+      nextLineNumber = Math.max(cursor.lineNumber, line.lineNumber - 1);
+      hasMore = true;
+      break;
+    }
+    scannedRecords += 1;
+    nextByteOffset = line.nextByteOffset;
+    nextLineNumber = line.lineNumber;
     if (line.rawLine === "") continue;
     let candidate: BrowserOversizedPromptCandidate | null = null;
     if (line.oversized || line.rawLine === null) {
@@ -2933,41 +3108,142 @@ async function extractUserPromptRecords(file: Pick<File, "size" | "slice">): Pro
     const message = hideBrowserPromptAttachmentData(candidate.text).trim();
     if (!message || browserPromptIsCrossProtocolDuplicate(message, candidate, recentPrompts)) continue;
     const classification = classifyPromptText(message);
-    prompts.push({
-      index: prompts.length + 1,
+    promptCount += 1;
+    if (classification.hasPureText) purePromptCount += 1;
+    if (classification.visibleByDefault) visiblePromptCount += 1;
+    sourceCounts[classification.sourceType] = (sourceCounts[classification.sourceType] || 0) + 1;
+    const prompt: BrowserPromptRecord = {
+      index: promptCount,
       lineNumber: line.lineNumber,
+      byteOffset: line.byteOffset,
       timestamp: candidate.timestamp,
       text: message,
       characterCount: message.length,
       protocol: candidate.protocol,
       textTruncated: candidate.textTruncated,
       ...classification
-    });
+    };
+    const matchesScope = browserPromptMatchesScope(prompt, scope);
+    const searchableText = scope === "pure" ? prompt.pureText : prompt.text;
+    if (matchesScope && (!search || normalizeSearchText(searchableText).includes(search))) {
+      matchCount += 1;
+      prompts.push(prompt);
+    }
     recentPrompts.push({
-      text: message,
+      fingerprint: browserPromptFingerprint(message),
       timestampMs: candidate.timestamp ? Date.parse(candidate.timestamp) : null,
       protocol: candidate.protocol
     });
+    if (recentPrompts.length > 8) recentPrompts.splice(0, recentPrompts.length - 8);
+    if (prompts.length >= limit && nextByteOffset < file.size) {
+      hasMore = true;
+      break;
+    }
   }
-  return { prompts, aggregationExact: oversizedRecords === 0, oversizedRecords };
+  const nextCursor = hasMore ? encodeBrowserPromptCursor({
+    byteOffset: nextByteOffset,
+    lineNumber: nextLineNumber,
+    promptCount,
+    purePromptCount,
+    visiblePromptCount,
+    matchCount,
+    oversizedRecords,
+    sourceCounts,
+    recentPrompts
+  }) : null;
+  return {
+    prompts,
+    promptCount,
+    purePromptCount,
+    visiblePromptCount,
+    sourceCounts,
+    matchCount,
+    matchCountComplete: !hasMore,
+    nextCursor,
+    hasMore,
+    aggregationExact: oversizedRecords === 0,
+    oversizedRecords
+  };
 }
 
 function browserPromptIsCrossProtocolDuplicate(
   text: string,
   candidate: BrowserOversizedPromptCandidate,
-  recentPrompts: Array<{ text: string; timestampMs: number | null; protocol: string }>
+  recentPrompts: BrowserPromptFingerprint[]
 ): boolean {
   const timestampMs = candidate.timestamp ? Date.parse(candidate.timestamp) : null;
+  const fingerprint = browserPromptFingerprint(text);
   for (const prior of recentPrompts.slice(-8).reverse()) {
-    if (prior.protocol === candidate.protocol || prior.text !== text) continue;
+    if (prior.protocol === candidate.protocol || prior.fingerprint !== fingerprint) continue;
     if (!Number.isFinite(timestampMs) || !Number.isFinite(prior.timestampMs)) return true;
     if (Math.abs(Number(timestampMs) - Number(prior.timestampMs)) <= 2_000) return true;
   }
   return false;
 }
 
+function browserPromptMatchesScope(prompt: BrowserPromptRecord, scope: NonNullable<BrowserPromptPageOptions["scope"]>): boolean {
+  if (scope === "pure") return prompt.hasPureText;
+  if (scope === "visible") return prompt.visibleByDefault;
+  if (scope === "with_agents") return prompt.visibleByDefault || prompt.sourceType === "subagent";
+  if (scope === "automation") return prompt.sourceType === "automation";
+  if (scope === "delegation") return prompt.sourceType === "delegation";
+  return true;
+}
+
+function browserPromptFingerprint(text: string): string {
+  let firstHash = 0x811c9dc5;
+  let secondHash = 0x9e3779b9;
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    firstHash = Math.imul(firstHash ^ codeUnit, 0x01000193);
+    secondHash = Math.imul(secondHash ^ codeUnit, 0x85ebca6b);
+  }
+  return `${text.length}:${(firstHash >>> 0).toString(36)}:${(secondHash >>> 0).toString(36)}`;
+}
+
+function emptyBrowserPromptCursor(): BrowserPromptCursor {
+  return {
+    byteOffset: 0,
+    lineNumber: 0,
+    promptCount: 0,
+    purePromptCount: 0,
+    visiblePromptCount: 0,
+    matchCount: 0,
+    oversizedRecords: 0,
+    sourceCounts: {},
+    recentPrompts: []
+  };
+}
+
+function decodeBrowserPromptCursor(value: string | null | undefined): BrowserPromptCursor {
+  if (!value) return emptyBrowserPromptCursor();
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value)) as Partial<BrowserPromptCursor>;
+    return {
+      byteOffset: Math.max(0, Number(parsed.byteOffset) || 0),
+      lineNumber: Math.max(0, Number(parsed.lineNumber) || 0),
+      promptCount: Math.max(0, Number(parsed.promptCount) || 0),
+      purePromptCount: Math.max(0, Number(parsed.purePromptCount) || 0),
+      visiblePromptCount: Math.max(0, Number(parsed.visiblePromptCount) || 0),
+      matchCount: Math.max(0, Number(parsed.matchCount) || 0),
+      oversizedRecords: Math.max(0, Number(parsed.oversizedRecords) || 0),
+      sourceCounts: parsed.sourceCounts && typeof parsed.sourceCounts === "object" ? parsed.sourceCounts : {},
+      recentPrompts: Array.isArray(parsed.recentPrompts) ? parsed.recentPrompts.slice(-8) : []
+    };
+  } catch {
+    throw new Error("Invalid browser prompt cursor.");
+  }
+}
+
+function encodeBrowserPromptCursor(cursor: BrowserPromptCursor): string {
+  return encodeURIComponent(JSON.stringify(cursor));
+}
+
 function downloadText(filename: string, content: string): void {
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  downloadBlob(filename, new Blob([content], { type: "text/markdown;charset=utf-8" }));
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

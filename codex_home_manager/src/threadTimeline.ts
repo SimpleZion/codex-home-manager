@@ -102,7 +102,9 @@ function safeJsonValue(value: unknown, key = ""): unknown {
 }
 
 function redactEmbeddedDataUrls(value: string): string {
-  return value.replace(/data:[^,\s]{1,200},[^\s<>"'\\]*/gi, "[附件内容已隐藏]");
+  const dataUrlStart = /data:(?:(?:image|audio|video|application|font|model|text)\/|;base64,)/i.exec(value);
+  if (!dataUrlStart) return value;
+  return `${value.slice(0, dataUrlStart.index)}[附件内容已隐藏]`;
 }
 
 function textFromValue(value: unknown): string {
@@ -510,9 +512,12 @@ export async function scanBrowserTimelineSearchPages(
   options: {
     beforeByte?: number | null;
     onProgress?: (timeline: ThreadTimeline) => void;
+    maxItems?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<ThreadTimeline> {
   const initialBeforeByte = options.beforeByte ?? null;
+  const maxItems = Math.max(1, Math.min(200, options.maxItems || 80));
   let beforeByte = initialBeforeByte;
   let accumulatedItems: TimelineItem[] = [];
   let scannedRecords = 0;
@@ -521,9 +526,29 @@ export async function scanBrowserTimelineSearchPages(
   let recoveredOversizedRecords = 0;
 
   while (true) {
+    options.signal?.throwIfAborted();
     const page = await readPage(beforeByte);
+    options.signal?.throwIfAborted();
     const seenIds = new Set(accumulatedItems.map((item) => item.id));
     const pageItems = page.items.filter((item) => !seenIds.has(item.id));
+    if (accumulatedItems.length && accumulatedItems.length + pageItems.length > maxItems) {
+      return {
+        ...page,
+        beforeByte: initialBeforeByte,
+        nextBeforeByte: beforeByte,
+        hasMore: true,
+        scanLimited: true,
+        scannedRecords,
+        scannedBytes,
+        skippedOversizedRecords,
+        recoveredOversizedRecords,
+        items: accumulatedItems,
+        pageCounts: accumulatedItems.reduce<Record<string, number>>((counts, item) => {
+          counts[item.kind] = (counts[item.kind] || 0) + 1;
+          return counts;
+        }, {})
+      };
+    }
     accumulatedItems = [...pageItems, ...accumulatedItems];
     scannedRecords += page.scannedRecords;
     scannedBytes += page.scannedBytes;
@@ -543,6 +568,8 @@ export async function scanBrowserTimelineSearchPages(
       }, {})
     };
     options.onProgress?.(accumulated);
+
+    if (accumulatedItems.length >= maxItems) return accumulated;
 
     const nextBeforeByte = page.nextBeforeByte;
     const scanBoundary = beforeByte ?? page.fileSize;

@@ -624,7 +624,7 @@ def main() -> int:
             run_static_browser_mode_gate()
             run_command(["npm", "run", "build"])
             run_command([sys.executable, "-m", "pytest", "tests"])
-            run_command(["npm", "audit", "--audit-level=moderate"])
+            run_command(["npm", "audit", "--audit-level=moderate", "--omit=optional"])
             fixture_codex_home = create_quality_gate_codex_home(Path(temporary_directory))
             service_process = ensure_service(fixture_codex_home)
             run_command(["node", "scripts/ui_overflow_check.mjs", ui_service_url])

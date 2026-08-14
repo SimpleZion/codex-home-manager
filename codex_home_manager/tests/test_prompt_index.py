@@ -20,6 +20,7 @@ from backend.codex_data import (
     export_thread_prompts,
     read_thread_prompt_page,
     read_thread_timeline_search_page,
+    timeline_conversation_candidate_line,
 )
 from backend.prompt_index import (
     PromptIndexCancelled,
@@ -68,6 +69,32 @@ def user_record(text: str, index: int = 0) -> dict[str, object]:
             "content": [{"type": "input_text", "text": text}],
         },
     }
+
+
+def test_timeline_candidate_ignores_messages_nested_in_compacted_history() -> None:
+    nested_checkpoint = json.dumps(
+        {
+            "timestamp": "2026-08-14T00:00:00Z",
+            "type": "compacted",
+            "payload": {
+                "replacement_history": [
+                    {"type": "response_item", "payload": {"type": "message", "role": "assistant"}}
+                ]
+            },
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    visible_message = json.dumps(
+        {
+            "timestamp": "2026-08-14T00:00:01Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": []},
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert timeline_conversation_candidate_line(nested_checkpoint) is False
+    assert timeline_conversation_candidate_line(visible_message) is True
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +181,7 @@ def test_ten_thousand_prompts_page_search_and_incremental_tail_scan(tmp_path: Pa
         ("İstanbul", "istanbul"),
         ("顶刊研究", "顶刊"),
         ("👩‍💻 workflow", "👩‍💻"),
+        ("Ⓐ 𝐀 ① ㎏", "a 1 kg"),
     ],
 )
 def test_unicode_search_normalization_contract(tmp_path: Path, source: str, query: str) -> None:
@@ -168,6 +196,216 @@ def test_unicode_search_normalization_contract(tmp_path: Path, source: str, quer
     assert page["matchCount"] == 1
     assert page["prompts"][0]["text"] == source
     assert normalize_search_text(query) in normalize_search_text(source)
+
+
+def test_prompt_index_defaults_to_private_local_app_data_outside_frozen_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODEX_HOME_MANAGER_PROMPT_INDEX_ROOT", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(prompt_index_module.sys, "frozen", False, raising=False)
+
+    assert prompt_index_root_path() == (
+        tmp_path / "local-app-data" / "CodexHomeManager" / "prompt-indexes"
+    ).resolve(strict=False)
+
+
+def test_timeline_cross_protocol_prefix_keeps_the_complete_reply(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:01:00.000Z",
+            "payload": {"type": "agent_message", "phase": "final", "message": "partial answer"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:01:00.100Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final",
+                "content": [{"type": "output_text", "text": "partial answer with unique tail"}],
+            },
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    page = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="assistant",
+        search="unique tail",
+        scan_budget_ms=1_000,
+    )
+
+    assert page["matchCount"] == 1
+    assert [item["text"] for item in page["matches"]] == ["partial answer with unique tail"]
+
+    all_replies = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="assistant",
+        scan_budget_ms=1_000,
+    )
+    assert [item["text"] for item in all_replies["matches"]] == ["partial answer with unique tail"]
+
+
+def test_incremental_timeline_replaces_an_already_persisted_short_protocol_copy(tmp_path: Path) -> None:
+    short_record = {
+        "type": "event_msg",
+        "timestamp": "2026-08-14T00:01:00.000Z",
+        "payload": {"type": "agent_message", "phase": "final", "message": "persisted prefix"},
+    }
+    long_record = {
+        "type": "response_item",
+        "timestamp": "2026-08-14T00:01:00.100Z",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final",
+            "content": [{"type": "output_text", "text": "persisted prefix with complete tail"}],
+        },
+    }
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, [short_record])
+    first_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="assistant", scan_budget_ms=1_000
+    )
+    assert [item["text"] for item in first_page["matches"]] == ["persisted prefix"]
+
+    with rollout_path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(long_record, ensure_ascii=False) + "\n")
+    second_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="assistant", scan_budget_ms=1_000
+    )
+    assert [item["text"] for item in second_page["matches"]] == ["persisted prefix with complete tail"]
+
+
+def test_sanitized_oversized_prompt_reports_original_length_and_explicit_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "超长正文" * 500
+    monkeypatch.setattr(prompt_index_module, "prompt_index_direct_candidate_bytes", 64)
+    monkeypatch.setattr(prompt_index_module, "prompt_index_sanitized_string_bytes", 96)
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record(source)])
+
+    page = read_thread_prompt_page(str(codex_home_path), "thread-1", scope="pure", scan_budget_ms=1_000)
+    prompt = page["prompts"][0]
+
+    assert prompt["characterCount"] == len(source)
+    assert prompt["pureCharacterCount"] == len(source)
+    assert prompt["textTruncated"] is True
+    assert prompt["pureTextTruncated"] is True
+    assert "[超长文本已截断]" in prompt["text"]
+    assert "CHM_ORIGINAL_CHARACTERS" not in prompt["text"]
+
+
+def test_five_mib_prompt_tail_is_searchable_and_copy_source_is_complete(tmp_path: Path) -> None:
+    tail = "完整尾部检索标记"
+    source = ("正文" * (5 * 1024 * 1024 // 2)) + tail
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record(source)])
+
+    page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        search=tail,
+        scan_budget_ms=5_000,
+    )
+    copied = "".join(
+        server.stream_thread_prompt_copy(
+            str(codex_home_path),
+            "thread-1",
+            scope="pure",
+        )
+    )
+
+    assert page["matchCount"] == 1
+    assert tail in page["prompts"][0]["pureText"]
+    assert copied == source
+
+
+def test_search_matches_only_the_body_visible_for_the_selected_scope(tmp_path: Path) -> None:
+    attachment_prompt = """# Files mentioned by the user:\n\n## secret-tail.txt: C:/Temp/secret-tail.txt\n\n## My request for Codex:\n只显示这一句"""
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record(attachment_prompt)])
+
+    pure_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        search="secret-tail",
+        scan_budget_ms=1_000,
+    )
+    full_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        search="secret-tail",
+        scan_budget_ms=1_000,
+    )
+
+    assert pure_page["matchCount"] == 0
+    assert full_page["matchCount"] == 1
+
+
+def test_long_search_uses_trigram_index_and_short_fallback_is_cancellable(tmp_path: Path) -> None:
+    codex_home_path, rollout_path = create_prompt_test_home(
+        tmp_path,
+        [user_record(f"row {index:05d} 顶刊 indexed-search-marker") for index in range(12_000)],
+    )
+    initial = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        search="indexed-search-marker",
+        scan_budget_ms=5_000,
+    )
+    assert initial["matchCount"] == 12_000
+    database_path = prompt_index_database_path(codex_home_path)
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prompt_search_fts'"
+        ).fetchone()[0] == 1
+
+    checks = 0
+
+    def cancel_during_scan() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 3
+
+    with pytest.raises(PromptIndexCancelled):
+        prompt_index_module.read_prompt_page(
+            database_path,
+            rollout_path,
+            scope="all",
+            search="顶刊",
+            source_type=None,
+            cursor=None,
+            limit=20,
+            index_state=initial["index"],
+            cancel_check=cancel_during_scan,
+        )
+
+
+def test_prompt_index_allows_parallel_readers_but_blocks_writer_cleanup(tmp_path: Path) -> None:
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record("parallel readers")])
+    read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+    database_path = prompt_index_database_path(codex_home_path)
+
+    with prompt_index_module._database_read(database_path):
+        with prompt_index_module._database_read(database_path):
+            with pytest.raises(prompt_index_module.PromptIndexInUse):
+                with prompt_index_module._database_use(database_path, blocking=False):
+                    pass
+
+
+def test_mcp_exposes_only_bounded_prompt_paging_contract() -> None:
+    tool_names = {tool["name"] for tool in server.mcp_tool_definitions()}
+
+    assert "codex_thread_prompt_page" in tool_names
+    assert "codex_thread_prompts" not in tool_names
 
 
 def test_prompt_index_schema_upgrade_rebuilds_stale_derived_rows(tmp_path: Path) -> None:
@@ -456,6 +694,17 @@ def test_prompt_page_and_streaming_copy_api_contracts(tmp_path: Path, monkeypatc
     assert page["matchCountComplete"] is True
     assert page["prompts"][0]["text"] == "second searchable API prompt"
 
+    compatibility_response = client.get(
+        "/api/threads/thread-1/prompts",
+        params={"codex_home": str(codex_home_path), "limit": 1},
+        headers=headers,
+    )
+    assert compatibility_response.status_code == 200
+    compatibility_page = compatibility_response.json()
+    assert len(compatibility_page["prompts"]) == 1
+    assert compatibility_page["hasMore"] is True
+    assert compatibility_page["nextCursor"]
+
     copy_response = client.get(
         "/api/threads/thread-1/prompts/copy",
         params={"codex_home": str(codex_home_path), "scope": "pure", "format": "jsonl"},
@@ -493,7 +742,7 @@ def test_prompt_page_and_streaming_copy_api_contracts(tmp_path: Path, monkeypatc
         finish_prompt_index_request(request_id)
 
 
-def test_full_timeline_search_api_indexes_all_content_and_normalizes_unicode(tmp_path: Path) -> None:
+def test_full_timeline_search_api_indexes_natural_language_conversation_and_normalizes_unicode(tmp_path: Path) -> None:
     records = [
         user_record("Café Straße İstanbul"),
         {
@@ -526,7 +775,7 @@ def test_full_timeline_search_api_indexes_all_content_and_normalizes_unicode(tmp
         "/api/threads/thread-1/timeline/search/page",
         params={
             "codex_home": str(codex_home_path),
-            "kind": "all",
+            "kind": "conversation",
             "search": "CAFE STRASSE ISTANBUL",
             "scanBudgetMs": 1_000,
             "requestId": "timeline-unicode-contract",
@@ -543,7 +792,7 @@ def test_full_timeline_search_api_indexes_all_content_and_normalizes_unicode(tmp
         "/api/threads/thread-1/timeline/search/page",
         params={
             "codex_home": str(codex_home_path),
-            "kind": "all",
+            "kind": "conversation",
             "search": "顶刊",
             "scanBudgetMs": 1_000,
             "requestId": "timeline-all-contract",
@@ -553,14 +802,64 @@ def test_full_timeline_search_api_indexes_all_content_and_normalizes_unicode(tmp
     assert all_response.status_code == 200
     all_page = all_response.json()
     assert all_page["matchCountComplete"] is True
-    assert {item["kind"] for item in all_page["matches"]} == {"commentary", "assistant", "tool_call"}
+    assert {item["kind"] for item in all_page["matches"]} == {"commentary", "assistant"}
+
+    unsupported_response = client.get(
+        "/api/threads/thread-1/timeline/search/page",
+        params={
+            "codex_home": str(codex_home_path),
+            "kind": "tool",
+            "search": "顶刊",
+            "scanBudgetMs": 1_000,
+        },
+        headers=headers,
+    )
+    assert unsupported_response.status_code == 422
 
     status = client.get(
         "/api/prompt-index/status",
         params={"codex_home": str(codex_home_path)},
         headers=headers,
     ).json()
-    assert status["database"]["timelineEventCount"] >= 4
+    assert status["database"]["timelineEventCount"] == 3
+
+
+def test_persistent_timeline_index_does_not_store_tool_or_reasoning_payloads(tmp_path: Path) -> None:
+    records = [
+        user_record("searchable user text"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "large-output",
+                "output": "tool payload " * 100_000,
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "hidden reasoning"}]},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "searchable final reply"}],
+            },
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="conversation", search="searchable", scan_budget_ms=1_000
+    )
+
+    assert page["matchCountComplete"] is True
+    assert [item["kind"] for item in page["matches"]] == ["user", "assistant"]
+    status = prompt_index_module.prompt_index_status(codex_home_path)
+    assert status["database"]["timelineEventCount"] == 2
+    assert status["database"]["sizeBytes"] < 2_000_000
 
 
 def test_prompt_page_http_request_can_be_cancelled_during_sparse_scan(tmp_path: Path) -> None:
@@ -878,7 +1177,7 @@ def test_prompt_index_mcp_and_capability_metadata_are_explicit(tmp_path: Path) -
                     "codexHome": str(codex_home_path),
                     "apiToken": api_token,
                     "threadId": "thread-1",
-                    "kind": "all",
+                    "kind": "conversation",
                     "search": "metadata secret",
                     "scanBudgetMs": 1_000,
                 },

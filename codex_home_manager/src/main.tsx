@@ -56,7 +56,8 @@ import {
   readBrowserThreadTimelineItem,
   scanBrowserCodexHome,
   supportsBrowserFolderMode,
-  type BrowserCodexWorkspace
+  type BrowserCodexWorkspace,
+  type BrowserPromptPageOptions
 } from "./browserHome";
 import { classifyPromptText, isCodexRuntimeContextPrompt } from "./promptClassification";
 import { isVisibleCommentaryItem, scanBrowserTimelineSearchPages, type ThreadTimeline, type TimelineFilter, type TimelineItem } from "./threadTimeline";
@@ -320,6 +321,10 @@ type ThreadPrompts = {
   visiblePromptCount?: number;
   hiddenPromptCount?: number;
   sourceCounts?: Record<string, number>;
+  matchCount?: number;
+  matchCountComplete?: boolean;
+  nextCursor?: string | null;
+  hasMore?: boolean;
   prompts: PromptRecord[];
 };
 
@@ -403,6 +408,7 @@ type CapabilityRecord = {
 type CapabilityResponse = {
   service: string;
   version: string;
+  frontendContractVersion: number;
   language: Language;
   openapiPath: string;
   mcpPath: string;
@@ -466,6 +472,7 @@ export function capabilityResponseIsCompatible(
   const frontendMajor = semanticVersionMajor(frontendVersion);
   const objectField = (field: string) => Boolean(response[field]) && typeof response[field] === "object" && !Array.isArray(response[field]);
   return response.service === "codex-home-manager"
+    && response.frontendContractVersion === 2
     && connectorMajor !== null
     && frontendMajor !== null
     && connectorMajor === frontendMajor
@@ -1762,6 +1769,7 @@ const englishText: Record<string, string> = {
   "读取 prompts...": "Loading prompts...",
   "正在扫描索引...": "Scanning the prompt index...",
   "扫描中": "Scanning",
+  "条匹配记录": "matching records",
   "完整": "Complete",
   "匹配数完整": "Match count complete",
   "加载更多": "Load more",
@@ -1781,6 +1789,10 @@ const englishText: Record<string, string> = {
   "带元信息": "With metadata",
   "复制干净文本": "Copy clean text",
   "复制带元信息": "Copy with metadata",
+  "下载全部": "Download all",
+  "完整结果直接流式写入文件，不在浏览器内存中拼接。": "Stream the complete result directly to a file without concatenating it in browser memory.",
+  "复制内容超过 16 MB，请使用“下载全部”流式保存，避免浏览器占用过多内存。": "The copy exceeds 16 MB. Use Download all to stream it to a file without excessive browser memory use.",
+  "当前浏览器不支持流式保存，请使用最新版 Chrome 或 Edge。": "This browser does not support streaming file saves. Use the latest Chrome or Edge.",
   "只复制 prompt 正文，不包含编号、行号、时间、来源或分隔线。": "Copy only prompt body text, without prompt numbers, line numbers, timestamps, source labels, or separators.",
   "复制 prompt 正文和编号、行号、时间、来源、分隔线，方便回溯定位。": "Copy prompt body text plus prompt numbers, line numbers, timestamps, source labels, and separators for traceability.",
   "空行处理": "Blank line handling",
@@ -1803,6 +1815,7 @@ const englishText: Record<string, string> = {
   "内部上下文": "Internal context",
   "推荐插件上下文": "Recommended plugin context",
   "运行时上下文": "Runtime context",
+  "续跑目标上下文": "Continuation goal context",
   "只显示你输入的请求文字，剔除文件列表、图片标签、子 agent 和内部上下文": "Show only your request text, excluding file lists, image labels, subagents, and internal context",
   "含子 agent": "Include subagents",
   "子 agent": "Subagent",
@@ -2288,6 +2301,23 @@ function promptSourceCounts(prompts: PromptRecord[]): Record<string, number> {
   }, {});
 }
 
+const promptSourceLabelByType: Record<string, string> = {
+  user: "用户输入",
+  attachment: "附件上下文",
+  browser: "浏览器上下文",
+  context: "用户上下文",
+  automation: "自动化任务",
+  delegation: "线程转发",
+  subagent: "子 agent",
+  goal: "续跑目标上下文",
+  internal: "内部上下文"
+};
+
+function localizedPromptSourceLabel(prompt: PromptRecord, language: Language): string {
+  const translationKey = prompt.sourceLabel || promptSourceLabelByType[prompt.sourceType || ""] || prompt.sourceType || "";
+  return translateText(language, translationKey);
+}
+
 function promptMatchesFilter(prompt: PromptRecord, filterMode: PromptFilterMode): boolean {
   if (filterMode === "pure") return Boolean((prompt.pureText || "").trim());
   if (filterMode === "all") return true;
@@ -2297,7 +2327,7 @@ function promptMatchesFilter(prompt: PromptRecord, filterMode: PromptFilterMode)
   return prompt.visibleByDefault !== false;
 }
 
-function promptScopeForFilter(filterMode: PromptFilterMode): string {
+function promptScopeForFilter(filterMode: PromptFilterMode): NonNullable<BrowserPromptPageOptions["scope"]> {
   if (filterMode === "focused") return "visible";
   if (filterMode === "withAgents") return "with_agents";
   return filterMode;
@@ -2405,16 +2435,66 @@ async function readPromptCopyStream(response: Response, signal: AbortSignal): Pr
   if (!response.body) return await response.text();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const maxClipboardBytes = 16 * 1024 * 1024;
+  let receivedBytes = 0;
   let text = "";
   try {
     while (true) {
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const { done, value } = await reader.read();
       if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxClipboardBytes) {
+        await reader.cancel();
+        throw new Error("复制内容超过 16 MB，请使用“下载全部”流式保存，避免浏览器占用过多内存。");
+      }
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
     return text;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+type PromptFileWriter = {
+  write: (chunk: Uint8Array | string | Blob) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: () => Promise<void>;
+};
+
+type PromptFileHandle = {
+  createWritable: () => Promise<PromptFileWriter>;
+};
+
+async function savePromptCopyStream(response: Response, filename: string, signal: AbortSignal): Promise<void> {
+  const picker = (window as Window & {
+    showSaveFilePicker?: (options: {
+      suggestedName: string;
+      types: Array<{ description: string; accept: Record<string, string[]> }>;
+    }) => Promise<PromptFileHandle>;
+  }).showSaveFilePicker;
+  if (!picker || !response.body) {
+    throw new Error("当前浏览器不支持流式保存，请使用最新版 Chrome 或 Edge。");
+  }
+  const handle = await picker({
+    suggestedName: filename,
+    types: [{ description: "Thread prompts", accept: { "text/plain": [filename.endsWith(".jsonl") ? ".jsonl" : ".txt"] } }]
+  });
+  const writer = await handle.createWritable();
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writer.write(value);
+    }
+    await writer.close();
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (writer.abort) await writer.abort().catch(() => undefined);
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -5809,6 +5889,8 @@ function ThreadLogModal({
   );
 }
 
+const indexedTimelineSearchKinds = new Set<TimelineFilter>(["conversation", "user", "commentary", "assistant"]);
+
 function ThreadTimelinePanel({
   thread,
   codexHome,
@@ -5843,6 +5925,7 @@ function ThreadTimelinePanel({
   const timelineSearchRequestRef = React.useRef<{ threadId: string; requestId: string } | null>(null);
   const timelineQueryKeyRef = React.useRef("");
   const recentTimelineItemsRef = React.useRef<{ kind: TimelineFilter; items: TimelineItem[] }>({ kind, items: [] });
+  const usesIndexedSearch = Boolean(search && !browserWorkspace && indexedTimelineSearchKinds.has(kind));
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 320);
@@ -5896,11 +5979,10 @@ function ThreadTimelinePanel({
       setActiveSearchIndex(recentItems.length ? 0 : -1);
     }
     try {
-      const indexedSearch = Boolean(search && !browserWorkspace);
       const searchRequestId = `timeline-${thread.id}-${sequence}-${Date.now()}`;
-      activeRequestId = indexedSearch ? searchRequestId : null;
-      if (indexedSearch) timelineSearchRequestRef.current = { threadId: thread.id, requestId: searchRequestId };
-      const indexedResult = indexedSearch
+      activeRequestId = usesIndexedSearch ? searchRequestId : null;
+      if (usesIndexedSearch) timelineSearchRequestRef.current = { threadId: thread.id, requestId: searchRequestId };
+      const indexedResult = usesIndexedSearch
         ? await fetchThreadTimelineSearchPageFromLocalApi(thread, codexHome, {
             cursor: beforeByte === null ? null : String(beforeByte),
             kind,
@@ -5945,7 +6027,7 @@ function ThreadTimelinePanel({
           ? search
             ? await scanBrowserTimelineSearchPages(
                 (pageBeforeByte) => readBrowserThreadTimeline(browserWorkspace, thread.id, { beforeByte: pageBeforeByte, kind, search, limit: 80, contentLimit: 120_000, signal: controller.signal }),
-                { beforeByte, onProgress: publishBrowserSearchProgress }
+                { beforeByte, maxItems: 80, signal: controller.signal, onProgress: publishBrowserSearchProgress }
               )
             : await readBrowserThreadTimeline(browserWorkspace, thread.id, { beforeByte, kind, search, limit: 80, contentLimit: 120_000, signal: controller.signal })
           : await fetchThreadTimelineFromLocalApi(thread, codexHome, kind, "", beforeByte, controller.signal);
@@ -5983,7 +6065,7 @@ function ThreadTimelinePanel({
         setLoadingOlder(false);
       }
     }
-  }, [browserWorkspace, codexHome, kind, search, thread]);
+  }, [browserWorkspace, codexHome, kind, search, thread, usesIndexedSearch]);
 
   React.useEffect(() => { void loadPage(null); }, [loadPage]);
   React.useEffect(() => () => {
@@ -6007,7 +6089,7 @@ function ThreadTimelinePanel({
   }, [activeSearchIndex, items.length, virtualizer]);
 
   async function loadOlder(): Promise<number> {
-    if (search && !browserWorkspace) {
+    if (usesIndexedSearch) {
       if (!searchPage?.matchCountComplete || !searchPage.nextCursor || loadingOlder) return 0;
       const encodedCursor = searchPage.nextCursor;
       timelineAbortController.current?.abort();
@@ -6122,18 +6204,18 @@ function ThreadTimelinePanel({
     { value: "all", label: t("全部") }
   ];
   const searchIsScanning = Boolean(search && (
-    browserWorkspace
+    !usesIndexedSearch
       ? loading && (!timeline || timeline.scanLimited)
       : (loading && !searchPage) || (searchPage && !searchPage.matchCountComplete)
   ));
   const searchHasUnloadedResults = Boolean(search && !searchIsScanning && (
-    browserWorkspace ? timeline?.hasMore : searchPage?.nextCursor
+    usesIndexedSearch ? searchPage?.nextCursor : timeline?.hasMore
   ));
-  const searchMatchCount = searchPage?.matchCount || items.length;
+  const searchMatchCount = usesIndexedSearch ? (searchPage?.matchCount || items.length) : items.length;
   const searchCountText = !search
     ? ""
     : items.length
-      ? `${formatCount(activeSearchIndex + 1)} / ${formatCount(searchMatchCount)}${searchIsScanning ? ` · ${t("扫描中")}` : searchHasUnloadedResults ? ` · ${t("仍有结果未加载")}` : ""}`
+      ? `${formatCount(activeSearchIndex + 1)} / ${formatCount(searchMatchCount)} ${t("条匹配记录")}${searchIsScanning ? ` · ${t("扫描中")}` : searchHasUnloadedResults ? ` · ${t("仍有结果未加载")}` : ""}`
       : searchIsScanning
         ? `${t("扫描中")} · 0`
         : t("没有匹配内容");
@@ -6259,7 +6341,7 @@ function PromptVirtualList({
   isLoadingMore: boolean;
   onLoadMore: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const parentRef = React.useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: prompts.length,
@@ -6294,7 +6376,7 @@ function PromptVirtualList({
                   <strong>Prompt {formatCount(prompt.index)}</strong>
                   <span>{t("行")} {formatCount(prompt.lineNumber)}</span>
                   {prompt.timestamp ? <time>{prompt.timestamp}</time> : null}
-                  {prompt.sourceLabel ? <span className="prompt-source-badge">{prompt.sourceLabel}</span> : null}
+                  {prompt.sourceLabel || prompt.sourceType ? <span className="prompt-source-badge">{localizedPromptSourceLabel(prompt, language)}</span> : null}
                   <em>{formatCount(displayText.length)} {t("字符")}</em>
                 </div>
                 <pre>{highlightSearchMatches(displayText, searchQuery)}</pre>
@@ -6327,7 +6409,7 @@ function ThreadPromptModal({
   fetchAuthorizedJson: AuthorizedJsonRequest;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [copied, setCopied] = React.useState(false);
   const [filterMode, setFilterMode] = React.useState<PromptFilterMode>("pure");
   const [copyMode, setCopyMode] = React.useState<PromptCopyMode>("clean");
@@ -6337,6 +6419,7 @@ function ThreadPromptModal({
   const [promptSearchQuery, setPromptSearchQuery] = React.useState("");
   const [activePromptSearchIndex, setActivePromptSearchIndex] = React.useState(-1);
   const [browserPrompts, setBrowserPrompts] = React.useState<ThreadPrompts | null>(null);
+  const [browserNextCursor, setBrowserNextCursor] = React.useState<string | null>(null);
   const [localPromptPage, setLocalPromptPage] = React.useState<ThreadPromptPage | null>(null);
   const [localNextCursor, setLocalNextCursor] = React.useState<string | null>(null);
   const [promptsLoading, setPromptsLoading] = React.useState(false);
@@ -6352,6 +6435,7 @@ function ThreadPromptModal({
   const [promptContentRefreshNonce, setPromptContentRefreshNonce] = React.useState(0);
   const promptSearchInputRef = React.useRef<HTMLInputElement>(null);
   const browserPromptSequenceRef = React.useRef(0);
+  const browserNextCursorRef = React.useRef<string | null>(null);
   const promptPageSequenceRef = React.useRef(0);
   const promptPageRequestRef = React.useRef<{
     sequence: number;
@@ -6420,8 +6504,8 @@ function ThreadPromptModal({
     promptCopyRequestRef.current = null;
     request.controller.abort();
     setCopyingPrompts(false);
-    void cancelThreadPromptRequest(request.threadId, request.requestId, codexHome);
-  }, [codexHome]);
+    if (!browserWorkspace) void cancelThreadPromptRequest(request.threadId, request.requestId, codexHome);
+  }, [browserWorkspace, codexHome]);
 
   React.useEffect(() => {
     setCopied(false);
@@ -6436,6 +6520,8 @@ function ThreadPromptModal({
     setPromptSearchQuery("");
     setActivePromptSearchIndex(-1);
     setBrowserPrompts(null);
+    setBrowserNextCursor(null);
+    browserNextCursorRef.current = null;
     loadedPromptsRef.current = [];
     setLocalPromptPage(null);
     setLocalNextCursor(null);
@@ -6484,14 +6570,59 @@ function ThreadPromptModal({
     browserPromptSequenceRef.current = sequence;
     const controller = new AbortController();
     const threadId = thread.id;
+    const browserScope = activePromptScope === "pure" && !promptSearchQuery ? "all" : activePromptScope;
+    browserNextCursorRef.current = null;
+    setBrowserNextCursor(null);
+    setBrowserPrompts(null);
     setPromptsLoading(true);
     setPromptsError("");
-    void readBrowserThreadPrompts(browserWorkspace, threadId)
+    const readInitialPage = activePromptScope === "pure" && !promptSearchQuery
+      ? readBrowserThreadPrompts(browserWorkspace, threadId)
+      : readBrowserThreadPrompts(browserWorkspace, threadId, {
+          limit: 60,
+          scope: browserScope,
+          search: promptSearchQuery,
+          signal: controller.signal
+        });
+    const applyBrowserPage = (result: ThreadPrompts, replace: boolean) => {
+      if (result.threadId !== threadId) throw new Error(t("prompt 响应属于其他线程，已丢弃。"));
+      setBrowserPrompts((current) => ({
+        ...result,
+        prompts: mergePromptRecords(replace ? [] : current?.prompts || [], result.prompts, replace)
+      }));
+      browserNextCursorRef.current = result.nextCursor || null;
+      setBrowserNextCursor(result.nextCursor || null);
+    };
+    loadMorePromptsRef.current = async () => {
+      const cursor = browserNextCursorRef.current;
+      if (!cursor || controller.signal.aborted || promptLoadingMoreRef.current) return 0;
+      promptLoadingMoreRef.current = true;
+      setPromptsLoadingMore(true);
+      try {
+        const result = await readBrowserThreadPrompts(browserWorkspace, threadId, {
+          cursor,
+          limit: 60,
+          scope: browserScope,
+          search: promptSearchQuery,
+          signal: controller.signal
+        }) as ThreadPrompts;
+        if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return 0;
+        applyBrowserPage(result, false);
+        return result.prompts
+          .map((prompt) => normalizePromptRecord(prompt))
+          .filter((prompt) => promptMatchesFilter(prompt, filterMode))
+          .filter((prompt) => !promptSearchQuery || findSearchMatches(promptTextForFilter(prompt, filterMode), promptSearchQuery).length > 0)
+          .length;
+      } finally {
+        promptLoadingMoreRef.current = false;
+        setPromptsLoadingMore(false);
+      }
+    };
+    void readInitialPage
       .then((result) => {
         if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return;
         const prompts = result as ThreadPrompts;
-        if (prompts.threadId !== threadId) throw new Error(t("prompt 响应属于其他线程，已丢弃。"));
-        setBrowserPrompts(prompts);
+        applyBrowserPage(prompts, true);
       })
       .catch((loadError) => {
         if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return;
@@ -6502,9 +6633,10 @@ function ThreadPromptModal({
       });
     return () => {
       controller.abort();
+      loadMorePromptsRef.current = async () => 0;
       if (browserPromptSequenceRef.current === sequence) browserPromptSequenceRef.current += 1;
     };
-  }, [browserWorkspace, contentMode, t, thread]);
+  }, [activePromptScope, browserWorkspace, contentMode, promptSearchQuery, t, thread]);
 
   React.useEffect(() => {
     if (!thread || browserWorkspace || contentMode !== "prompts") return undefined;
@@ -6665,14 +6797,22 @@ function ThreadPromptModal({
     if (!normalizeSearchText(promptSearchQuery)) return filteredPrompts;
     return filteredPrompts.filter((prompt) => findSearchMatches(promptTextForFilter(prompt, filterMode), promptSearchQuery).length > 0);
   }, [filterMode, filteredPrompts, isBrowserPromptMode, promptSearchQuery]);
-  const promptMatchCount = isBrowserPromptMode ? searchedPrompts.length : currentLocalPage?.matchCount || 0;
-  const promptMatchCountComplete = isBrowserPromptMode || Boolean(currentLocalPage?.matchCountComplete);
+  const promptMatchCount = isBrowserPromptMode
+    ? (activePromptScope === "pure" && !promptSearchQuery
+        ? currentBrowserPrompts?.purePromptCount || searchedPrompts.length
+        : currentBrowserPrompts?.matchCount || searchedPrompts.length)
+    : currentLocalPage?.matchCount || 0;
+  const promptMatchCountComplete = isBrowserPromptMode
+    ? Boolean(currentBrowserPrompts?.matchCountComplete)
+    : Boolean(currentLocalPage?.matchCountComplete);
   const promptScanPercent = !isBrowserPromptMode
     && currentLocalPage?.index.fileSize
     && typeof currentLocalPage.index.scannedBytes === "number"
     ? Math.min(100, Math.max(0, currentLocalPage.index.scannedBytes / currentLocalPage.index.fileSize * 100))
     : null;
-  const promptsHaveMore = !isBrowserPromptMode && Boolean(currentLocalPage?.hasMore && localNextCursor);
+  const promptsHaveMore = isBrowserPromptMode
+    ? Boolean(currentBrowserPrompts?.hasMore && browserNextCursor)
+    : Boolean(currentLocalPage?.hasMore && localNextCursor);
   const promptDataReady = isBrowserPromptMode ? Boolean(currentBrowserPrompts) : Boolean(currentLocalPage);
   const hiddenByFilterCount = isBrowserPromptMode
     ? Math.max(0, normalizedPrompts.length - filteredPrompts.length)
@@ -6758,7 +6898,7 @@ function ThreadPromptModal({
     });
   }
 
-  const allPromptText = searchedPrompts.map((prompt) => {
+  const formatPromptForCopy = (prompt: PromptRecord) => {
     const rawPromptText = copyMode === "clean" ? promptTextForCleanCopy(prompt) : promptTextForFilter(prompt, filterMode).trim();
     const promptText = copySpacingMode === "compact" ? removeBlankLines(rawPromptText) : rawPromptText;
     if (!promptText) return "";
@@ -6766,26 +6906,87 @@ function ThreadPromptModal({
     return (
       `## Prompt ${prompt.index}\n\n` +
       `${t("行")} ${prompt.lineNumber}${prompt.timestamp ? ` | ${prompt.timestamp}` : ""}` +
-      `${prompt.sourceLabel ? ` | ${prompt.sourceLabel}` : ""}\n\n` +
+      `${prompt.sourceLabel || prompt.sourceType ? ` | ${localizedPromptSourceLabel(prompt, language)}` : ""}\n\n` +
       promptText
     );
-  }).filter(Boolean).join(
-    copySpacingMode === "compact" ? (copyMode === "metadata" ? "\n---\n" : "\n") : (copyMode === "clean" ? "\n\n" : "\n\n---\n\n")
+  };
+  const promptJoiner = copySpacingMode === "compact" ? (copyMode === "metadata" ? "\n---\n" : "\n") : (copyMode === "clean" ? "\n\n" : "\n\n---\n\n");
+  const allPromptText = searchedPrompts.map(formatPromptForCopy).filter(Boolean).join(
+    promptJoiner
   ) || "";
 
+  async function visitAllBrowserPrompts(
+    signal: AbortSignal,
+    visit: (text: string, prompt: PromptRecord, ordinal: number) => Promise<void>
+  ): Promise<number> {
+    if (!browserWorkspace || !thread) return 0;
+    let cursor: string | null = null;
+    let ordinal = 0;
+    do {
+      signal.throwIfAborted();
+      const page = await readBrowserThreadPrompts(browserWorkspace, thread.id, {
+        cursor,
+        limit: 80,
+        scope: activePromptScope,
+        search: promptSearchQuery,
+        signal
+      }) as ThreadPrompts;
+      for (const rawPrompt of page.prompts) {
+        signal.throwIfAborted();
+        const prompt = normalizePromptRecord(rawPrompt);
+        const text = formatPromptForCopy(prompt);
+        if (!text) continue;
+        await visit(text, prompt, ordinal);
+        ordinal += 1;
+      }
+      cursor = page.nextCursor || null;
+    } while (cursor);
+    return ordinal;
+  }
+
   async function copyAllPrompts() {
+    if (!thread) return;
     if (isBrowserPromptMode) {
-      if (!allPromptText) return;
+      if (!currentBrowserPrompts?.hasMore) {
+        if (!allPromptText) return;
+        try {
+          await copyTextToClipboard(allPromptText);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1600);
+        } catch {
+          setCopied(false);
+        }
+        return;
+      }
+      const controller = new AbortController();
+      const request = { sequence: ++promptCopySequenceRef.current, threadId: thread.id, requestId: "browser-copy", controller };
+      promptCopyRequestRef.current = request;
+      setCopyingPrompts(true);
       try {
-        await copyTextToClipboard(allPromptText);
+        const chunks: string[] = [];
+        let totalBytes = 0;
+        const encoder = new TextEncoder();
+        await visitAllBrowserPrompts(controller.signal, async (text, _prompt, ordinal) => {
+          const chunk = `${ordinal ? promptJoiner : ""}${text}`;
+          totalBytes += encoder.encode(chunk).byteLength;
+          if (totalBytes > 16 * 1024 * 1024) {
+            throw new Error(t("复制内容超过 16 MB，请使用“下载全部”流式保存，避免浏览器占用过多内存。"));
+          }
+          chunks.push(chunk);
+        });
+        if (!chunks.length) return;
+        await copyTextToClipboard(chunks.join(""));
         setCopied(true);
         window.setTimeout(() => setCopied(false), 1600);
-      } catch {
+      } catch (copyError) {
+        if (!controller.signal.aborted) setPromptsError(copyError instanceof Error ? copyError.message : String(copyError));
         setCopied(false);
+      } finally {
+        if (promptCopyRequestRef.current === request) promptCopyRequestRef.current = null;
+        setCopyingPrompts(false);
       }
       return;
     }
-    if (!thread) return;
     cancelActiveCopyRequest();
     const sequence = promptCopySequenceRef.current + 1;
     promptCopySequenceRef.current = sequence;
@@ -6814,7 +7015,7 @@ function ThreadPromptModal({
           return (
             `## Prompt ${prompt.index}\n\n` +
             `${t("行")} ${prompt.lineNumber}${prompt.timestamp ? ` | ${prompt.timestamp}` : ""}` +
-            `${prompt.sourceLabel ? ` | ${prompt.sourceLabel}` : ""}\n\n` +
+            `${prompt.sourceLabel || prompt.sourceType ? ` | ${localizedPromptSourceLabel(prompt, language)}` : ""}\n\n` +
             promptText
           );
         }).join(copySpacingMode === "compact" ? "\n---\n" : "\n\n---\n\n");
@@ -6830,6 +7031,74 @@ function ThreadPromptModal({
         setPromptsError(copyError instanceof Error ? copyError.message : String(copyError));
       }
       setCopied(false);
+    } finally {
+      if (promptCopyRequestRef.current === request) {
+        promptCopyRequestRef.current = null;
+        setCopyingPrompts(false);
+      }
+    }
+  }
+
+  async function downloadAllPrompts() {
+    if (!thread) return;
+    const format = copyMode === "metadata" ? "jsonl" : "text";
+    const filename = `${thread.id}-prompts.${format === "jsonl" ? "jsonl" : "txt"}`;
+    if (isBrowserPromptMode) {
+      const picker = (window as Window & { showSaveFilePicker?: (options: {
+        suggestedName: string;
+        types: Array<{ description: string; accept: Record<string, string[]> }>;
+      }) => Promise<PromptFileHandle> }).showSaveFilePicker;
+      if (!picker) {
+        setPromptsError(t("当前浏览器不支持流式保存，请使用最新版 Chrome 或 Edge。"));
+        return;
+      }
+      const controller = new AbortController();
+      const request = { sequence: ++promptCopySequenceRef.current, threadId: thread.id, requestId: "browser-download", controller };
+      promptCopyRequestRef.current = request;
+      setCopyingPrompts(true);
+      let writer: PromptFileWriter | null = null;
+      try {
+        const handle = await picker({
+          suggestedName: filename,
+          types: [{ description: "Thread prompts", accept: { "text/plain": [format === "jsonl" ? ".jsonl" : ".txt"] } }]
+        });
+        const writable = await handle.createWritable();
+        writer = writable;
+        const encoder = new TextEncoder();
+        await visitAllBrowserPrompts(controller.signal, async (text, _prompt, ordinal) => {
+          await writable.write(encoder.encode(`${ordinal ? promptJoiner : ""}${text}`));
+        });
+        await writable.close();
+      } catch (downloadError) {
+        if (writer?.abort) await writer.abort().catch(() => undefined);
+        if (!controller.signal.aborted) setPromptsError(downloadError instanceof Error ? downloadError.message : String(downloadError));
+      } finally {
+        if (promptCopyRequestRef.current === request) promptCopyRequestRef.current = null;
+        setCopyingPrompts(false);
+      }
+      return;
+    }
+    cancelActiveCopyRequest();
+    const sequence = promptCopySequenceRef.current + 1;
+    promptCopySequenceRef.current = sequence;
+    const controller = new AbortController();
+    const requestId = createPromptRequestId("copy", thread.id, sequence);
+    const request = { sequence, threadId: thread.id, requestId, controller };
+    promptCopyRequestRef.current = request;
+    setCopyingPrompts(true);
+    setPromptsError("");
+    try {
+      const response = await fetchThreadPromptCopyStream(thread, codexHome, {
+        scope: activePromptScope,
+        search: promptSearchQuery,
+        format,
+        requestId
+      }, controller.signal);
+      await savePromptCopyStream(response, filename, controller.signal);
+    } catch (downloadError) {
+      if (!controller.signal.aborted && promptCopyRequestRef.current === request) {
+        setPromptsError(downloadError instanceof Error ? downloadError.message : String(downloadError));
+      }
     } finally {
       if (promptCopyRequestRef.current === request) {
         promptCopyRequestRef.current = null;
@@ -7045,6 +7314,16 @@ function ThreadPromptModal({
               <Copy size={15} />
               {copyingPrompts ? t("正在流式读取...") : copied ? t("已复制") : copyMode === "metadata" ? t("复制带元信息") : t("复制干净文本")}
             </button>
+            <button
+              className="prompt-copy-button"
+              onClick={() => void downloadAllPrompts()}
+              disabled={copyingPrompts || (isBrowserPromptMode && !allPromptText)}
+              title={t("完整结果直接流式写入文件，不在浏览器内存中拼接。")}
+              type="button"
+            >
+              <Download size={15} />
+              {t("下载全部")}
+            </button>
           </div>
           {!isBrowserPromptMode ? (
             <details className="prompt-index-management" onToggle={(event) => {
@@ -7150,7 +7429,10 @@ function ThreadPromptModal({
           {promptDataReady ? (
             searchedPrompts.length
               ? <PromptVirtualList prompts={searchedPrompts} filterMode={filterMode} searchQuery={promptSearchQuery} activeSearchIndex={activePromptSearchIndex} hasMore={promptsHaveMore} isLoadingMore={promptsLoadingMore} onLoadMore={() => void loadMorePromptsRef.current()} />
-              : <div className="empty-state">{promptMatchCountComplete ? promptSearchQuery ? t("没有匹配内容") : t("当前筛选没有 prompt") : t("正在扫描索引...")}</div>
+              : <div className="empty-state">
+                  <span>{promptMatchCountComplete ? promptSearchQuery ? t("没有匹配内容") : t("当前筛选没有 prompt") : t("正在扫描索引...")}</span>
+                  {promptsHaveMore ? <button type="button" onClick={() => void loadMorePromptsRef.current()} disabled={promptsLoadingMore}>{promptsLoadingMore ? t("正在加载更多...") : t("加载更多")}</button> : null}
+                </div>
           ) : null}
         </div></div>
         <div id="thread-content-panel-timeline" role="tabpanel" aria-labelledby="thread-content-tab-timeline" hidden={contentMode !== "timeline"} className="thread-timeline-view">
@@ -7291,10 +7573,10 @@ function LocalApiConnectionGate({
           {browserScanSupported ? (
             <div className="browser-folder-disclosure">
               <p>{browserPermissionLine}</p>
-              <button className="secondary-action browser-folder-action" type="button" onClick={onBrowserScan} disabled={browserScanLoading}>
+              <button className="secondary-action browser-folder-action" type="button" onClick={onBrowserScan}>
                 <FolderInput size={16} />
                 {browserScanLoading
-                  ? (language === "en" ? "Scanning..." : "正在扫描...")
+                  ? (language === "en" ? "Cancel scan" : "取消扫描")
                   : (language === "en" ? "Use read-only folder preview" : "使用只读文件夹预览")}
               </button>
             </div>
@@ -7328,6 +7610,7 @@ function App() {
   const [createBackups, setCreateBackups] = React.useState(true);
   const [browserWorkspace, setBrowserWorkspace] = React.useState<BrowserCodexWorkspace | null>(null);
   const [browserScanLoading, setBrowserScanLoading] = React.useState(false);
+  const browserScanControllerRef = React.useRef<AbortController | null>(null);
   const [language, setLanguage] = React.useState<Language>(() => {
     try {
       return normalizeLanguage(window.localStorage.getItem(languageStorageKey));
@@ -7529,20 +7812,39 @@ function App() {
     if (isLocalApiConnected) void refreshHealth();
   }, [isLocalApiConnected, refreshHealth]);
 
-  const rescanBrowserWorkspace = React.useCallback(async (workspace: BrowserCodexWorkspace) => {
-    const nextWorkspace = await scanBrowserCodexHome(workspace.directoryHandle, sidebarLimit, language);
-    setBrowserWorkspace(nextWorkspace);
-    return nextWorkspace;
+  const scanBrowserDirectory = React.useCallback(async (directoryHandle: BrowserCodexWorkspace["directoryHandle"]) => {
+    browserScanControllerRef.current?.abort();
+    const controller = new AbortController();
+    browserScanControllerRef.current = controller;
+    setBrowserScanLoading(true);
+    try {
+      const nextWorkspace = await scanBrowserCodexHome(directoryHandle, sidebarLimit, language, controller.signal);
+      controller.signal.throwIfAborted();
+      setBrowserWorkspace(nextWorkspace);
+      return nextWorkspace;
+    } finally {
+      if (browserScanControllerRef.current === controller) {
+        browserScanControllerRef.current = null;
+        setBrowserScanLoading(false);
+      }
+    }
   }, [language, sidebarLimit]);
 
+  const rescanBrowserWorkspace = React.useCallback(
+    (workspace: BrowserCodexWorkspace) => scanBrowserDirectory(workspace.directoryHandle),
+    [scanBrowserDirectory]
+  );
+
   const startBrowserFolderScan = React.useCallback(async () => {
-    setBrowserScanLoading(true);
+    if (browserScanControllerRef.current) {
+      browserScanControllerRef.current.abort();
+      return;
+    }
     setActionError("");
     setNotice("");
     try {
       const directoryHandle = await pickBrowserCodexDirectory();
-      const nextWorkspace = await scanBrowserCodexHome(directoryHandle, sidebarLimit, language);
-      setBrowserWorkspace(nextWorkspace);
+      const nextWorkspace = await scanBrowserDirectory(directoryHandle);
       setSelectedThreadId(null);
       setDetail(null);
       setResourceRead(null);
@@ -7553,11 +7855,13 @@ function App() {
         ? `Loaded ${formatCount((nextWorkspace.snapshot as Snapshot).summary.totalThreads)} threads from the selected folder.`
         : `已从所选文件夹加载 ${formatCount((nextWorkspace.snapshot as Snapshot).summary.totalThreads)} 条线程。`);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBrowserScanLoading(false);
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setActionError(error instanceof Error ? error.message : String(error));
+      }
     }
-  }, [language, sidebarLimit]);
+  }, [language, scanBrowserDirectory]);
+
+  React.useEffect(() => () => browserScanControllerRef.current?.abort(), []);
 
   React.useEffect(() => {
     if (!notice) return;
@@ -7700,8 +8004,12 @@ function App() {
   async function refreshAll() {
     if (browserWorkspace) {
       await runAction(async () => {
-        await rescanBrowserWorkspace(browserWorkspace);
-        setNotice(language === "en" ? "Browser folder scan refreshed." : "已刷新浏览器文件夹扫描。");
+        try {
+          await rescanBrowserWorkspace(browserWorkspace);
+          setNotice(language === "en" ? "Browser folder scan refreshed." : "已刷新浏览器文件夹扫描。");
+        } catch (error) {
+          if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
+        }
       });
       return;
     }
@@ -8338,9 +8646,11 @@ function App() {
             <span>{language === "en" ? "Browser folder mode: read-only local scan, no connector required." : "浏览器文件夹模式：只读本机扫描，无需下载安装连接器。"}</span>
             <button type="button" onClick={() => void startBrowserFolderScan()}>
               <FolderInput size={14} />
-              {language === "en" ? "Choose another folder" : "选择其他文件夹"}
+              {browserScanLoading
+                ? (language === "en" ? "Cancel scan" : "取消扫描")
+                : (language === "en" ? "Choose another folder" : "选择其他文件夹")}
             </button>
-            <button type="button" onClick={() => setBrowserWorkspace(null)}>
+            <button type="button" onClick={() => { browserScanControllerRef.current?.abort(); setBrowserWorkspace(null); }}>
               <ServerCog size={14} />
               {language === "en" ? "Use connector" : "使用连接器"}
             </button>

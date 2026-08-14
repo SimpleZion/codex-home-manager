@@ -10,7 +10,7 @@ import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -30,6 +30,7 @@ from .codex_data import (
     copy_resource_from_home,
     duplicate_thread,
     export_thread_prompts,
+    fetch_thread_row,
     get_thread_action_preview_record,
     get_thread_daily_token_usage,
     get_thread_detail,
@@ -41,6 +42,7 @@ from .codex_data import (
     make_backup_portable,
     move_thread_workspace,
     migrate_thread_project,
+    normalize_path_text,
     preview_official_thread_tools_repair,
     preview_thread_workspace_move,
     preview_import_thread_from_home,
@@ -58,6 +60,8 @@ from .codex_data import (
     read_thread_timeline_item,
     read_thread_timeline_search_page,
     resolve_codex_paths,
+    resolve_resource_path,
+    rows_for_project,
     portable_backup_state_paths,
     repair_official_thread_tools_exposure,
     repair_user_event,
@@ -89,7 +93,7 @@ from .prompt_index import (
 )
 
 
-packaged_product_version = "1.0.9"
+packaged_product_version = "1.0.10"
 
 
 def load_product_version() -> str:
@@ -446,6 +450,7 @@ class CapabilityItem(BaseModel):
 class CapabilitiesResponse(BaseModel):
     service: str
     version: str
+    frontendContractVersion: Literal[2] = 2
     language: str = "en"
     openapiPath: str
     mcpPath: str
@@ -727,6 +732,11 @@ class ThreadPromptsResponse(BaseModel):
     hiddenPromptCount: int | None = None
     sourceCounts: dict[str, int] | None = None
     prompts: list[PromptRecord]
+    nextCursor: str | None = None
+    hasMore: bool = False
+    matchCount: int | None = None
+    matchCountComplete: bool | None = None
+    index: dict[str, Any] | None = None
 
 
 class ThreadPromptPageResponse(BaseModel):
@@ -1015,6 +1025,48 @@ def canonical_payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
 
+state_hash_chunk_bytes = 1024 * 1024
+
+
+def stream_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(state_hash_chunk_bytes):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def update_framed_digest(digest: Any, value: str | int) -> None:
+    encoded_value = str(value).encode("utf-8", errors="surrogatepass")
+    digest.update(len(encoded_value).to_bytes(8, "big"))
+    digest.update(encoded_value)
+
+
+def stream_directory_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for root_text, directory_names, file_names in os.walk(path, onerror=raise_walk_error):
+        directory_names.sort(key=str.casefold)
+        file_names.sort(key=str.casefold)
+        root_path = Path(root_text)
+        relative_root = root_path.relative_to(path)
+        for entry_kind, entry_names in (("directory", directory_names), ("file", file_names)):
+            for entry_name in entry_names:
+                entry_path = root_path / entry_name
+                relative_path = (relative_root / entry_name).as_posix()
+                entry_stat = entry_path.stat()
+                update_framed_digest(digest, entry_kind)
+                update_framed_digest(digest, relative_path)
+                update_framed_digest(digest, entry_stat.st_size)
+                update_framed_digest(digest, entry_stat.st_mtime_ns)
+                if entry_kind == "file":
+                    update_framed_digest(digest, stream_file_sha256(entry_path))
+    return digest.hexdigest()
+
+
 def state_path_record(path: Path, *, include_hash: bool = False) -> dict[str, Any]:
     resolved_path = path.expanduser().resolve(strict=False)
     if not resolved_path.exists():
@@ -1028,7 +1080,9 @@ def state_path_record(path: Path, *, include_hash: bool = False) -> dict[str, An
         "modifiedNs": stat.st_mtime_ns,
     }
     if resolved_path.is_file() and include_hash:
-        record["sha256"] = hashlib.sha256(resolved_path.read_bytes()).hexdigest()
+        record["sha256"] = stream_file_sha256(resolved_path)
+    elif resolved_path.is_dir() and include_hash:
+        record["treeSha256"] = stream_directory_sha256(resolved_path)
     elif resolved_path.is_dir():
         record["children"] = [
             {
@@ -1040,6 +1094,76 @@ def state_path_record(path: Path, *, include_hash: bool = False) -> dict[str, An
             for child in sorted(resolved_path.iterdir(), key=lambda item: item.name.casefold())
         ]
     return record
+
+
+def source_operation_state_bindings(payload: dict[str, Any], source_paths: Any | None) -> dict[str, Any]:
+    bindings: dict[str, Any] = {}
+    if source_paths is None:
+        return bindings
+
+    relative_path = str(payload.get("relativePath") or "").strip()
+    if relative_path:
+        try:
+            source_resource_path = resolve_resource_path(source_paths, relative_path)
+            bindings["resource"] = {
+                "relativePath": relative_path,
+                "state": state_path_record(source_resource_path, include_hash=True),
+            }
+        except (OSError, RuntimeError, ValueError) as error:
+            bindings["resource"] = {
+                "relativePath": relative_path,
+                "error": f"{type(error).__name__}: {error}",
+            }
+
+    source_thread_id = str(payload.get("sourceThreadId") or "").strip()
+    if source_thread_id:
+        try:
+            source_row = fetch_thread_row(source_paths, source_thread_id)
+            rollout_path_text = normalize_path_text(source_row.get("rollout_path")) if source_row else ""
+            bindings["thread"] = {
+                "sourceThreadId": source_thread_id,
+                "rolloutPath": rollout_path_text,
+                "rollout": state_path_record(Path(rollout_path_text), include_hash=True) if rollout_path_text else None,
+            }
+        except (OSError, RuntimeError, ValueError) as error:
+            bindings["thread"] = {
+                "sourceThreadId": source_thread_id,
+                "error": f"{type(error).__name__}: {error}",
+            }
+
+    source_project_path = str(payload.get("sourceProjectPath") or "").strip()
+    if source_project_path:
+        include_archived = bool(payload.get("includeArchived"))
+        try:
+            matching_rows = rows_for_project(source_paths, source_project_path, include_archived=include_archived)
+            rollout_bindings = []
+            for source_row in sorted(
+                matching_rows,
+                key=lambda row: (
+                    str(row.get("id") or "").casefold(),
+                    normalize_path_text(row.get("rollout_path")).casefold(),
+                ),
+            ):
+                rollout_path_text = normalize_path_text(source_row.get("rollout_path"))
+                rollout_bindings.append(
+                    {
+                        "sourceThreadId": str(source_row.get("id") or ""),
+                        "rolloutPath": rollout_path_text,
+                        "rollout": state_path_record(Path(rollout_path_text), include_hash=True) if rollout_path_text else None,
+                    }
+                )
+            bindings["project"] = {
+                "sourceProjectPath": normalize_path_text(source_project_path),
+                "includeArchived": include_archived,
+                "rollouts": rollout_bindings,
+            }
+        except (OSError, RuntimeError, ValueError) as error:
+            bindings["project"] = {
+                "sourceProjectPath": normalize_path_text(source_project_path),
+                "includeArchived": include_archived,
+                "error": f"{type(error).__name__}: {error}",
+            }
+    return bindings
 
 
 def operation_state_digest(payload: dict[str, Any]) -> str:
@@ -1067,16 +1191,26 @@ def operation_state_digest(payload: dict[str, Any]) -> str:
             else:
                 state_paths.append((candidate, True))
 
+    source_bindings: dict[str, Any] = {}
     source_home_text = str(payload.get("sourceCodexHome") or "").strip()
     if source_home_text:
-        source_paths = resolve_codex_paths(source_home_text)
-        state_paths.extend(
-            [
-                (source_paths.database_path, False),
-                (source_paths.database_path.with_name(source_paths.database_path.name + "-wal"), False),
-                (source_paths.session_index_path, True),
-            ]
-        )
+        try:
+            source_paths = resolve_codex_paths(source_home_text)
+        except (OSError, RuntimeError, ValueError) as error:
+            source_paths = None
+            source_bindings["sourceCodexHome"] = {
+                "path": str(Path(source_home_text).expanduser().resolve(strict=False)),
+                "error": f"{type(error).__name__}: {error}",
+            }
+        if source_paths is not None:
+            state_paths.extend(
+                [
+                    (source_paths.database_path, False),
+                    (source_paths.database_path.with_name(source_paths.database_path.name + "-wal"), False),
+                    (source_paths.session_index_path, True),
+                ]
+            )
+            source_bindings.update(source_operation_state_bindings(payload, source_paths))
 
     thread_id = str(payload.get("threadId") or "").strip()
     if thread_id:
@@ -1117,7 +1251,7 @@ def operation_state_digest(payload: dict[str, Any]) -> str:
     for state_path, include_hash in state_paths:
         record = state_path_record(state_path, include_hash=include_hash)
         unique_records[os.path.normcase(record["path"])] = record
-    return canonical_payload_hash({"paths": unique_records})
+    return canonical_payload_hash({"paths": unique_records, "sourceBindings": source_bindings})
 
 
 def cleanup_preview_store() -> None:
@@ -1577,6 +1711,7 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
     return {
         "service": "codex-home-manager",
         "version": app.version,
+        "frontendContractVersion": 2,
         "language": language,
         "openapiPath": "/openapi.json",
         "mcpPath": "/mcp",
@@ -1592,9 +1727,9 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("analyze_thread_detail", "GET", "/api/threads/{thread_id}/analysis", "Load JSONL statistics, visible-event integrity and backups for one thread after its fast details shell is visible. The request is cancellable.", ["thread_id", "request_id"], "read-only", success_fields=["threadId", "analysisStatus", "rolloutStats", "rolloutDisplay", "backups"]),
             item("cancel_thread_detail_analysis", "POST", "/api/threads/{thread_id}/analysis/cancel", "Cancel an active detail analysis at the next JSONL record boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("daily_token_usage", "GET", "/api/threads/{thread_id}/daily-tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", ["thread_id"], "read-only", success_fields=["summary", "days"]),
-            item("read_thread_prompts", "GET", "/api/threads/{thread_id}/prompts", "Read classified prompt-like user role records from one thread without writing an export file. pureText contains only the user's typed/request text with file lists, image tags and internal contexts stripped.", ["thread_id"], "read-only", success_fields=["threadId", "title", "rolloutPath", "promptCount", "purePromptCount", "visiblePromptCount", "hiddenPromptCount", "sourceCounts", "prompts"]),
+            item("read_thread_prompts", "GET", "/api/threads/{thread_id}/prompts", "Compatibility endpoint that returns a bounded page of classified user-role records. Use /prompts/page for filtering, cancellation and continued pagination.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "title", "rolloutPath", "promptCount", "prompts", "nextCursor", "hasMore", "index"]),
             item("read_thread_prompt_page", "GET", "/api/threads/{thread_id}/prompts/page", "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "prompts", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
-            item("search_thread_timeline", "GET", "/api/threads/{thread_id}/timeline/search/page", "Incrementally index and search the complete thread timeline, including user input, natural-language progress, final replies, reasoning records and tools. Results use opaque cursors and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "matches", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
+            item("search_thread_timeline", "GET", "/api/threads/{thread_id}/timeline/search/page", "Incrementally index and search the complete natural-language conversation: user input, progress commentary, and final replies. Reasoning, tools, and context remain available through byte-cursor timeline search without entering the persistent full-text index.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "matches", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
             item("cancel_thread_timeline_search", "DELETE", "/api/threads/{thread_id}/timeline/search/requests/{request_id}", "Cancel an active full-timeline indexing or search request.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("cancel_thread_prompt_request", "DELETE", "/api/threads/{thread_id}/prompts/requests/{request_id}", "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("copy_thread_prompts", "GET", "/api/threads/{thread_id}/prompts/copy", "Stream filtered prompt text or NDJSON without materializing the complete result in process memory.", ["thread_id"], "read-only persistent cache", success_fields=[]),
@@ -2032,7 +2167,7 @@ async def thread_timeline_search_page_endpoint(
     codex_home: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=80, ge=1, le=200),
-    kind: str = Query(default="conversation", pattern="^(conversation|user|commentary|assistant|reasoning|tool|all)$"),
+    kind: str = Query(default="conversation", pattern="^(conversation|user|commentary|assistant)$"),
     search: str = Query(default="", max_length=20_000),
     scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
     request_id: str | None = Query(default=None, alias="requestId", max_length=128),
@@ -2098,9 +2233,16 @@ def cancel_thread_timeline_search_request_endpoint(
 def thread_prompts_endpoint(
     thread_id: str,
     codex_home: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
 ) -> dict[str, Any]:
     try:
-        return read_thread_prompts(codex_home_text=codex_home, thread_id=thread_id)
+        return read_thread_prompts(
+            codex_home_text=codex_home,
+            thread_id=thread_id,
+            cursor=cursor,
+            limit=limit,
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
     except Exception as error:
@@ -3230,9 +3372,8 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_thread_daily_tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", mcp_preview_properties({**thread_id, "sidebarLimit": sidebar_limit_schema}), ["threadId"]),
         mcp_tool("codex_thread_logs", "Read structured JSONL/app logs for one thread with pagination and filters.", mcp_preview_properties({**thread_id, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}, "kind": {"type": "string", "default": "all"}, "search": {"type": "string", "default": ""}, "source": {"type": "string", "enum": ["all", "rollout", "app"], "default": "all"}}), ["threadId"]),
         mcp_tool("codex_thread_timeline", "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.", mcp_preview_properties({**thread_id, "beforeByte": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 500000, "default": 120000}}), ["threadId"]),
-        mcp_tool("codex_search_thread_timeline", "Incrementally search the entire thread timeline, not only loaded DOM or the JSONL tail. Returns explicit index completeness, match count and an opaque result cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
+        mcp_tool("codex_search_thread_timeline", "Incrementally search the complete natural-language conversation, not only loaded DOM or the JSONL tail. Covers user input, progress commentary, and final replies; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_thread_timeline_item", "Read the complete semantic content for one timeline record by the byteOffset returned from codex_thread_timeline.", mcp_preview_properties({**thread_id, "byteOffset": {"type": "integer", "minimum": 0}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 5000000, "default": 2000000}}), ["threadId", "byteOffset"]),
-        mcp_tool("codex_thread_prompts", "Read all user prompts from one thread without writing an export file.", mcp_preview_properties(thread_id), ["threadId"]),
         mcp_tool("codex_thread_prompt_page", "Incrementally page and search all classified user inputs with source filters, explicit index completeness and an opaque cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}, "sourceType": {"type": "string"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_list_backups", "List rollback backups, optionally filtered by thread id.", {"threadId": {"type": "string"}}),
         mcp_tool("codex_preview_thread_action", "Preview show, hide, repair, archive or duplicate before writing.", mcp_preview_properties({**thread_id, "action": {"type": "string", "enum": ["show", "hide", "repair_user_event", "archive", "duplicate"]}, **target_project, "sidebarLimit": sidebar_limit_schema}), ["threadId", "action"]),
@@ -3548,8 +3689,6 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                 mcp_int(arguments, "byteOffset", 0, 0, None),
                 mcp_int(arguments, "contentLimit", 2000000, 2000, 5000000),
             ))
-        if name == "codex_thread_prompts":
-            return mcp_result(read_thread_prompts(codex_home_text=codex_home, thread_id=mcp_required_str(arguments, "threadId")))
         if name == "codex_thread_prompt_page":
             thread_id = mcp_required_str(arguments, "threadId")
             with mcp_cancellable_thread_request(codex_home, thread_id, mcp_str(arguments, "requestId")) as (
