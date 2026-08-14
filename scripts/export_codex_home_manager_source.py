@@ -19,6 +19,7 @@ supported_git_modes = {"100644", "100755"}
 manager_github_prefix = ".github/"
 required_export_paths = {
     ".gitattributes",
+    ".gitignore",
     ".github/dependabot.yml",
     ".github/workflows/codeql.yml",
     ".github/workflows/requirements-ci.txt",
@@ -232,7 +233,7 @@ def build_manifest(
             "rootRepository": source_manifest(
                 "rootRepository",
                 root_snapshot,
-                [".gitattributes", "README.md", "scripts/**"],
+                [".gitattributes", ".gitignore", "README.md", "scripts/**"],
             ),
             "managerRepository": source_manifest(
                 "managerRepository",
@@ -250,7 +251,7 @@ def export_source_monorepo(root_repository: Path, manager_repository: Path, outp
 
     root_snapshot = repository_snapshot(
         root_repository,
-        lambda source_path: source_path in {".gitattributes", "README.md"}
+        lambda source_path: source_path in {".gitattributes", ".gitignore", "README.md"}
         or source_path.startswith("scripts/"),
     )
     manager_snapshot = repository_snapshot(manager_repository, lambda _source_path: True)
@@ -389,7 +390,7 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
             export_path, original_source_path = validate_manifest_record(source_path, file_record)
             if source_name == "rootRepository":
                 if export_path != original_source_path or not (
-                    export_path in {".gitattributes", "README.md"}
+                    export_path in {".gitattributes", ".gitignore", "README.md"}
                     or export_path.startswith("scripts/")
                 ):
                     raise SourceExportError(f"root repository file is outside the monorepo layout: {export_path}")

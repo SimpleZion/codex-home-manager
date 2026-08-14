@@ -49,6 +49,7 @@ def source_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "root",
         {
             ".gitattributes": "* text=auto eol=lf\n",
+            ".gitignore": "__pycache__/\n*.pyc\n",
             "README.md": "# Exported source\n",
             "scripts/export_codex_home_manager_source.py": export_script_path.read_text(encoding="utf-8"),
             "scripts/repair_all_codex_after_exit.ps1": "Write-Output repair\n",
@@ -115,10 +116,11 @@ def test_export_contains_only_monorepo_sources_and_commit_manifest(tmp_path: Pat
 
     result = export_module.export_source_monorepo(root_repository, manager_repository, output)
 
-    assert result["rootFiles"] == 6
+    assert result["rootFiles"] == 7
     assert result["managerFiles"] == 14
     assert (output / "README.md").is_file()
     assert (output / ".gitattributes").read_text(encoding="utf-8") == "* text=auto eol=lf\n"
+    assert (output / ".gitignore").read_text(encoding="utf-8") == "__pycache__/\n*.pyc\n"
     assert (output / ".github" / "workflows" / "source-ci.yml").is_file()
     assert (output / ".github" / "workflows" / "codeql.yml").is_file()
     assert (output / ".github" / "workflows" / "requirements-ci.txt").is_file()

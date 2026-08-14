@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-14T15:52:16.911024+00:00",
+  "generatedAt": "2026-08-14T17:30:26.792553+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -10,9 +10,10 @@
   "sources": {
     "rootRepository": {
       "branch": "master",
-      "commit": "07a362ea3f9c7d691919c06baea29925b6200fe4",
+      "commit": "07857fb6b66c5892a4fb663704559614641173ad",
       "selection": [
         ".gitattributes",
+        ".gitignore",
         "README.md",
         "scripts/**"
       ],
@@ -24,6 +25,14 @@
           "gitObject": "2b9b79e26c9051673d71c955dab4de5b2e0e6b76",
           "bytes": 20,
           "sha256": "53bd72599f9e8cbed776d070e723b4333192ca7b3a3a55c199f7a02f854b923b"
+        },
+        {
+          "path": ".gitignore",
+          "sourcePath": ".gitignore",
+          "gitMode": "100644",
+          "gitObject": "5f028454b414fa319906c45db1329cc99e2b917a",
+          "bytes": 661,
+          "sha256": "b16798ee6c7d9b06acb1cc870691d1b57916b5a7986b61d64fcab3cf9ec04976"
         },
         {
           "path": "README.md",
@@ -69,9 +78,9 @@
           "path": "scripts/export_codex_home_manager_source.py",
           "sourcePath": "scripts/export_codex_home_manager_source.py",
           "gitMode": "100644",
-          "gitObject": "44f59c32efc3736a50faef0773ff5f4285fe37d2",
-          "bytes": 26114,
-          "sha256": "f38577dc12e15c8e07303da3084dee2ad5f75029d75061ca6dd2769e9016e2e7"
+          "gitObject": "a4610a861cdd2b8507fe0fb93b3d2987e284fe80",
+          "bytes": 26174,
+          "sha256": "73219174a689ca2a88d4cb3b04c56f2874e97b6546100248cec7515d61fa4204"
         },
         {
           "path": "scripts/live_validation_contract.py",
@@ -173,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "4ba6d8826be6904a73e59fb1959c82a041709121",
+      "commit": "a336f7c7ef9822a4d5abd63a26d419dbcfbf3070",
       "selection": [
         "**"
       ],
@@ -222,9 +231,9 @@
           "path": "codex_home_manager/.gitignore",
           "sourcePath": ".gitignore",
           "gitMode": "100644",
-          "gitObject": "f2d85568641d4b9f5b32645766f3350933dadb7f",
-          "bytes": 284,
-          "sha256": "41714ea2a0e5a4ec2048fdb628aeb30b4ab6f7195c01f520b449d7309e13e972"
+          "gitObject": "07d79bb14ef2a92f0c2a7ef7a0a2d2686095c5d2",
+          "bytes": 300,
+          "sha256": "b3b69c6fd3a7dd5c621d97ee6785d956b7e4d172fae813f73d583d2f973ce128"
         },
         {
           "path": "codex_home_manager/CONTRIBUTING.md",
@@ -878,9 +887,9 @@
           "path": "codex_home_manager/tests/test_source_monorepo_export.py",
           "sourcePath": "tests/test_source_monorepo_export.py",
           "gitMode": "100644",
-          "gitObject": "5ef6c8ada00dcf7783d496d7290aa8995e6d65b0",
-          "bytes": 10810,
-          "sha256": "c1308c9fa57561280ce67e62a38048bf347a94d7b95c00ea09c296e4e61deefc"
+          "gitObject": "b6235c122ea2f74f93134d473e75f6edb69ed36b",
+          "bytes": 10951,
+          "sha256": "b9428dfc1b5bd2802204f2cca77db0c5b54cb07648156ce8000e75c2f1fd44e5"
         },
         {
           "path": "codex_home_manager/tests/test_source_release_evidence.py",

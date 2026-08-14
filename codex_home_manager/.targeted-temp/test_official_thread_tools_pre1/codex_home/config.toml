@@ -1,6 +1,0 @@
-[mcp_servers.codex_thread_messenger]
-command = "legacy.exe"
-
-[mcp_servers.node_repl]
-command = "node_repl"
-args = ["--disable-sandbox"]
