@@ -89,6 +89,8 @@ const textExtensions = new Set([
   ".css", ".html", ".js", ".json", ".md", ".mjs", ".pem", ".ps1", ".svg", ".toml", ".txt", ""
 ]);
 const releaseNamePattern = /^codex-home-manager-local-win-x64-v([0-9]+\.[0-9]+\.[0-9]+)-([0-9a-f]{12})\.(exe|zip)$/;
+const verifierArtifactName = "codex-home-manager-verifier-win-x64.exe";
+const verifierArtifactMaxBytes = 50_000_000;
 const sourceEvidenceNames = new Set([
   "codex-home-manager-source.zip",
   "codex-home-manager-source.cdx.json",
@@ -155,6 +157,18 @@ async function listFiles(directory) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+async function loadChecksumEntries() {
+  const entries = new Map();
+  const checksumText = await readFile(join(siteDirectory, "SHA256SUMS.txt"), "utf8");
+  for (const [index, line] of checksumText.split(/\r?\n/).entries()) {
+    if (!line) continue;
+    const match = /^([0-9a-f]{64})  ([^/\\]+)$/.exec(line);
+    if (!match || entries.has(match[2])) throw new Error(`invalid SHA256SUMS line ${index + 1}`);
+    entries.set(match[2], match[1]);
+  }
+  return entries;
 }
 
 function assertSafeExtension(relativePath) {
@@ -611,6 +625,7 @@ async function isAllowedObsoleteShim(assetName) {
 
 if (!htmlReferencedAssets.size) throw new Error("public site index.html does not reference the built product assets");
 
+const checksumEntries = await loadChecksumEntries();
 const files = await listFiles(root);
 for (const file of files) {
   const relativePath = relative(root, file).replaceAll("\\", "/");
@@ -633,6 +648,7 @@ for (const file of files) {
   const content = await readFile(file);
   const artifact = releaseName ? releaseArtifacts.get(releaseName) : null;
   const sourceEvidenceFile = releaseName && sourceEvidenceNames.has(releaseName);
+  const verifierArtifactFile = releaseName === verifierArtifactName;
   if (artifact) {
     if (artifact.kind === "zip") assertSafeZip(relativePath, content);
     if (artifact.size !== content.length || artifact.sha256 !== sha256(content)) {
@@ -647,7 +663,15 @@ for (const file of files) {
   if (windowsEvidenceFile && content.length > 20_000_000) {
     throw new Error(`unexpected large Windows binary evidence file in public repository: ${relativePath}`);
   }
-  if (!sourceEvidenceFile && !windowsEvidenceFile && content.length > 2_000_000) {
+  if (verifierArtifactFile) {
+    if (content.length > verifierArtifactMaxBytes) {
+      throw new Error(`unexpected large verifier artifact in public repository: ${relativePath}`);
+    }
+    if (checksumEntries.get(verifierArtifactName) !== sha256(content)) {
+      throw new Error(`SHA256SUMS mismatch for verifier artifact ${verifierArtifactName}`);
+    }
+  }
+  if (!sourceEvidenceFile && !windowsEvidenceFile && !verifierArtifactFile && content.length > 2_000_000) {
     throw new Error(`unexpected large file in public repository: ${relativePath}`);
   }
   if (textExtensions.has(extname(relativePath).toLowerCase())) assertSafeText(relativePath, content.toString("utf8"));
@@ -687,13 +711,6 @@ if (releaseArtifacts.size && !/cache-control:.*max-age=31536000.*immutable/i.tes
   throw new Error("content-addressed release artifacts must have immutable cache headers");
 }
 
-const checksumEntries = new Map();
-for (const [index, line] of (await readFile(join(siteDirectory, "SHA256SUMS.txt"), "utf8")).split(/\r?\n/).entries()) {
-  if (!line) continue;
-  const match = /^([0-9a-f]{64})  ([^/\\]+)$/.exec(line);
-  if (!match || checksumEntries.has(match[2])) throw new Error(`invalid SHA256SUMS line ${index + 1}`);
-  checksumEntries.set(match[2], match[1]);
-}
 for (const [name, expectedSha256] of checksumEntries) {
   const content = await readFile(join(siteDirectory, name)).catch(() => null);
   if (!content || sha256(content) !== expectedSha256) {

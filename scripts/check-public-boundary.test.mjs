@@ -480,6 +480,37 @@ test("rejects an auxiliary download whose bytes drift from SHA256SUMS", async ()
   assert.match(result.stderr, /SHA256SUMS file hash mismatch/i);
 });
 
+test("accepts a self-contained verifier above the generic size limit when its checksum is bound", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  const verifierContent = Buffer.alloc(2_000_001, 0x41);
+  const verifierHash = createHash("sha256").update(verifierContent).digest("hex");
+  await writeFile(join(root, "site", "codex-home-manager-verifier-win-x64.exe"), verifierContent);
+  const existingChecksums = await readFile(join(root, "site", "SHA256SUMS.txt"), "utf8");
+  await writeFile(
+    join(root, "site", "SHA256SUMS.txt"),
+    `${existingChecksums.trimEnd()}\n${verifierHash}  codex-home-manager-verifier-win-x64.exe\n`
+  );
+
+  const result = runChecker(root);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("rejects a self-contained verifier above the generic size limit when its checksum is not bound", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  await writeFile(
+    join(root, "site", "codex-home-manager-verifier-win-x64.exe"),
+    Buffer.alloc(2_000_001, 0x42)
+  );
+
+  const result = runChecker(root);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /SHA256SUMS mismatch for verifier artifact/i);
+});
+
 test("rejects fake Authenticode trust or a release that makes detached signatures optional", async () => {
   const root = await createReleaseFixture();
   await addExecutableRelease(root);
