@@ -53,6 +53,7 @@ async function createReleaseFixture() {
 function runChecker(root, environment = {}) {
   const childEnvironment = { ...process.env };
   delete childEnvironment.CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE;
+  delete childEnvironment.CODEX_HOME_MANAGER_PUBLIC_ARTIFACT_STAGE_MODE;
   delete childEnvironment.CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256;
   Object.assign(childEnvironment, environment);
   return spawnSync(process.execPath, [checker, "--root", root], {
@@ -61,6 +62,33 @@ function runChecker(root, environment = {}) {
     env: childEnvironment
   });
 }
+
+test("artifact stage accepts unsigned schema 2 artifacts before deployment metadata exists", async () => {
+  const root = await createReleaseFixture();
+  await addExecutableRelease(root);
+  const headerPath = join(root, "site", "_headers");
+  const headers = await readFile(headerPath, "utf8");
+  const futureMetadataHeaders = [
+    "release-manifest.json",
+    "release-manifest.json.sig",
+    "release-signing-public-key.pem",
+    "release-signing-public-key.sha256"
+  ].map((name) => `/${name}\n  Cache-Control: no-store, max-age=0`).join("\n");
+  await writeFile(headerPath, `${headers.trimEnd()}\n${futureMetadataHeaders}\n`);
+  const result = runChecker(root, { CODEX_HOME_MANAGER_PUBLIC_ARTIFACT_STAGE_MODE: "1" });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("artifact stage rejects stale signed metadata", async () => {
+  const root = await createReleaseFixture();
+  const { fingerprint } = await addSignedReleaseMetadata(root);
+  const result = runChecker(root, {
+    CODEX_HOME_MANAGER_PUBLIC_ARTIFACT_STAGE_MODE: "1",
+    CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256: fingerprint
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /artifact stage requires signed release metadata to be absent/i);
+});
 
 async function addSignedReleaseMetadata(root, missingName = null, mutateManifest = null) {
   const { name } = await addExecutableRelease(root);

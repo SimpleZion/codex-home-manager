@@ -10,6 +10,12 @@ const root = resolve(rootArgumentIndex >= 0 ? process.argv[rootArgumentIndex + 1
 const siteDirectory = join(root, "site");
 const assetsDirectory = join(siteDirectory, "assets");
 const releaseMode = process.argv.includes("--release") || process.env.CODEX_HOME_MANAGER_PUBLIC_RELEASE_MODE === "1";
+const artifactStageMode = process.argv.includes("--artifact-stage") ||
+  process.env.CODEX_HOME_MANAGER_PUBLIC_ARTIFACT_STAGE_MODE === "1";
+if (releaseMode && artifactStageMode) {
+  throw new Error("public boundary modes are mutually exclusive");
+}
+const strictArtifactMode = releaseMode || artifactStageMode;
 
 const exactAllowedPaths = new Set([
   ".github/workflows/public-release.yml",
@@ -191,8 +197,8 @@ const releaseManifest = JSON.parse(await readFile(releaseManifestPath, "utf8"));
 if (![1, 2].includes(releaseManifest.schemaVersion) || !/^\d+\.\d+\.\d+$/.test(releaseManifest.version || "")) {
   throw new Error("connector-release.json has an invalid schema or version");
 }
-if (releaseMode && releaseManifest.schemaVersion !== 2) {
-  throw new Error("release mode requires connector-release.json schema 2 Authenticode trust evidence");
+if (strictArtifactMode && releaseManifest.schemaVersion !== 2) {
+  throw new Error("artifact publication requires connector-release.json schema 2 Authenticode trust evidence");
 }
 if (!Array.isArray(releaseManifest.artifacts)) throw new Error("connector-release.json artifacts must be an array");
 
@@ -257,6 +263,9 @@ let signedPublicSiteDistPaths = null;
 let signedWindowsEvidenceNames = null;
 if (releaseMode && [...signedMetadata.values()].some((content) => content === null)) {
   throw new Error("release mode requires complete signed release metadata: manifest, detached signature, public key, and fingerprint pin");
+}
+if (artifactStageMode && [...signedMetadata.values()].some((content) => content !== null)) {
+  throw new Error("artifact stage requires signed release metadata to be absent until deployment identifiers are available");
 }
 if (hasManifest || hasSignature) {
   if ([...signedMetadata.values()].some((content) => content === null)) {
@@ -510,7 +519,7 @@ if (/^\/assets\/\*\s*$/m.test(headerText)) {
   throw new Error("a broad asset cache rule must not overlap the dedicated WASM rule");
 }
 
-if (releaseMode || hasManifest || hasSignature) {
+if (strictArtifactMode || hasManifest || hasSignature) {
   for (const metadataName of signedMetadataNames) {
     if (!/cache-control:\s*no-store(?:,|$)/i.test(headerBlock(`/${metadataName}`))) {
       throw new Error(`signed release metadata must be no-store: /${metadataName}`);
