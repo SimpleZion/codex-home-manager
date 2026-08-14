@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -133,11 +133,28 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const fingerprint = `sha256:${createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex")}`;
+  const verifierContent = Buffer.from("self-contained verifier fixture");
+  const powershellVerifierContent = Buffer.from(`$trustedPublicKeyFingerprint = "${fingerprint}"\n`);
+  await writeFile(join(root, "site", "codex-home-manager-verifier-win-x64.exe"), verifierContent);
+  await writeFile(join(root, "site", "verify-codex-home-manager.ps1"), powershellVerifierContent);
+  await writeFile(join(root, "site", "release-signing-public-key.pem"), publicKeyPem);
+  await writeFile(join(root, "site", "release-signing-public-key.sha256"), fingerprint + "\n");
+  const verificationContent = new Map([
+    ["codex-home-manager-verifier-win-x64.exe", verifierContent],
+    ["verify-codex-home-manager.ps1", powershellVerifierContent],
+    ["release-signing-public-key.pem", Buffer.from(publicKeyPem)],
+    ["release-signing-public-key.sha256", Buffer.from(fingerprint + "\n")]
+  ]);
+  const existingChecksums = await readFile(checksumPath, "utf8");
+  const verificationChecksums = [...verificationContent].map(([verificationName, content]) =>
+    `${createHash("sha256").update(content).digest("hex")}  ${verificationName}`
+  );
+  await writeFile(checksumPath, existingChecksums.trimEnd() + "\n" + verificationChecksums.join("\n") + "\n");
   const records = await Promise.all([
     ...connectorArtifacts.map((artifact) => join(root, "site", artifact.name)),
     bundlePath,
     checksumPath,
-    ...[...sourceEvidenceContent.keys(), ...windowsEvidenceContent.keys()].map((evidenceName) => join(root, "site", evidenceName))
+    ...[...sourceEvidenceContent.keys(), ...windowsEvidenceContent.keys(), ...verificationContent.keys()].map((evidenceName) => join(root, "site", evidenceName))
   ].map(async (path) => {
     const content = await (await import("node:fs/promises")).readFile(path);
     return { path: path.split(/[\\/]/).at(-1), sha256: createHash("sha256").update(content).digest("hex"), size: content.length };
@@ -211,6 +228,11 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
       draft_verified_before_signing: true,
       artifact_assets: [
         ...connectorArtifacts.map(({ name: artifactName, sha256: hash, size }) => ({ name: artifactName, sha256: hash, size })),
+        {
+          name: "codex-home-manager-verifier-win-x64.exe",
+          sha256: createHash("sha256").update(verifierContent).digest("hex"),
+          size: verifierContent.length
+        },
         ...[...sourceEvidenceContent].map(([sourceName, content]) => ({
           name: sourceName,
           sha256: createHash("sha256").update(content).digest("hex"),
@@ -231,13 +253,13 @@ async function addSignedReleaseMetadata(root, missingName = null, mutateManifest
   for (const [name, content] of metadata) {
     if (name !== missingName) await writeFile(join(root, "site", name), content);
   }
+  if (missingName) await rm(join(root, "site", missingName), { force: true });
   const headerPath = join(root, "site", "_headers");
   const existingHeaders = await (await import("node:fs/promises")).readFile(headerPath, "utf8");
   const metadataHeaders = [...metadata.keys()].map((name) => `/${name}\n  Cache-Control: no-store, max-age=0`).join("\n");
   const sourceHeaders = [...sourceEvidenceContent.keys()].map((sourceName) => `/${sourceName}\n  Cache-Control: no-store, max-age=0`).join("\n");
   const windowsHeaders = [...windowsEvidenceContent.keys()].map((evidenceName) => `/${evidenceName}\n  Cache-Control: no-store, max-age=0`).join("\n");
   await writeFile(headerPath, `${existingHeaders.trimEnd()}\n${metadataHeaders}\n${sourceHeaders}\n${windowsHeaders}\n`);
-  await writeFile(join(root, "site", "verify-codex-home-manager.ps1"), `$trustedPublicKeyFingerprint = "${fingerprint}"\n`);
   return { fingerprint, name };
 }
 

@@ -1,104 +1,3537 @@
 {
+  "schemaVersion": 2,
   "name": "codex-home-manager-public-api-contract",
-  "version": "1.0.0",
-  "note": "This hosted contract describes agent-facing capabilities. The complete implementation is open source on the repository's source branch and is not bundled into the static browser deployment.",
+  "version": "1.0.10",
+  "frontendContractVersion": 2,
+  "note": "This hosted contract mirrors the complete loopback connector API. The hosted static page cannot access Codex data until it connects to the local connector.",
+  "discovery": {
+    "capabilities": "/api/capabilities",
+    "openapi": "/openapi.json",
+    "mcp": "/mcp"
+  },
+  "counts": {
+    "restCapabilities": 52,
+    "mcpTools": 52
+  },
   "capabilities": [
     {
-      "name": "snapshot_threads",
+      "name": "auth_token",
       "method": "GET",
-      "path": "/api/snapshot",
-      "purpose": "List and classify local Codex threads, including threads outside the first sidebar page."
-    },
-    {
-      "name": "thread_detail",
-      "method": "GET",
-      "path": "/api/threads/{thread_id}?include_daily_tokens=false",
-      "purpose": "Read full metadata, storage, message structure, descendants, paths, prompts, and action context for one thread without blocking on the daily token timeline."
-    },
-    {
-      "name": "thread_daily_tokens",
-      "method": "GET",
-      "path": "/api/threads/{thread_id}/daily-tokens",
-      "purpose": "Read the interactive daily token timeline for one thread. Audited totals, peaks, own tokens, and child-thread tokens come from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for those unknown records."
-    },
-    {
-      "name": "action_preview",
-      "method": "GET",
-      "path": "/api/threads/{thread_id}/action-preview",
-      "purpose": "Create a fast write-preview ticket for show, hide, archive, delete, slimming, copy, migration, or project rename operations before any guarded write."
-    },
-    {
-      "name": "preview_move_thread_workspace",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/move-workspace/preview",
-      "purpose": "Preview moving a thread, optional same-source-cwd threads, actual workspace files, SQLite/global state, and rollout workspace metadata."
-    },
-    {
-      "name": "move_thread_workspace",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/move-workspace",
-      "purpose": "Move the selected thread plus same-source-cwd threads and top-level workspace files to a target workspace after preview and token validation."
-    },
-    {
-      "name": "show_thread",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/show",
-      "purpose": "Promote a hidden thread into the initial sidebar ordering after preview and token validation."
-    },
-    {
-      "name": "hide_thread",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/hide",
-      "purpose": "Hide a visible thread from the initial sidebar without deleting session JSONL."
-    },
-    {
-      "name": "export_prompts",
-      "method": "GET",
-      "path": "/api/threads/{thread_id}/export-prompts",
-      "purpose": "Export prompts from a selected thread. The scope parameter supports pure, visible, with_agents, automation, delegation, and all; delegation returns messages sent from other Codex threads."
-    },
-    {
-      "name": "read_resource",
-      "method": "GET",
-      "path": "/api/resources/read",
-      "purpose": "Read safe text resources or directory metadata inside a local Codex Home."
+      "path": "/api/auth/token",
+      "purpose": "Get the per-process token required for write endpoints. Browser access is restricted to the loopback same-origin local UI.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "token",
+        "headerName"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
     },
     {
       "name": "diagnostics",
       "method": "GET",
       "path": "/api/diagnostics",
-      "purpose": "Run a bounded read-only health scan for visibility, plugin cache, logs, resources, storage, runtime risks, and repair prompts that users can paste into their own Codex."
+      "purpose": "Run a read-only Codex Home health check covering local state, thread visibility, bundled plugin cache/config alignment, logs, storage and runtime process risks, and return a repairPrompt handoff for another Codex agent.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "score",
+        "status",
+        "summary",
+        "checks",
+        "issues",
+        "topRecommendations",
+        "repairPrompt"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
     },
     {
       "name": "preview_official_thread_tools_repair",
       "method": "POST",
       "path": "/api/codex/official-thread-tools/repair/preview",
-      "purpose": "Preview whether legacy codex_thread_messenger MCP fallback is active and can shadow official codex_app thread tools such as send_message_to_thread."
+      "purpose": "Preview fallback shadowing, non-contiguous registry positions, and incomplete initial rollout session_meta that can hide official codex_app tools.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "needsRepair",
+        "config",
+        "threadToolRegistry",
+        "initialSessionMeta",
+        "verificationSteps"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
     },
     {
       "name": "repair_official_thread_tools",
       "method": "POST",
       "path": "/api/codex/official-thread-tools/repair",
-      "purpose": "Disable the legacy codex_thread_messenger MCP fallback after preview and token validation. A full Codex Desktop restart and visible target-thread verification are still required."
+      "purpose": "Repair initial rollout tool metadata, disable the legacy fallback, and normalize thread_dynamic_tools positions. JSONL repair is validated online; SQLite normalization requires Codex Desktop to be fully closed.",
+      "required": [
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "mandatory rollout backup for JSONL repair; optional home state backup for config/database rewrite",
+      "bodyExample": {
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "changed",
+        "restartRequired",
+        "backup.backupId",
+        "initialSessionMetaRepair",
+        "normalizedThreadToolPositions",
+        "before",
+        "after"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/codex/official-thread-tools/repair",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "snapshot_threads",
+      "method": "GET",
+      "path": "/api/snapshot",
+      "purpose": "List and classify all local Codex threads. Current Codex versions can show the full thread list; legacy first-page ordering is exposed only as compatibility metadata.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "summary",
+        "threads",
+        "projects"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "get_thread_detail",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}",
+      "purpose": "Read a target-only details shell from one SQLite row and one file stat without scanning the rollout or rebuilding the global snapshot.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "thread",
+        "sqliteRow",
+        "analysisStatus"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "analyze_thread_detail",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/analysis",
+      "purpose": "Load JSONL statistics, visible-event integrity and backups for one thread after its fast details shell is visible. The request is cancellable.",
+      "required": [
+        "thread_id",
+        "request_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "analysisStatus",
+        "rolloutStats",
+        "rolloutDisplay",
+        "backups"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "cancel_thread_detail_analysis",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/analysis/cancel",
+      "purpose": "Cancel an active detail analysis at the next JSONL record boundary.",
+      "required": [
+        "thread_id",
+        "request_id"
+      ],
+      "backup": "runtime cancellation only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "requestId",
+        "cancelled"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/analysis/cancel",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "daily_token_usage",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/daily-tokens",
+      "purpose": "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "summary",
+        "days"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "read_thread_prompts",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/prompts",
+      "purpose": "Compatibility endpoint that returns a bounded page of classified user-role records. Use /prompts/page for filtering, cancellation and continued pagination.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only persistent cache",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "title",
+        "rolloutPath",
+        "promptCount",
+        "prompts",
+        "nextCursor",
+        "hasMore",
+        "index"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "read_thread_prompt_page",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/prompts/page",
+      "purpose": "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only persistent cache",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "requestId",
+        "prompts",
+        "nextCursor",
+        "hasMore",
+        "matchCount",
+        "matchCountComplete",
+        "index"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "search_thread_timeline",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/timeline/search/page",
+      "purpose": "Incrementally index and search the complete natural-language conversation: user input, progress commentary, and final replies. Reasoning, tools, and context remain available through byte-cursor timeline search without entering the persistent full-text index.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only persistent cache",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "requestId",
+        "matches",
+        "nextCursor",
+        "hasMore",
+        "matchCount",
+        "matchCountComplete",
+        "index"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "cancel_thread_timeline_search",
+      "method": "DELETE",
+      "path": "/api/threads/{thread_id}/timeline/search/requests/{request_id}",
+      "purpose": "Cancel an active full-timeline indexing or search request.",
+      "required": [
+        "thread_id",
+        "request_id"
+      ],
+      "backup": "runtime cancellation only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "requestId",
+        "cancelled"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/timeline/search/requests/{request_id}",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "cancel_thread_prompt_request",
+      "method": "DELETE",
+      "path": "/api/threads/{thread_id}/prompts/requests/{request_id}",
+      "purpose": "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.",
+      "required": [
+        "thread_id",
+        "request_id"
+      ],
+      "backup": "runtime cancellation only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "requestId",
+        "cancelled"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/prompts/requests/{request_id}",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "copy_thread_prompts",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/prompts/copy",
+      "purpose": "Stream filtered prompt text or NDJSON without materializing the complete result in process memory.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only persistent cache",
+      "bodyExample": null,
+      "successFields": [
+        "backup.backupId when the action writes state"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "prompt_index_status",
+      "method": "GET",
+      "path": "/api/prompt-index/status",
+      "purpose": "Read prompt-index lifecycle metadata for one Codex Home. The response contains the local derived-index root plus counts, sizes, timestamps, retention limits, readability and in-use state; it never includes prompt text or source rollout paths.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "databaseExists",
+        "database.sizeBytes",
+        "database.inUse",
+        "database.readable",
+        "database.inspectionState",
+        "database.promptCount",
+        "storage.rootPath",
+        "storage.maxTotalBytes",
+        "storage.maxIdleSeconds"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "preview_clear_prompt_index",
+      "method": "POST",
+      "path": "/api/prompt-index/clear/preview",
+      "purpose": "Preview clearing the disposable prompt index for one Codex Home without returning prompt content.",
+      "required": [
+        "X-Codex-Manager-Token"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "willClear",
+        "reclaimableBytes",
+        "inUse"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "clear_prompt_index",
+      "method": "POST",
+      "path": "/api/prompt-index/clear",
+      "purpose": "Clear the disposable prompt index for one Codex Home without modifying source rollouts. No cache backup is created because that would retain another copy of indexed prompt text.",
+      "required": [
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "no backup; the disposable index is rebuilt from source rollouts",
+      "bodyExample": {
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "cleared",
+        "databaseExisted",
+        "deletedFileCount",
+        "reclaimedBytes"
+      ],
+      "rollback": null,
+      "riskLevel": "write",
+      "previewEndpoint": "/api/prompt-index/clear/preview",
+      "writeEndpoint": "/api/prompt-index/clear",
+      "idempotency": "idempotent; clearing an absent index is a no-op",
+      "rollbackMode": "not applicable; re-querying prompts rebuilds the index from source rollouts"
+    },
+    {
+      "name": "read_thread_timeline",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/timeline",
+      "purpose": "Read a semantic timeline from the JSONL tail without loading the complete rollout. Supports user input, assistant replies, readable reasoning, encrypted-reasoning markers, tool activity, search and byte-cursor pagination.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "title",
+        "items",
+        "nextBeforeByte",
+        "hasMore",
+        "scannedRecords",
+        "fileSize"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "read_thread_timeline_item",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/timeline/item",
+      "purpose": "Read the complete semantic content for one timeline record selected by its byteOffset.",
+      "required": [
+        "thread_id",
+        "byte_offset"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "id",
+        "kind",
+        "text",
+        "byteOffset"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "preview_thread_action",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/action-preview",
+      "purpose": "Preview show, hide, repair, archive or duplicate before writing. Duplicate preview requires targetProjectPath.",
+      "required": [
+        "thread_id",
+        "action"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "threadId",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "show_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/show",
+      "purpose": "Restore a hidden or archived thread to Codex Desktop's visible indexes.",
+      "required": [
+        "thread_id",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before write",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "updatedAtMs",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/show",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "hide_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/hide",
+      "purpose": "Hide a visible main thread from Codex Desktop's visible indexes without archiving or deleting JSONL.",
+      "required": [
+        "thread_id",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before write",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "updatedAtMs",
+        "sessionIndexUpdate",
+        "globalStateUpdate",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/hide",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "export_prompts",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/export-prompts",
+      "purpose": "Export prompts from a thread as markdown or json. Defaults to scope=pure, which exports only user-entered text; use scope=visible for user context too, scope=with_agents for subagent records, scope=automation for heartbeat/automation records, scope=delegation for messages sent from other Codex threads, or scope=all for complete records.",
+      "required": [
+        "thread_id",
+        "scope",
+        "X-Codex-Manager-Token"
+      ],
+      "backup": "writes export file in workspace data/exports",
+      "bodyExample": null,
+      "successFields": [
+        "outputPath",
+        "promptCount",
+        "allPromptCount",
+        "filterScope",
+        "format"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "read_thread_logs",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/logs",
+      "purpose": "Read structured rollout JSONL logs and Codex app logs_2.sqlite rows with pagination, source selection, search and filters for requests, failures, errors, events, tool calls and raw lines.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "entries",
+        "summary",
+        "matchedEntries",
+        "hasMore",
+        "source",
+        "rolloutPath",
+        "appLogPath"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "duplicate_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/duplicate",
+      "purpose": "Copy one thread inside the current Codex Home with a new thread id and rollout JSONL into a selected target project path.",
+      "required": [
+        "thread_id",
+        "targetProjectPath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before write; restore archives created copy",
+      "bodyExample": {
+        "targetProjectPath": "C:\\\\Project",
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "newThreadId",
+        "newRolloutPath",
+        "targetProjectPath",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/duplicate",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "archive_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/archive",
+      "purpose": "Safe delete by archiving the thread without permanently deleting JSONL.",
+      "required": [
+        "thread_id",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before write",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "archivedAt",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/archive",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_migrate_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/migrate/preview",
+      "purpose": "Preview thread project migration before rewriting SQLite/global state/JSONL workspace metadata.",
+      "required": [
+        "thread_id",
+        "targetProjectPath"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "targetProjectPath": "C:\\\\Project"
+      },
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "threadId",
+        "targetProjectPath",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "migrate_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/migrate",
+      "purpose": "Move a thread to another project path and rewrite structured workspace metadata in JSONL.",
+      "required": [
+        "thread_id",
+        "targetProjectPath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before write; Codex must be closed",
+      "bodyExample": {
+        "targetProjectPath": "C:\\\\Project",
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "threadId",
+        "oldProjectPath",
+        "newProjectPath",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/migrate",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_move_thread_workspace",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/move-workspace/preview",
+      "purpose": "Preview moving the selected thread, optional same-source-cwd threads, actual workspace files, SQLite/global state and rollout workspace metadata.",
+      "required": [
+        "thread_id",
+        "targetProjectPath"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "targetProjectPath": "C:\\\\Project",
+        "includeSameSourceCwdThreads": true,
+        "moveWorkspaceFiles": true
+      },
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "matchedThreads",
+        "fileMove",
+        "blockingErrors",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "move_thread_workspace",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/move-workspace",
+      "purpose": "Move the selected thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.",
+      "required": [
+        "thread_id",
+        "targetProjectPath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread/workspace move backup before write; Codex must be closed",
+      "bodyExample": {
+        "targetProjectPath": "C:\\\\Project",
+        "includeSameSourceCwdThreads": true,
+        "moveWorkspaceFiles": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "threadId",
+        "matchedThreads",
+        "fileMove",
+        "rolloutRewrites",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/move-workspace",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "slim_thread",
+      "method": "POST",
+      "path": "/api/threads/{thread_id}/slim",
+      "purpose": "Reduce JSONL size only within the explicitly selected scope: removeImages, keepLatestCompacted, or both.",
+      "required": [
+        "thread_id",
+        "removeImages or keepLatestCompacted",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "thread action backup before JSONL rewrite",
+      "bodyExample": {
+        "removeImages": true,
+        "keepLatestCompacted": false,
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "threadId",
+        "savedBytes",
+        "before",
+        "after",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/threads/{thread_id}/slim",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_slim_thread",
+      "method": "GET",
+      "path": "/api/threads/{thread_id}/slim/preview",
+      "purpose": "Preview JSONL slimming impact for a selected scope without writing files.",
+      "required": [
+        "thread_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "threadId",
+        "scan",
+        "canRemoveImages",
+        "canReduceCompacted",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "rename_project",
+      "method": "POST",
+      "path": "/api/projects/rename",
+      "purpose": "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed because they can rewrite sidebar cache state while running.",
+      "required": [
+        "sourceProjectPath",
+        "targetProjectPath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "backs up all matched thread rows, rollout JSONLs, global state, global state backup and config",
+      "bodyExample": {
+        "sourceProjectPath": "C:\\\\OldProject",
+        "targetProjectPath": "C:\\\\NewProject",
+        "renameFolder": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "updatedThreads",
+        "rolloutBackups",
+        "globalStateRewrite",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/projects/rename",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_rename_project",
+      "method": "POST",
+      "path": "/api/projects/rename/preview",
+      "purpose": "Preview matched threads, rollout bytes, folder impact and whether running Codex blocks the project rename.",
+      "required": [
+        "sourceProjectPath",
+        "targetProjectPath"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "sourceProjectPath": "C:\\\\OldProject",
+        "targetProjectPath": "C:\\\\NewProject",
+        "renameFolder": true
+      },
+      "successFields": [
+        "matchedThreads",
+        "existingRollouts",
+        "rolloutBytes",
+        "willRenameFolder",
+        "blockedByRunningCodex",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
     },
     {
       "name": "import_thread_from_home",
       "method": "POST",
       "path": "/api/import/thread",
-      "purpose": "Copy a thread from another Codex Home into the active local home after preview validation."
+      "purpose": "Copy one thread from another Codex Home into the current Codex Home.",
+      "required": [
+        "sourceCodexHome",
+        "sourceThreadId",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "home state backup before import; restore archives imported thread",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "sourceThreadId": "THREAD_ID",
+        "targetProjectPath": "C:\\\\Project",
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "importedThreads",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/import/thread",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_import_thread_from_home",
+      "method": "POST",
+      "path": "/api/import/thread/preview",
+      "purpose": "Preview one source thread import without writing target home.",
+      "required": [
+        "sourceCodexHome",
+        "sourceThreadId"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "sourceThreadId": "THREAD_ID",
+        "targetProjectPath": "C:\\\\Project"
+      },
+      "successFields": [
+        "sourceThreadId",
+        "targetThreadId",
+        "rolloutBytes",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "import_project_from_home",
+      "method": "POST",
+      "path": "/api/import/project",
+      "purpose": "Copy all matched project threads from another Codex Home into the current Codex Home.",
+      "required": [
+        "sourceCodexHome",
+        "sourceProjectPath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "home state backup before import; restore archives imported threads",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "sourceProjectPath": "C:\\\\OldProject",
+        "targetProjectPath": "C:\\\\NewProject",
+        "includeArchived": false,
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "importedThreads",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/import/project",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_import_project_from_home",
+      "method": "POST",
+      "path": "/api/import/project/preview",
+      "purpose": "Preview source project import thread count and rollout bytes without writing target home.",
+      "required": [
+        "sourceCodexHome",
+        "sourceProjectPath"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "sourceProjectPath": "C:\\\\OldProject",
+        "targetProjectPath": "C:\\\\NewProject",
+        "includeArchived": false
+      },
+      "successFields": [
+        "matchedThreads",
+        "rolloutBytes",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "home_overview",
+      "method": "GET",
+      "path": "/api/home/overview",
+      "purpose": "Inventory CODEX_HOME resources such as sessions, memories, skills, AGENTS.md, config and logs.",
+      "required": [],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "summary",
+        "resources"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "read_resource",
+      "method": "GET",
+      "path": "/api/resources/read",
+      "purpose": "Read a text resource or list a directory inside CODEX_HOME.",
+      "required": [
+        "relative_path"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "metadata",
+        "content",
+        "children",
+        "binary"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "backup_resource",
+      "method": "POST",
+      "path": "/api/resources/backup",
+      "purpose": "Create an explicit backup of a CODEX_HOME resource.",
+      "required": [
+        "relativePath",
+        "X-Codex-Manager-Token"
+      ],
+      "backup": "resource backup",
+      "bodyExample": {
+        "relativePath": "AGENTS.md"
+      },
+      "successFields": [
+        "resourcePath",
+        "resourceBackupPath",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/resources/backup",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_write_resource",
+      "method": "POST",
+      "path": "/api/resources/write/preview",
+      "purpose": "Preview text resource write and protected-path validation without writing.",
+      "required": [
+        "relativePath",
+        "content"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "relativePath": "AGENTS.md",
+        "content": "instructions"
+      },
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "target",
+        "willOverwrite",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "write_resource",
+      "method": "POST",
+      "path": "/api/resources/write",
+      "purpose": "Write a UTF-8 text resource such as AGENTS.md or memory notes inside CODEX_HOME. Protected state files and session JSONL are rejected.",
+      "required": [
+        "relativePath",
+        "content",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "backs up overwritten target resource before write",
+      "bodyExample": {
+        "relativePath": "AGENTS.md",
+        "content": "instructions",
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "resourcePath",
+        "sizeBytes",
+        "backup.backupId"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/resources/write",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "copy_resource_from_home",
+      "method": "POST",
+      "path": "/api/resources/copy-from-home",
+      "purpose": "Copy AGENTS.md, memories, skills or safe text resources from another Codex Home. Protected Codex state files are rejected.",
+      "required": [
+        "sourceCodexHome",
+        "relativePath",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "backs up overwritten target resource before copy",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "relativePath": "memories",
+        "targetRelativePath": "memories",
+        "overwrite": true,
+        "acknowledgeCodexRunningRisk": true,
+        "operationPreviewId": "PREVIEW_ID",
+        "inputHash": "INPUT_HASH"
+      },
+      "successFields": [
+        "sourcePath",
+        "targetPath",
+        "backup.backupId",
+        "overwroteExisting"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/resources/copy-from-home",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_copy_resource_from_home",
+      "method": "POST",
+      "path": "/api/resources/copy-from-home/preview",
+      "purpose": "Preview resource copy size and overwrite impact without writing target home.",
+      "required": [
+        "sourceCodexHome",
+        "relativePath"
+      ],
+      "backup": "read-only",
+      "bodyExample": {
+        "sourceCodexHome": "E:\\\\.codex",
+        "relativePath": "memories",
+        "targetRelativePath": "memories"
+      },
+      "successFields": [
+        "source",
+        "target",
+        "willOverwrite",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "preview_portable_backup_export",
+      "method": "POST",
+      "path": "/api/backups/{backup_id}/portable/preview",
+      "purpose": "Preview creation or replacement of a passphrase-protected Ed25519 portable manifest.",
+      "required": [
+        "backup_id",
+        "passphrase"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "portableManifestPath",
+        "willOverwrite"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "export_portable_backup",
+      "method": "POST",
+      "path": "/api/backups/{backup_id}/portable",
+      "purpose": "Create a signed portable manifest and encrypted Ed25519 private-key envelope for an existing schema 2 backup.",
+      "required": [
+        "backup_id",
+        "passphrase",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "writes portable-manifest.json without changing schema 2 manifest",
+      "bodyExample": null,
+      "successFields": [
+        "backupId",
+        "portableManifestPath",
+        "publicKeyFingerprint",
+        "signedFileCount"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/backups/{backup_id}/portable",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_portable_backup_restore",
+      "method": "POST",
+      "path": "/api/backups/{backup_id}/portable/restore/preview",
+      "purpose": "Verify a portable package and explicitly map its signed source Codex Home to the selected current Codex Home.",
+      "required": [
+        "backup_id",
+        "sourceCodexHome",
+        "passphrase"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "sourceCodexHome",
+        "targetCodexHome",
+        "restoreTargets",
+        "integrityStatus"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "restore_portable_backup",
+      "method": "POST",
+      "path": "/api/backups/{backup_id}/portable/restore",
+      "purpose": "Restore a verified portable backup only after explicit source-to-target Codex Home mapping.",
+      "required": [
+        "backup_id",
+        "sourceCodexHome",
+        "passphrase",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "creates pre_restore backup by default and keeps the portable source package immutable",
+      "bodyExample": null,
+      "successFields": [
+        "restoredBackupId",
+        "notes"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/backups/{backup_id}/portable/restore",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    },
+    {
+      "name": "preview_restore_backup",
+      "method": "GET",
+      "path": "/api/backups/{backup_id}/restore/preview",
+      "purpose": "Preview backup restore notes and bind a restore operation.",
+      "required": [
+        "backup_id"
+      ],
+      "backup": "read-only",
+      "bodyExample": null,
+      "successFields": [
+        "operationPreviewId",
+        "inputHash",
+        "backupId",
+        "action",
+        "warnings"
+      ],
+      "rollback": null,
+      "riskLevel": "read",
+      "previewEndpoint": null,
+      "writeEndpoint": null,
+      "idempotency": "idempotent read",
+      "rollbackMode": null
+    },
+    {
+      "name": "restore_backup",
+      "method": "POST",
+      "path": "/api/backups/{backup_id}/restore",
+      "purpose": "Restore a backup manifest or archive imported/duplicated created threads.",
+      "required": [
+        "backup_id",
+        "X-Codex-Manager-Token",
+        "operationPreviewId",
+        "inputHash"
+      ],
+      "backup": "creates pre_restore backup before restore",
+      "bodyExample": null,
+      "successFields": [
+        "restoredBackupId",
+        "notes"
+      ],
+      "rollback": "POST /api/backups/{backup_id}/restore",
+      "riskLevel": "write",
+      "previewEndpoint": null,
+      "writeEndpoint": "/api/backups/{backup_id}/restore",
+      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
+      "rollbackMode": "restore backup by backup.backupId"
+    }
+  ],
+  "mcpTools": [
+    {
+      "name": "codex_health",
+      "description": "Read the local connector health and runtime write warnings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_auth_token",
+      "description": "Return a short-lived local token bound to one real Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_prompt_index_status",
+      "description": "Read privacy-safe prompt-index lifecycle metadata for one Codex Home. Returns the local derived-index root plus counts, sizes, timestamps, limits, and in-use state; never prompt text or source rollout paths.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_clear_prompt_index",
+      "description": "Preview clearing the disposable prompt index for one Codex Home and return a single-use operationPreviewId/inputHash ticket. No prompt content is returned.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_clear_prompt_index",
+      "description": "Clear the disposable prompt index for one Codex Home after matching preview authorization. The source rollouts are not modified and no cache backup is created.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          }
+        },
+        "required": [
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_diagnostics",
+      "description": "Run the read-only Codex Home health check and return a repairPrompt handoff for another Codex agent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "language": {
+            "type": "string",
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "default": "zh"
+          },
+          "refresh": {
+            "type": "boolean",
+            "default": false,
+            "description": "Bypass the short-lived report cache and run a fresh full scan."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_official_thread_tools_repair",
+      "description": "Preview fallback shadowing, registry position drift, and incomplete initial rollout metadata that can hide official codex_app tools.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_repair_official_thread_tools",
+      "description": "Repair initial rollout tool metadata with prompt-preservation verification, disable the legacy fallback, and normalize registry positions. SQLite normalization requires Codex Desktop to be fully closed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          }
+        },
+        "required": [
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_snapshot",
+      "description": "List and classify local Codex threads and projects.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_home_overview",
+      "description": "Inventory CODEX_HOME resources, memories, skills, config and logs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_read_resource",
+      "description": "Read a text resource or list a directory inside CODEX_HOME.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          }
+        },
+        "required": [
+          "relativePath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_detail",
+      "description": "Read SQLite row, JSONL stats, file locations and backups for one thread. Set includeDailyTokens=false when an agent wants a faster detail shell.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "includeDailyTokens": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_detail_analysis",
+      "description": "Run the deferred complete JSONL analysis for one thread after reading the fast detail shell. This is read-only, cancellable by requestId, and can take time for very large rollouts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional caller-provided request id used for cancellation."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_cancel_thread_read",
+      "description": "Cancel an active detail analysis, full-timeline search, or prompt-page scan in the same Codex Home by threadId and requestId.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional caller-provided request id used for cancellation."
+          }
+        },
+        "required": [
+          "threadId",
+          "requestId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_daily_tokens",
+      "description": "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_logs",
+      "description": "Read structured JSONL/app logs for one thread with pagination and filters.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "kind": {
+            "type": "string",
+            "default": "all"
+          },
+          "search": {
+            "type": "string",
+            "default": ""
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "all",
+              "rollout",
+              "app"
+            ],
+            "default": "all"
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_timeline",
+      "description": "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "beforeByte": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 80
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "conversation",
+              "user",
+              "commentary",
+              "assistant",
+              "reasoning",
+              "tool",
+              "all"
+            ],
+            "default": "conversation"
+          },
+          "search": {
+            "type": "string",
+            "default": ""
+          },
+          "contentLimit": {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 500000,
+            "default": 120000
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_search_thread_timeline",
+      "description": "Incrementally search the complete natural-language conversation, not only loaded DOM or the JSONL tail. Covers user input, progress commentary, and final replies; requestId enables cancellation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional caller-provided request id used for cancellation."
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 80
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "conversation",
+              "user",
+              "commentary",
+              "assistant"
+            ],
+            "default": "conversation"
+          },
+          "search": {
+            "type": "string",
+            "default": ""
+          },
+          "scanBudgetMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000,
+            "default": 1200
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_timeline_item",
+      "description": "Read the complete semantic content for one timeline record by the byteOffset returned from codex_thread_timeline.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "byteOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "contentLimit": {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 5000000,
+            "default": 2000000
+          }
+        },
+        "required": [
+          "threadId",
+          "byteOffset",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_prompt_page",
+      "description": "Incrementally page and search all classified user inputs with source filters, explicit index completeness and an opaque cursor; requestId enables cancellation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional caller-provided request id used for cancellation."
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 80
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "pure",
+              "visible",
+              "with_agents",
+              "automation",
+              "delegation",
+              "all"
+            ],
+            "default": "pure"
+          },
+          "sourceType": {
+            "type": "string"
+          },
+          "search": {
+            "type": "string",
+            "default": ""
+          },
+          "scanBudgetMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000,
+            "default": 1200
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_list_backups",
+      "description": "List rollback backups, optionally filtered by thread id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_thread_action",
+      "description": "Preview show, hide, repair, archive or duplicate before writing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide",
+              "repair_user_event",
+              "archive",
+              "duplicate"
+            ]
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          }
+        },
+        "required": [
+          "threadId",
+          "action",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_slim_thread",
+      "description": "Preview JSONL slimming impact for selected scopes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "removeImages": {
+            "type": "boolean",
+            "default": true
+          },
+          "keepLatestCompacted": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_migrate_thread",
+      "description": "Preview moving a thread to another project path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          }
+        },
+        "required": [
+          "threadId",
+          "targetProjectPath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_move_thread_workspace",
+      "description": "Preview moving a thread, same-source-cwd threads, actual workspace files, SQLite/global state and rollout metadata.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "includeSameSourceCwdThreads": {
+            "type": "boolean",
+            "default": true,
+            "description": "Also move all threads whose cwd exactly matches the selected thread source cwd."
+          },
+          "moveWorkspaceFiles": {
+            "type": "boolean",
+            "default": true,
+            "description": "Move top-level filesystem entries from the source workspace directory into the target workspace directory."
+          },
+          "repairUserEvent": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set has_user_event=1 for moved threads so they remain visible in project views."
+          },
+          "preservePinned": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep moved threads in pinned-thread-ids instead of moving them into the target project group."
+          }
+        },
+        "required": [
+          "threadId",
+          "targetProjectPath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_import_thread",
+      "description": "Preview copying one thread from another Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "sourceThreadId": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "preserveThreadId": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "sourceThreadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_import_project",
+      "description": "Preview copying matched project threads from another Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "sourceProjectPath": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "includeArchived": {
+            "type": "boolean",
+            "default": false
+          },
+          "preserveThreadIds": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "sourceProjectPath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_rename_project",
+      "description": "Preview project path rename impact and whether running Codex blocks the write.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sourceProjectPath": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string"
+          },
+          "renameFolder": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "sourceProjectPath",
+          "targetProjectPath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_write_resource",
+      "description": "Preview UTF-8 text resource write and protected-path validation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          },
+          "content": {
+            "type": "string"
+          },
+          "createParentDirectories": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "relativePath",
+          "content",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_copy_resource",
+      "description": "Preview copying a safe resource from another Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          },
+          "targetRelativePath": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "relativePath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_portable_backup_export",
+      "description": "Preview creating or replacing the passphrase-protected signed portable manifest for an existing backup.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "backupId": {
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "backupId",
+          "passphrase",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_portable_backup_restore",
+      "description": "Verify a portable backup and preview explicit source-to-current-Codex-Home restore mapping.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "backupId": {
+            "type": "string"
+          },
+          "sourceCodexHome": {
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "backupId",
+          "sourceCodexHome",
+          "passphrase",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_preview_restore_backup",
+      "description": "Preview restoring a backup and bind a restore ticket.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "backupId": {
+            "type": "string"
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          }
+        },
+        "required": [
+          "backupId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_show_thread",
+      "description": "Restore a hidden or archived thread to Codex Desktop's visible indexes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_hide_thread",
+      "description": "Hide a visible main thread from Codex Desktop's visible indexes without deleting JSONL.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_repair_thread_user_event",
+      "description": "Repair user-event metadata and restore the thread to Codex Desktop's visible indexes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_archive_thread",
+      "description": "Archive a thread as the safe delete operation without permanent JSONL deletion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_duplicate_thread",
+      "description": "Duplicate a thread to a target project path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          }
+        },
+        "required": [
+          "threadId",
+          "targetProjectPath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_migrate_thread",
+      "description": "Move a thread to another project path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          }
+        },
+        "required": [
+          "threadId",
+          "targetProjectPath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_move_thread_workspace",
+      "description": "Move a thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "includeSameSourceCwdThreads": {
+            "type": "boolean",
+            "default": true,
+            "description": "Also move all threads whose cwd exactly matches the selected thread source cwd."
+          },
+          "moveWorkspaceFiles": {
+            "type": "boolean",
+            "default": true,
+            "description": "Move top-level filesystem entries from the source workspace directory into the target workspace directory."
+          },
+          "repairUserEvent": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set has_user_event=1 for moved threads so they remain visible in project views."
+          },
+          "preservePinned": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep moved threads in pinned-thread-ids instead of moving them into the target project group."
+          }
+        },
+        "required": [
+          "threadId",
+          "targetProjectPath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_slim_thread",
+      "description": "Slim a thread JSONL using the selected safe scopes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "removeImages": {
+            "type": "boolean",
+            "default": true
+          },
+          "keepLatestCompacted": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_export_prompts",
+      "description": "Export prompts from a thread as markdown or json. scope=pure exports only user-entered text; scope=automation exports heartbeat/automation records; scope=delegation exports messages sent from other Codex threads; scope=all exports every prompt-like record.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "markdown",
+              "json"
+            ],
+            "default": "markdown"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "pure",
+              "visible",
+              "with_agents",
+              "automation",
+              "delegation",
+              "all"
+            ],
+            "default": "pure"
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_backup_thread",
+      "description": "Create an explicit rollback backup for one thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "threadId": {
+            "type": "string",
+            "description": "Codex thread UUID."
+          }
+        },
+        "required": [
+          "threadId",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_backup_resource",
+      "description": "Create an explicit backup for a CODEX_HOME resource.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          }
+        },
+        "required": [
+          "relativePath",
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_write_resource",
+      "description": "Write a safe UTF-8 text resource inside CODEX_HOME.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          },
+          "content": {
+            "type": "string"
+          },
+          "createParentDirectories": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "relativePath",
+          "content",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_copy_resource",
+      "description": "Copy a safe resource from another Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "relativePath": {
+            "type": "string",
+            "description": "Path relative to CODEX_HOME."
+          },
+          "targetRelativePath": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "relativePath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_import_thread",
+      "description": "Copy one thread from another Codex Home into this Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "sourceThreadId": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "preserveThreadId": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "sourceThreadId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_import_project",
+      "description": "Copy matched project threads from another Codex Home into this Codex Home.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "sourceCodexHome": {
+            "type": "string",
+            "description": "Source .codex root directory."
+          },
+          "sourceProjectPath": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string",
+            "description": "Target project cwd/path for the operation."
+          },
+          "includeArchived": {
+            "type": "boolean",
+            "default": false
+          },
+          "preserveThreadIds": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "sourceCodexHome",
+          "sourceProjectPath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_rename_project",
+      "description": "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "sourceProjectPath": {
+            "type": "string"
+          },
+          "targetProjectPath": {
+            "type": "string"
+          },
+          "renameFolder": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "sourceProjectPath",
+          "targetProjectPath",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_export_portable_backup",
+      "description": "Create the signed portable manifest and encrypted signing-key envelope for an existing backup.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "backupId": {
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "backupId",
+          "passphrase",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_restore_portable_backup",
+      "description": "Restore a verified portable backup after explicit source-to-current-Codex-Home mapping.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "backupId": {
+            "type": "string"
+          },
+          "sourceCodexHome": {
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "backupId",
+          "sourceCodexHome",
+          "passphrase",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_restore_backup",
+      "description": "Restore a backup after validating the matching preview ticket.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "operationPreviewId": {
+            "type": "string",
+            "description": "operationPreviewId returned by the matching preview tool."
+          },
+          "inputHash": {
+            "type": "string",
+            "description": "inputHash returned by the matching preview tool."
+          },
+          "acknowledgeCodexRunningRisk": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true after reviewing runtime warnings when Codex is running."
+          },
+          "createBackup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to skip automatic rollback backup for this write."
+          },
+          "backupId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "backupId",
+          "apiToken",
+          "operationPreviewId",
+          "inputHash"
+        ],
+        "additionalProperties": false
+      }
     }
   ],
   "safetyModel": {
-    "localFirst": true,
-    "hostedPageBundlesLocalBackend": false,
-    "writesRequireToken": true,
-    "dangerousWritesRequirePreviewTicket": true,
-    "workspaceMoveRequiresCodexClosed": true,
-    "threadDetailCanSkipDailyTokens": true,
-    "dailyTokensLoadOnDemand": true,
-    "officialThreadToolsRepairRequiresRestart": true,
-    "backupsDefaultEnabled": true,
-    "createBackupCanBeFalsePerOperation": true,
-    "permanentJsonlDelete": false
+    "writesCreateBackups": true,
+    "backupRoot": "codex_home_manager/data/backups",
+    "restoreEndpoint": "POST /api/backups/{backup_id}/restore",
+    "physicalDelete": false,
+    "deleteBehavior": "Thread delete is implemented as archive by default; JSONL files are not permanently deleted.",
+    "resourcePathPolicy": "Resource APIs accept paths relative to CODEX_HOME and reject absolute paths or .. escapes.",
+    "protectedTextWritePaths": [
+      "state_5.sqlite",
+      "logs_2.sqlite",
+      "session_index.jsonl",
+      "version.json",
+      ".codex-global-state.json",
+      "config.toml",
+      "sessions/**",
+      "plugins/**",
+      "generated_images/**",
+      "automations/**"
+    ],
+    "writeResponseContract": "Write endpoints return backup.backupId when createBackup=true. When createBackup=false they return backup.skipped=true and no automatic rollback material is created.",
+    "concurrencyWarning": "Write endpoints include warnings when Codex-related processes are running.",
+    "authorization": "Write endpoints require X-Codex-Manager-Token. Browser clients can fetch the token from GET /api/auth/token only from the loopback same-origin local UI.",
+    "csrfProtection": "Unsafe methods reject browser requests outside the loopback same-origin local UI and require a custom token header.",
+    "mcp": "MCP tools are available at /mcp. Call codex_auth_token before every other tool and pass its short-lived token as apiToken. Preview-bound writes also require the matching operationPreviewId and inputHash.",
+    "previewBinding": "Dangerous writes require operationPreviewId and inputHash returned by the matching preview endpoint within 10 minutes.",
+    "runningCodexWriteGate": "When Codex-related processes are running, write endpoints fail with HTTP 409 unless acknowledgeCodexRunningRisk=true is supplied in the query string or JSON body after token and preview validation.",
+    "optionalBackups": "Automatic backups are enabled by default. Pass createBackup=false for one write when you intentionally do not want rollback material.",
+    "operationLock": "Write endpoints are serialized by a process-local operation lock."
+  },
+  "commonQueryParameters": {
+    "codex_home": "Optional target Codex Home path. Defaults to CODEX_HOME env or the first detected local .codex profile.",
+    "sidebar_limit": "Legacy Codex Desktop first-page ordering size. Defaults to 50 and is kept only for compatibility diagnostics.",
+    "acknowledgeCodexRunningRisk": "Required for write endpoints that use query-only actions when Codex-related processes are running.",
+    "createBackup": "Defaults to true. Set to false on write endpoints to skip automatic backup creation; explicit manual backup endpoints always create backups.",
+    "operationPreviewId": "Preview id returned by the matching preview endpoint for query-only writes.",
+    "inputHash": "Input hash returned by the matching preview endpoint for query-only writes.",
+    "lang": "Capability description language. Use en or zh."
   }
 }

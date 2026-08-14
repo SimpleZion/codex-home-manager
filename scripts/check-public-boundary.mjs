@@ -36,6 +36,7 @@ const exactAllowedPaths = new Set([
   "site/_redirects",
   "site/app.js",
   "site/connector-release.json",
+  "site/codex-home-manager-verifier-win-x64.exe",
   "site/windows-build-metadata.json",
   "site/BINARY-SBOM-SUBJECTS.txt",
   "site/BINARY-PROVENANCE-SUBJECTS.txt",
@@ -454,14 +455,14 @@ if (hasManifest || hasSignature) {
       github.draft_verified_before_signing !== true ||
       JSON.stringify(github.metadata_assets) !== JSON.stringify(signedMetadataNames) ||
       !Array.isArray(github.artifact_assets) ||
-      github.artifact_assets.length !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0)) {
+      github.artifact_assets.length !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0) + (signedManifest.schema_version === 5 ? 1 : 0)) {
     throw new Error("signed release manifest has invalid GitHub release proof");
   }
   if ([4, 5].includes(signedManifest.schema_version) && github.repository !== sourceEvidence.repository) {
     throw new Error("signed release manifest source evidence repository differs from GitHub release");
   }
   const githubArtifacts = new Map(github.artifact_assets.map((artifact) => [artifact?.name, artifact]));
-  if (githubArtifacts.size !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0)) {
+  if (githubArtifacts.size !== releaseArtifacts.size + ([4, 5].includes(signedManifest.schema_version) ? sourceEvidenceNames.size : 0) + (signedManifest.schema_version === 5 ? 1 : 0)) {
     throw new Error("signed release manifest GitHub artifact set mismatch");
   }
   for (const [name, artifact] of releaseArtifacts) {
@@ -476,6 +477,13 @@ if (hasManifest || hasSignature) {
       if (!githubArtifact || githubArtifact.sha256 !== sourceAsset.sha256 || githubArtifact.size !== sourceAsset.size) {
         throw new Error(`signed release manifest GitHub source evidence mismatch: ${sourceAsset.name}`);
       }
+    }
+  }
+  if (signedManifest.schema_version === 5) {
+    const verifierRecord = signedManifest.public_artifacts.find((artifact) => artifact?.path === "codex-home-manager-verifier-win-x64.exe");
+    const githubVerifier = githubArtifacts.get("codex-home-manager-verifier-win-x64.exe");
+    if (!verifierRecord || !githubVerifier || githubVerifier.sha256 !== verifierRecord.sha256 || githubVerifier.size !== verifierRecord.size) {
+      throw new Error("signed release manifest GitHub verifier mismatch");
     }
   }
   for (const artifact of signedManifest.public_artifacts) {
