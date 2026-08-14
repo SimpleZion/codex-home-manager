@@ -1,23 +1,23 @@
 {
   "schemaVersion": 2,
-  "version": "1.0.10",
+  "version": "1.0.11",
   "artifacts": [
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.10-ee62798fdfc4.exe",
+      "name": "codex-home-manager-local-win-x64-v1.0.11-cddfa5a6d896.exe",
       "kind": "exe",
-      "sha256": "ee62798fdfc4302c48a2d92854af11b3a385de2d17b30101c9176bec75f63ae6",
-      "size": 18236677,
+      "sha256": "cddfa5a6d8961ea569c2abb64c9fba0e568ee9e474b13bf11981dd6814169c05",
+      "size": 18252282,
       "audit": {
-        "archiveEntryCount": 900,
+        "archiveEntryCount": 901,
         "method": "pyi-archive-viewer+strings",
         "sensitiveStrings": [],
         "sourceFiles": [],
         "versionInfo": {
           "CompanyName": "SimpleZion",
           "FileDescription": "Codex Home Manager",
-          "FileVersion": "1.0.10",
+          "FileVersion": "1.0.11",
           "ProductName": "Codex Home Manager",
-          "ProductVersion": "1.0.10"
+          "ProductVersion": "1.0.11"
         }
       },
       "authenticode": {
@@ -32,10 +32,10 @@
       }
     },
     {
-      "name": "codex-home-manager-local-win-x64-v1.0.10-24ce806efdc0.zip",
+      "name": "codex-home-manager-local-win-x64-v1.0.11-f7e61be15c04.zip",
       "kind": "zip",
-      "sha256": "24ce806efdc052bbf58a355dbc9f90b4a6cb0a30c58ec9e9f97c3d5ca97fe82b",
-      "size": 18155512
+      "sha256": "f7e61be15c04edacdd05199d355ef501868b0c067711f4b2f0131b7f0e1ea023",
+      "size": 26787138
     }
   ]
 }

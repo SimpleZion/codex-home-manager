@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $trustedPublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
-$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.10-ee62798fdfc4.exe"
+$defaultArtifactName = "codex-home-manager-local-win-x64-v1.0.11-cddfa5a6d896.exe"
 $pythonVerifierSource = @'
 from __future__ import annotations
 
@@ -27,12 +27,10 @@ try:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-except ImportError:
-    print(
-        "DEPENDENCY_UNAVAILABLE: Python package 'cryptography' with Ed25519 support is required; verification did not run.",
-        file=sys.stderr,
-    )
-    raise SystemExit(3)
+except ImportError as error:
+    raise RuntimeError(
+        "DEPENDENCY_UNAVAILABLE: install the Python 'cryptography' package or use the self-contained Windows verifier"
+    ) from error
 
 
 class VerificationError(RuntimeError):
@@ -54,12 +52,34 @@ def normalize_fingerprint(value: str) -> str:
     return normalized
 
 
-def verify_artifact(arguments: argparse.Namespace) -> dict[str, object]:
-    trusted_fingerprint = normalize_fingerprint(arguments.trusted_public_key_fingerprint)
+def select_artifact_record(manifest: dict[str, object], artifact_kind: str) -> dict[str, object]:
+    records = manifest.get("public_artifacts")
+    if not isinstance(records, list):
+        raise VerificationError("signed release manifest has no public artifact records")
+    expected_suffix = f".{artifact_kind}"
+    name_pattern = re.compile(
+        rf"codex-home-manager-local-win-x64-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{{12}}\{expected_suffix}"
+    )
+    candidates = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("path"), str)
+        and name_pattern.fullmatch(record["path"]) is not None
+    ]
+    if len(candidates) != 1:
+        raise VerificationError(f"signed release manifest must contain exactly one {artifact_kind.upper()} artifact")
+    return candidates[0]
+
+
+def load_verified_manifest(
+    *, manifest_path: Path, signature_path: Path, public_key_path: Path, trusted_fingerprint_value: str
+) -> tuple[dict[str, object], str]:
+    trusted_fingerprint = normalize_fingerprint(trusted_fingerprint_value)
     try:
-        public_key_bytes = arguments.public_key.read_bytes()
-        manifest_bytes = arguments.manifest.read_bytes()
-        signature_text = arguments.signature.read_text(encoding="ascii").strip()
+        public_key_bytes = public_key_path.read_bytes()
+        manifest_bytes = manifest_path.read_bytes()
+        signature_text = signature_path.read_text(encoding="ascii").strip()
     except OSError as error:
         raise VerificationError(f"release verification metadata is unreadable: {error}") from error
 
@@ -92,24 +112,17 @@ def verify_artifact(arguments: argparse.Namespace) -> dict[str, object]:
         raise VerificationError("signed release manifest has an unsupported schema")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise VerificationError("signed release manifest public-key fingerprint does not match the trust anchor")
+    return manifest, trusted_fingerprint
 
-    records = manifest.get("public_artifacts")
-    if not isinstance(records, list):
-        raise VerificationError("signed release manifest has no public artifact records")
-    expected_suffix = f".{arguments.artifact_kind}"
-    name_pattern = re.compile(
-        rf"codex-home-manager-local-win-x64-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{{12}}\{expected_suffix}"
+
+def verify_artifact(arguments: argparse.Namespace) -> dict[str, object]:
+    manifest, trusted_fingerprint = load_verified_manifest(
+        manifest_path=arguments.manifest,
+        signature_path=arguments.signature,
+        public_key_path=arguments.public_key,
+        trusted_fingerprint_value=arguments.trusted_public_key_fingerprint,
     )
-    candidates = [
-        record
-        for record in records
-        if isinstance(record, dict)
-        and isinstance(record.get("path"), str)
-        and name_pattern.fullmatch(record["path"]) is not None
-    ]
-    if len(candidates) != 1:
-        raise VerificationError(f"signed release manifest must contain exactly one {arguments.artifact_kind.upper()} artifact")
-    record = candidates[0]
+    record = select_artifact_record(manifest, arguments.artifact_kind)
     expected_hash = record.get("sha256")
     expected_size = record.get("size")
     if not isinstance(expected_hash, str) or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:

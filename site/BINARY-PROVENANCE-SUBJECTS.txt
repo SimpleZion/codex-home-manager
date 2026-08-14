@@ -1,3 +1,3 @@
-24ce806efdc052bbf58a355dbc9f90b4a6cb0a30c58ec9e9f97c3d5ca97fe82b *codex-home-manager-local-win-x64-v1.0.10-24ce806efdc0.zip
-ee62798fdfc4302c48a2d92854af11b3a385de2d17b30101c9176bec75f63ae6 *codex-home-manager-local-win-x64-v1.0.10-ee62798fdfc4.exe
-e72089e6679cdf20567dd8f2314a8e6f317171a8bdccb558ecdc208e2e0d80c7 *codex-home-manager-windows-x64-ef3d0cb1ed982a06114f8cc601fbaf878972c12f.cdx.json
+cddfa5a6d8961ea569c2abb64c9fba0e568ee9e474b13bf11981dd6814169c05 *codex-home-manager-local-win-x64-v1.0.11-cddfa5a6d896.exe
+f7e61be15c04edacdd05199d355ef501868b0c067711f4b2f0131b7f0e1ea023 *codex-home-manager-local-win-x64-v1.0.11-f7e61be15c04.zip
+2fe3beb6e2f1a42abe005074846c40e25c52e4829b654812a0b40273f060d074 *codex-home-manager-windows-x64-a6b62d8ef9daf7a73994821fec13a202c569bd36.cdx.json

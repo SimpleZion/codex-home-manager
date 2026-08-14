@@ -34,6 +34,9 @@
 /connector-release.json
   Cache-Control: no-store, max-age=0
 
+/codex-home-manager-verifier-win-x64.exe
+  Cache-Control: no-store, max-age=0
+
 /SHA256SUMS.txt
   Cache-Control: no-store, max-age=0
 

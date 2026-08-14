@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "codex-home-manager-public-api-contract",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "frontendContractVersion": 2,
   "note": "This hosted contract mirrors the complete loopback connector API. The hosted static page cannot access Codex data until it connects to the local connector.",
   "discovery": {
