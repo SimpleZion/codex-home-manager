@@ -28,7 +28,7 @@
     "@axe-core/playwright": "^4.12.1",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
-    "playwright": "^1.60.0",
+    "playwright": "^1.62.1",
     "ws": "^8.21.0"
   }
 }
