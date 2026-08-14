@@ -1,2 +1,2 @@
-009faca8464a4b593dd43c8fc4f1b41e121b6bb1852a5bf256ee28f332882ae4 *codex-home-manager-local-win-x64-v1.0.8-009faca8464a.exe
-90c0a8269eeb16c4f9b955d4475b00137ea8955d906c2cc89e992b5682cf3d4c *codex-home-manager-local-win-x64-v1.0.8-90c0a8269eeb.zip
+f497c8bd517784204fb7b9fb948d86ff0339bf7c1798e05a9374dfc429352fbd *codex-home-manager-local-win-x64-v1.0.9-f497c8bd5177.zip
+fa74e72152899475f73685f35e65d8d6ea4df4e9e2b09619360f2132ab11b831 *codex-home-manager-local-win-x64-v1.0.9-fa74e7215289.exe

@@ -4,5 +4,5 @@
 - Failures: 0
 - Errors: 0
 - Skipped: 0
-- Pytest time: 144.902 seconds
+- Pytest time: 142.041 seconds
 - Complete quality gate: passed
