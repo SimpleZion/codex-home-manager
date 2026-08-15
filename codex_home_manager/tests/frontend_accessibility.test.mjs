@@ -396,6 +396,7 @@ async function installApplicationRoutes(page, {
           const requestId = requestUrl.searchParams.get("requestId");
           const scope = requestUrl.searchParams.get("scope") || "visible";
           const search = requestUrl.searchParams.get("search") || "";
+          const order = requestUrl.searchParams.get("order") || "asc";
           window.__slowPromptRequestStarted = true;
           init?.signal?.addEventListener("abort", () => {
             window.__slowPromptAbortObserved = true;
@@ -409,6 +410,7 @@ async function installApplicationRoutes(page, {
               requestId,
               scope,
               search,
+              order,
               sourceType: null,
               promptCount: 1,
               purePromptCount: 1,
@@ -560,6 +562,7 @@ async function installApplicationRoutes(page, {
       const requestId = requestUrl.searchParams.get("requestId") || "missing-request-id";
       const scope = requestUrl.searchParams.get("scope") || "visible";
       const search = requestUrl.searchParams.get("search") || "";
+      const order = requestUrl.searchParams.get("order") || "asc";
       const cursor = requestUrl.searchParams.get("cursor");
       const scanBudgetMs = Number(requestUrl.searchParams.get("scanBudgetMs") || 0);
       if (promptIndexApiState.rebuildPending && !cursor) {
@@ -568,10 +571,10 @@ async function installApplicationRoutes(page, {
         promptIndexApiState.rebuildPageRequests += 1;
       }
       promptApiState.queryCalls ||= new Map();
-      const queryKey = `${threadId}|${scope}|${search}`;
+      const queryKey = `${threadId}|${scope}|${search}|${order}`;
       const queryCallCount = cursor ? (promptApiState.queryCalls.get(queryKey) || 1) : (promptApiState.queryCalls.get(queryKey) || 0) + 1;
       if (!cursor) promptApiState.queryCalls.set(queryKey, queryCallCount);
-      promptApiState.pageRequests.push({ threadId, requestId, scope, search, cursor, scanBudgetMs, queryCallCount });
+      promptApiState.pageRequests.push({ threadId, requestId, scope, search, order, cursor, scanBudgetMs, queryCallCount });
       // Keep the follow-up scan pending long enough for the UI test to exercise
       // request cancellation deterministically on slower and faster runners.
       if (simulateColdIndex && !cursor && queryCallCount > 1) await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -586,6 +589,7 @@ async function installApplicationRoutes(page, {
         const text = `${prompt.text}\n${prompt.pureText || ""}`.normalize("NFD").toLocaleLowerCase("und").replace(/\p{M}/gu, "");
         return text.includes(normalizedSearch);
       });
+      if (order === "desc") matchingPrompts.reverse();
       const pageSize = search === "paged-search" ? 2 : Math.min(60, Number(requestUrl.searchParams.get("limit") || 60));
       const start = cursor ? Number(cursor.replace("cursor-", "")) : 0;
       const pagePrompts = matchingPrompts.slice(start, start + pageSize);
@@ -607,6 +611,7 @@ async function installApplicationRoutes(page, {
             requestId,
             scope,
             search,
+            order,
             sourceType: null,
             promptCount: sourcePrompts.length,
             purePromptCount: sourcePrompts.filter((prompt) => prompt.hasPureText).length,
@@ -900,7 +905,7 @@ async function assertPromptModalLayoutAndHitTargets(page, promptDialog, viewport
   assert.deepEqual(layout.childClasses, ["prompt-modal-toolbar", "prompt-filter-bar", "prompt-content-search", "prompt-modal-content"], `${viewportLabel}: all four prompt rows must coexist in DOM order`);
   assert.ok(layout.search.bottom <= layout.content.top + 1, `${viewportLabel}: search row must end before content row starts`);
   assert.ok(layout.search.bottom <= layout.list.top + 1, `${viewportLabel}: search row must not overlap the virtual list`);
-  assert.equal(layout.buttonHits.length, 3, `${viewportLabel}: prompt search must render three action buttons`);
+  assert.equal(layout.buttonHits.length, 6, `${viewportLabel}: prompt search must render order, jump, and match-navigation controls`);
   for (const target of layout.buttonHits) {
     assert.ok(target.centerX >= 0 && target.centerX <= page.viewportSize().width, `${viewportLabel}: ${target.label} center must remain in the viewport`);
     assert.ok(target.centerY >= 0 && target.centerY <= page.viewportSize().height, `${viewportLabel}: ${target.label} center must remain in the viewport`);
@@ -1032,6 +1037,7 @@ async function runPromptPaginationFlow() {
     await promptScanStatus.waitFor();
     assert.match(await promptScanStatus.textContent(), /^扫描中(?: \d+(?:\.\d+)?%)? · 1$/, "cold indexing must expose progress and the current match count");
     assert.equal(promptApiState.pageRequests[0].scope, "pure", "pure filter must map to the pure backend scope");
+    assert.equal(promptApiState.pageRequests[0].order, "desc", "prompt view must open newest-first");
     assert.ok(promptApiState.pageRequests[0].scanBudgetMs <= 1200, "cold indexing must keep each scan request within the interactive budget");
     assert.equal(promptApiState.pageRequests[0].cursor, null, "the first screen must start without a cursor");
 
@@ -1041,7 +1047,21 @@ async function runPromptPaginationFlow() {
     await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledPureRequest.requestId), "changing scope did not DELETE-cancel the prior request");
 
     await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "").length >= 2, "cold all-scope index did not continue scanning");
-    const cancelledAllRequest = promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "").at(-1);
+    const newestFirstRequest = promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "" && request.order === "desc").at(-1);
+    await promptDialog.getByRole("button", { name: "时间顺序" }).click();
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.some((request) => request.scope === "all" && request.search === "" && request.order === "asc"), "chronological order did not issue an ascending page request");
+    await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === newestFirstRequest.requestId), "changing prompt order did not cancel the newest-first request");
+    assert.equal(await promptDialog.getByRole("button", { name: "时间顺序" }).getAttribute("aria-pressed"), "true", "chronological order must expose its selected state");
+
+    const descendingRequestCount = promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "" && request.order === "desc").length;
+    await promptDialog.getByRole("button", { name: "跳到最新" }).click();
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "" && request.order === "desc").length > descendingRequestCount, "jump to latest did not issue a newest-first page request");
+    assert.equal(await promptDialog.getByRole("button", { name: "最新在前" }).getAttribute("aria-pressed"), "true", "jump to latest must select newest-first order");
+    assert.ok(await promptDialog.locator(".prompt-list").evaluate((element) => element.scrollTop <= 1), "jump to latest must reset the virtual list to its first newest record");
+
+    await promptDialog.getByRole("button", { name: "时间顺序" }).click();
+    await waitForPromptApiState(page, () => promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "" && request.order === "asc").length >= 2, "chronological order did not restart paging");
+    const cancelledAllRequest = promptApiState.pageRequests.filter((request) => request.scope === "all" && request.search === "" && request.order === "asc").at(-1);
     const promptSearch = promptDialog.getByRole("searchbox", { name: "搜索当前筛选的全部内容" });
     await promptSearch.fill("paged-search");
     await waitForPromptApiState(page, () => promptApiState.cancelRequests.some((request) => request.requestId === cancelledAllRequest.requestId), "changing search did not DELETE-cancel the prior request");
@@ -1358,6 +1378,7 @@ async function runAccessibilityFlow() {
     await promptDialog.locator(".prompt-filter-bar").click({ position: { x: 6, y: 6 } });
     assert.equal(await promptIndexManagement.getAttribute("open"), null, "clicking outside the index popover must dismiss it");
     await promptDialog.getByRole("button", { name: /^全部 \d+$/ }).click();
+    await promptDialog.getByRole("button", { name: "时间顺序" }).click();
     await promptDialog.getByText("推荐插件上下文", { exact: true }).waitFor();
     await assertPromptModalLayoutAndHitTargets(page, promptDialog, "1440x1000");
     assert.equal(await promptDialog.getByText("顶刊能力建设的尾部搜索目标", { exact: false }).count(), 0, "virtualized tail content must not be present in the DOM before searching");

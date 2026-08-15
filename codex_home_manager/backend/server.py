@@ -777,6 +777,7 @@ class ThreadPromptPageResponse(BaseModel):
     scope: str
     search: str
     sourceType: str | None = None
+    order: Literal["asc", "desc"] = "asc"
     promptCount: int
     purePromptCount: int
     visiblePromptCount: int
@@ -2339,6 +2340,7 @@ async def thread_prompt_page_endpoint(
     search: str = Query(default="", max_length=20_000),
     scope: str = Query(default="visible", pattern="^(pure|visible|all|with_agents|automation|heartbeat|delegation)$"),
     source_type: str | None = Query(default=None, alias="sourceType", max_length=80),
+    order: Literal["asc", "desc"] = Query(default="asc"),
     scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
     request_id: str | None = Query(default=None, alias="requestId", max_length=128),
 ) -> dict[str, Any]:
@@ -2359,6 +2361,7 @@ async def thread_prompt_page_endpoint(
                 search=search,
                 scope=scope,
                 source_type=source_type,
+                order=order,
                 scan_budget_ms=scan_budget_ms,
                 cancel_check=cancel_event.is_set,
             )
@@ -3454,7 +3457,7 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_thread_timeline", "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.", mcp_preview_properties({**thread_id, "beforeByte": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 500000, "default": 120000}}), ["threadId"]),
         mcp_tool("codex_search_thread_timeline", "Incrementally search the complete natural-language conversation, not only loaded DOM or the JSONL tail. Covers user input, progress commentary, and final replies; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_thread_timeline_item", "Read the complete semantic content for one timeline record by the byteOffset returned from codex_thread_timeline.", mcp_preview_properties({**thread_id, "byteOffset": {"type": "integer", "minimum": 0}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 5000000, "default": 2000000}}), ["threadId", "byteOffset"]),
-        mcp_tool("codex_thread_prompt_page", "Incrementally page and search all classified user inputs with source filters, explicit index completeness and an opaque cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}, "sourceType": {"type": "string"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
+        mcp_tool("codex_thread_prompt_page", "Incrementally page and search all classified user inputs with source filters, chronological or newest-first ordering, explicit index completeness and an opaque cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}, "sourceType": {"type": "string"}, "search": {"type": "string", "default": ""}, "order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_list_backups", "List rollback backups, optionally filtered by thread id.", {"threadId": {"type": "string"}}),
         mcp_tool("codex_preview_thread_action", "Preview show, hide, repair, archive or duplicate before writing.", mcp_preview_properties({**thread_id, "action": {"type": "string", "enum": ["show", "hide", "repair_user_event", "archive", "duplicate"]}, **target_project, "sidebarLimit": sidebar_limit_schema}), ["threadId", "action"]),
         mcp_tool("codex_preview_slim_thread", "Preview JSONL slimming impact for selected scopes.", mcp_preview_properties({**thread_id, "removeImages": {"type": "boolean", "default": True}, "keepLatestCompacted": {"type": "boolean", "default": True}}), ["threadId"]),
@@ -3786,7 +3789,7 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                     limit=mcp_int(arguments, "limit", 80, 1, 200),
                     search=mcp_str(arguments, "search", "") or "",
                     scope=mcp_str(arguments, "scope", "pure") or "pure",
-                    source_type=mcp_str(arguments, "sourceType"),
+                    source_type=mcp_str(arguments, "sourceType"), order=mcp_str(arguments, "order", "asc") or "asc",
                     scan_budget_ms=mcp_int(arguments, "scanBudgetMs", 1200, 1, 5000),
                     cancel_check=cancel_event.is_set,
                 )

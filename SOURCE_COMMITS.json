@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-15T02:00:38.356869+00:00",
+  "generatedAt": "2026-08-15T04:03:42.068988+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "3cfbc391ae973d6175a483483eee215999384527",
+      "commit": "a65b99efc125b4607646753551848cfc80923c88",
       "selection": [
         "**"
       ],
@@ -287,9 +287,9 @@
           "path": "codex_home_manager/backend/codex_data.py",
           "sourcePath": "backend/codex_data.py",
           "gitMode": "100644",
-          "gitObject": "ebb45bc1590a2cd7943370042a3099222db7c147",
-          "bytes": 418150,
-          "sha256": "0937260eb0d85b31cd0ae0b97be01cf7fb6149044c2eab19aafd5f91aa816b11"
+          "gitObject": "63a092dc07a60d0ede807896f69a8ce819887f52",
+          "bytes": 418219,
+          "sha256": "997eb70129f533b88436bc651e8c9d03a81a604f00a47f9b61ce12ab521e4dd9"
         },
         {
           "path": "codex_home_manager/backend/diagnostics.py",
@@ -359,9 +359,9 @@
           "path": "codex_home_manager/backend/prompt_index.py",
           "sourcePath": "backend/prompt_index.py",
           "gitMode": "100644",
-          "gitObject": "644d7dcc85d89c79a752335ecc67b6ec14ccae86",
-          "bytes": 89484,
-          "sha256": "915cf58736720ff53d113a82fc93f71622da3958f59818e689b7ec750b0b1f0a"
+          "gitObject": "35b516998fe8ecbf91373f844bcb8f62b1b17b4f",
+          "bytes": 90022,
+          "sha256": "d5639f62d6eb9be20aff0bbf1f00fc8f996cd061d2be03b9a01e1eccfbdca23a"
         },
         {
           "path": "codex_home_manager/backend/search_normalization.py",
@@ -375,9 +375,9 @@
           "path": "codex_home_manager/backend/server.py",
           "sourcePath": "backend/server.py",
           "gitMode": "100644",
-          "gitObject": "30cb1b7e49cc49d2bcb77a407b3a4e998561388c",
-          "bytes": 210591,
-          "sha256": "51a8da85431ed150062fb85977a964915965ef81eb30f00a55399583ae590efd"
+          "gitObject": "a060438806624dc9363f956079addd5d375705f6",
+          "bytes": 210883,
+          "sha256": "ee5202f2ee293b6e77826851c39c2ce4a79e02b97faa92e0a6f9ca4634f172ca"
         },
         {
           "path": "codex_home_manager/backend/stale_subagent_edges.py",
@@ -556,6 +556,14 @@
           "sha256": "a3b61b4618017f6fb060448879523cf829b6d979af58df78daee2b22f8206691"
         },
         {
+          "path": "codex_home_manager/scripts/prompt_order_check.mjs",
+          "sourcePath": "scripts/prompt_order_check.mjs",
+          "gitMode": "100644",
+          "gitObject": "e0851e38d16d0d4ddde873621452bdab5cbcc196",
+          "bytes": 5261,
+          "sha256": "c2e01518819373ead4acee717b7a59c9e9416e48fe07eac1f6b4792951a95a44"
+        },
+        {
           "path": "codex_home_manager/scripts/quality_gate.py",
           "sourcePath": "scripts/quality_gate.py",
           "gitMode": "100644",
@@ -628,6 +636,14 @@
           "sha256": "adbbfb31da4ea395880b3ae378e16bee1de6c59dc91fbd32dd08e54e01338290"
         },
         {
+          "path": "codex_home_manager/src/PromptOrdering.tsx",
+          "sourcePath": "src/PromptOrdering.tsx",
+          "gitMode": "100644",
+          "gitObject": "8bdbd5f92dc1c21bf5b1ab5364c2707f95dabd54",
+          "bytes": 3533,
+          "sha256": "d70656d0d00ec5fea201c2922341b6529a73d6a4fa5c10ad73cc70581255a79e"
+        },
+        {
           "path": "codex_home_manager/src/TimelineEntry.tsx",
           "sourcePath": "src/TimelineEntry.tsx",
           "gitMode": "100644",
@@ -639,17 +655,17 @@
           "path": "codex_home_manager/src/browserHome.ts",
           "sourcePath": "src/browserHome.ts",
           "gitMode": "100644",
-          "gitObject": "b5fc23ceab7ba77654ebce1ed9e124af67d37147",
-          "bytes": 137700,
-          "sha256": "48ba43a1e5d69048477bf7bc42040c0738e479c82abb0a85fc653710dfbdc05e"
+          "gitObject": "d431485ad0bab73a64a9a50a784f3e23ccaa6e40",
+          "bytes": 142583,
+          "sha256": "f6c1b16ef89bfe4d15c2e01fe3a85026fd9efb8dd17b1b35f22e93769e1d3e4d"
         },
         {
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "3fbd53a05b1cf21a4f6d8a2f2b4e19538a46e90b",
-          "bytes": 417656,
-          "sha256": "536ad4cef0e8122239ba5a423c49a28817c6cb9f529037f2fa6cbcd58efc1e2e"
+          "gitObject": "2ba11558bd976d70f05e3999622ea6583ade7201",
+          "bytes": 418217,
+          "sha256": "d42733467060d136ce24a31703762a7486b49193a0d5f3d8ccc5b375aba6f149"
         },
         {
           "path": "codex_home_manager/src/promptClassification.ts",
@@ -671,9 +687,9 @@
           "path": "codex_home_manager/src/styles.css",
           "sourcePath": "src/styles.css",
           "gitMode": "100644",
-          "gitObject": "fbe672170ae7037a56452f1411bec213e4101398",
-          "bytes": 118931,
-          "sha256": "978059aced370cfcfcace3c846a6549f78cb9dba675dac6fdd5db4b5693696ff"
+          "gitObject": "8bd511bfdc447005d0f5e2f66e4f0896a2a3e7e2",
+          "bytes": 119960,
+          "sha256": "957ade164657f27a8ae576fc567ad23efe4c2ef220180195fd5c611255280bd0"
         },
         {
           "path": "codex_home_manager/src/threadContentSearch.ts",
@@ -711,17 +727,17 @@
           "path": "codex_home_manager/tests/browser_home_streaming.test.mjs",
           "sourcePath": "tests/browser_home_streaming.test.mjs",
           "gitMode": "100644",
-          "gitObject": "f1a608db9c39f5e61006221c8230a0e8ff1794b0",
-          "bytes": 11766,
-          "sha256": "e632c07e9f351b3b391df4a7c30d98e90288f03fc9e3d0dcd52990d2c2788e52"
+          "gitObject": "7c59989cbbf54bfa18af2d213b5f6be44d23c762",
+          "bytes": 14058,
+          "sha256": "9ef056716ff559f3584285e72b55821fa74f092e42eb9ccd0efabacecc1622b3"
         },
         {
           "path": "codex_home_manager/tests/frontend_accessibility.test.mjs",
           "sourcePath": "tests/frontend_accessibility.test.mjs",
           "gitMode": "100644",
-          "gitObject": "76827459e691b9a6c59b3bf8a3b107adc7e6edb3",
-          "bytes": 83390,
-          "sha256": "e0052c41cc16aca49d322988cb634419b4bd06e304467cc0babc6b3be23ea9f7"
+          "gitObject": "3b5e7601981d1292e86317025809986abeec615c",
+          "bytes": 85897,
+          "sha256": "673265f212df631eb169cd25446eccb62a20aeafbe3b4175e0a557986ac09f31"
         },
         {
           "path": "codex_home_manager/tests/frontend_connector_contracts.test.mjs",
@@ -871,9 +887,9 @@
           "path": "codex_home_manager/tests/test_prompt_index.py",
           "sourcePath": "tests/test_prompt_index.py",
           "gitMode": "100644",
-          "gitObject": "9ec28d60c23b0ec0eb078e6b8156b48443583a3e",
-          "bytes": 50449,
-          "sha256": "5fadb4e65e85411d11f829d0eb4715056aa6321e6c2f84cd7abe202e636c7167"
+          "gitObject": "043d14309e40b52cec9bb3d8c8189f859274410e",
+          "bytes": 51296,
+          "sha256": "42185ae9eb54af3a83c12746bf3894fa4ef3c8ef66cdc187a200a20c7df56d29"
         },
         {
           "path": "codex_home_manager/tests/test_public_api_contract.py",

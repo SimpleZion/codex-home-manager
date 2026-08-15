@@ -144,6 +144,31 @@ def test_ten_thousand_prompts_page_search_and_incremental_tail_scan(tmp_path: Pa
     assert second_page["prompts"][0]["index"] == 74
     assert second_page["prompts"][0]["text"] == "bulk prompt 00073"
 
+    newest_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        order="desc",
+        limit=73,
+        scan_budget_ms=50,
+    )
+    assert newest_page["order"] == "desc"
+    assert newest_page["prompts"][0]["index"] == 10_000
+    assert newest_page["prompts"][0]["text"] == "bulk prompt 09999"
+    assert newest_page["nextCursor"]
+
+    next_newest_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        order="desc",
+        cursor=newest_page["nextCursor"],
+        limit=73,
+        scan_budget_ms=50,
+    )
+    assert next_newest_page["prompts"][0]["index"] == 9_927
+    assert next_newest_page["prompts"][0]["text"] == "bulk prompt 09926"
+
     search_page = read_thread_prompt_page(
         str(codex_home_path),
         "thread-1",
@@ -1156,12 +1181,14 @@ def test_prompt_index_mcp_and_capability_metadata_are_explicit(tmp_path: Path) -
                     "apiToken": api_token,
                     "threadId": "thread-1",
                     "scope": "all",
+                    "order": "desc",
                     "search": "metadata secret",
                     "scanBudgetMs": 1_000,
                 },
             },
         },
     ).json()["result"]["structuredContent"]
+    assert prompt_page_response["order"] == "desc"
     assert prompt_page_response["matchCountComplete"] is True
     assert [item["text"] for item in prompt_page_response["prompts"]] == ["metadata secret"]
 

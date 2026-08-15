@@ -211,6 +211,7 @@ export type BrowserPromptRecord = {
   index: number;
   lineNumber: number;
   byteOffset?: number;
+  ordinalExact?: boolean;
   timestamp: string | null;
   text: string;
   characterCount: number;
@@ -229,6 +230,7 @@ export type BrowserPromptPageOptions = {
   limit?: number;
   scope?: "all" | "pure" | "visible" | "with_agents" | "automation" | "delegation";
   search?: string;
+  order?: "asc" | "desc";
   signal?: AbortSignal;
 };
 
@@ -239,7 +241,9 @@ type BrowserPromptFingerprint = {
 };
 
 type BrowserPromptCursor = {
+  order?: "asc" | "desc";
   byteOffset: number;
+  beforeByte?: number;
   lineNumber: number;
   promptCount: number;
   purePromptCount: number;
@@ -646,10 +650,11 @@ async function* readBrowserJsonlLines(
 
 async function* readBrowserJsonlLinesReverse(
   file: Pick<File, "size" | "slice">,
-  options: { signal?: AbortSignal; stopBeforeByte?: number } = {}
+  options: { signal?: AbortSignal; startBeforeByte?: number; stopBeforeByte?: number } = {}
 ): AsyncGenerator<BrowserReverseJsonlLine> {
-  const stopBeforeByte = Math.max(0, Math.min(options.stopBeforeByte ?? 0, file.size));
-  let position = file.size;
+  const startBeforeByte = Math.max(0, Math.min(options.startBeforeByte ?? file.size, file.size));
+  const stopBeforeByte = Math.max(0, Math.min(options.stopBeforeByte ?? 0, startBeforeByte));
+  let position = startBeforeByte;
   let suffixParts: Uint8Array[] = [];
   let suffixBytes = 0;
   let oversized = false;
@@ -1658,7 +1663,10 @@ export async function readBrowserThreadPrompts(
   const threadFile = workspace.threadFiles.get(threadId);
   if (!threadFile) throw new Error(`Thread not found in selected folder: ${threadId}`);
   const file = await threadFile.handle.getFile();
-  const promptScan = await extractUserPromptRecords(file, options);
+  const order = options.order || "asc";
+  const promptScan = order === "desc"
+    ? await extractRecentUserPromptRecords(file, options)
+    : await extractUserPromptRecords(file, options);
   const prompts = promptScan.prompts;
   const thread = (workspace.snapshot.threads as Record<string, unknown>[] | undefined)?.find((item) => item.id === threadId);
   return {
@@ -1672,6 +1680,7 @@ export async function readBrowserThreadPrompts(
     sourceCounts: promptScan.sourceCounts,
     matchCount: promptScan.matchCount,
     matchCountComplete: promptScan.matchCountComplete,
+    order,
     nextCursor: promptScan.nextCursor,
     hasMore: promptScan.hasMore,
     aggregationExact: promptScan.aggregationExact,
@@ -3166,6 +3175,125 @@ async function extractUserPromptRecords(
   };
 }
 
+async function extractRecentUserPromptRecords(
+  file: Pick<File, "size" | "slice">,
+  options: BrowserPromptPageOptions = {}
+): Promise<{
+  prompts: BrowserPromptRecord[];
+  promptCount: number;
+  purePromptCount: number;
+  visiblePromptCount: number;
+  sourceCounts: Record<string, number>;
+  matchCount: number;
+  matchCountComplete: boolean;
+  nextCursor: string | null;
+  hasMore: boolean;
+  aggregationExact: boolean;
+  oversizedRecords: number;
+}> {
+  const cursor = decodeBrowserPromptCursor(options.cursor, "desc");
+  const limit = Math.max(1, Math.min(200, options.limit || 60));
+  const scope = options.scope || "all";
+  const search = normalizeSearchText(options.search?.trim() || "");
+  const prompts: BrowserPromptRecord[] = [];
+  const recentPrompts = [...cursor.recentPrompts];
+  let promptCount = cursor.promptCount;
+  let purePromptCount = cursor.purePromptCount;
+  let visiblePromptCount = cursor.visiblePromptCount;
+  let matchCount = cursor.matchCount;
+  let oversizedRecords = cursor.oversizedRecords;
+  const sourceCounts = { ...cursor.sourceCounts };
+  const startBeforeByte = cursor.beforeByte ?? file.size;
+  let nextBeforeByte = startBeforeByte;
+  let scannedRecords = 0;
+  let hasMore = false;
+
+  for await (const line of readBrowserJsonlLinesReverse(file, {
+    signal: options.signal,
+    startBeforeByte
+  })) {
+    options.signal?.throwIfAborted();
+    if (scannedRecords >= browserPromptPageScanRecords || startBeforeByte - line.byteOffset >= browserPromptPageScanBytes) {
+      // Keep the boundary at the last processed record. The current record has
+      // not been consumed yet and must remain inside the next reverse page.
+      hasMore = nextBeforeByte > 0;
+      break;
+    }
+    scannedRecords += 1;
+    nextBeforeByte = line.byteOffset;
+    if (line.rawLine === "") continue;
+    if (line.oversized || line.rawLine === null) {
+      oversizedRecords += 1;
+      continue;
+    }
+    const parsed = parseJsonLine(line.rawLine);
+    const candidate = parsed ? browserPromptTextFromItem(parsed) : null;
+    if (!candidate) continue;
+    const message = hideBrowserPromptAttachmentData(candidate.text).trim();
+    if (!message || browserPromptIsCrossProtocolDuplicate(message, candidate, recentPrompts)) continue;
+    const classification = classifyPromptText(message);
+    promptCount += 1;
+    if (classification.hasPureText) purePromptCount += 1;
+    if (classification.visibleByDefault) visiblePromptCount += 1;
+    sourceCounts[classification.sourceType] = (sourceCounts[classification.sourceType] || 0) + 1;
+    const prompt: BrowserPromptRecord = {
+      index: line.byteOffset + 1,
+      lineNumber: 0,
+      byteOffset: line.byteOffset,
+      timestamp: candidate.timestamp,
+      text: message,
+      characterCount: message.length,
+      protocol: candidate.protocol,
+      textTruncated: candidate.textTruncated,
+      ordinalExact: false,
+      ...classification
+    };
+    const matchesScope = browserPromptMatchesScope(prompt, scope);
+    const searchableText = scope === "pure" ? prompt.pureText : prompt.text;
+    if (matchesScope && (!search || normalizeSearchText(searchableText).includes(search))) {
+      matchCount += 1;
+      prompts.push(prompt);
+    }
+    recentPrompts.push({
+      fingerprint: browserPromptFingerprint(message),
+      timestampMs: candidate.timestamp ? Date.parse(candidate.timestamp) : null,
+      protocol: candidate.protocol
+    });
+    if (recentPrompts.length > 8) recentPrompts.splice(0, recentPrompts.length - 8);
+    if (prompts.length >= limit) {
+      hasMore = line.byteOffset > 0;
+      break;
+    }
+  }
+
+  const nextCursor = hasMore ? encodeBrowserPromptCursor({
+    order: "desc",
+    byteOffset: 0,
+    beforeByte: nextBeforeByte,
+    lineNumber: 0,
+    promptCount,
+    purePromptCount,
+    visiblePromptCount,
+    matchCount,
+    oversizedRecords,
+    sourceCounts,
+    recentPrompts
+  }) : null;
+  return {
+    prompts,
+    promptCount,
+    purePromptCount,
+    visiblePromptCount,
+    sourceCounts,
+    matchCount,
+    matchCountComplete: !hasMore,
+    nextCursor,
+    hasMore,
+    aggregationExact: oversizedRecords === 0,
+    oversizedRecords
+  };
+}
+
 function browserPromptIsCrossProtocolDuplicate(
   text: string,
   candidate: BrowserOversizedPromptCandidate,
@@ -3203,6 +3331,7 @@ function browserPromptFingerprint(text: string): string {
 
 function emptyBrowserPromptCursor(): BrowserPromptCursor {
   return {
+    order: "asc",
     byteOffset: 0,
     lineNumber: 0,
     promptCount: 0,
@@ -3215,12 +3344,16 @@ function emptyBrowserPromptCursor(): BrowserPromptCursor {
   };
 }
 
-function decodeBrowserPromptCursor(value: string | null | undefined): BrowserPromptCursor {
-  if (!value) return emptyBrowserPromptCursor();
+function decodeBrowserPromptCursor(value: string | null | undefined, expectedOrder: "asc" | "desc" = "asc"): BrowserPromptCursor {
+  if (!value) return { ...emptyBrowserPromptCursor(), order: expectedOrder };
   try {
     const parsed = JSON.parse(decodeURIComponent(value)) as Partial<BrowserPromptCursor>;
+    const cursorOrder = parsed.order || "asc";
+    if (cursorOrder !== expectedOrder) throw new Error("Browser prompt cursor order mismatch.");
     return {
+      order: cursorOrder,
       byteOffset: Math.max(0, Number(parsed.byteOffset) || 0),
+      beforeByte: parsed.beforeByte == null ? undefined : Math.max(0, Number(parsed.beforeByte) || 0),
       lineNumber: Math.max(0, Number(parsed.lineNumber) || 0),
       promptCount: Math.max(0, Number(parsed.promptCount) || 0),
       purePromptCount: Math.max(0, Number(parsed.purePromptCount) || 0),

@@ -232,6 +232,57 @@ assert.deepEqual(
     "user_message"
   ]
 );
+
+const reverseFile = jsonlFile([
+  { type: "user_message", timestamp: "2026-08-13T08:00:00.000Z", payload: { text: "oldest prompt" } },
+  { type: "user_message", timestamp: "2026-08-13T08:01:00.000Z", payload: { text: "middle prompt" } },
+  { type: "user_message", timestamp: "2026-08-13T08:02:00.000Z", payload: { text: "newest prompt" } }
+], "rollout-reverse.jsonl");
+const reverseWorkspace = promptWorkspace("thread-reverse", reverseFile);
+const newestPage = await readBrowserThreadPrompts(reverseWorkspace, "thread-reverse", {
+  order: "desc",
+  scope: "pure",
+  limit: 2
+});
+assert.equal(newestPage.order, "desc");
+assert.deepEqual(newestPage.prompts.map((prompt) => prompt.pureText), ["newest prompt", "middle prompt"]);
+assert.equal(newestPage.hasMore, true);
+assert.ok(newestPage.nextCursor);
+assert.ok(newestPage.prompts.every((prompt) => prompt.ordinalExact === false));
+const olderPage = await readBrowserThreadPrompts(reverseWorkspace, "thread-reverse", {
+  order: "desc",
+  scope: "pure",
+  limit: 2,
+  cursor: newestPage.nextCursor
+});
+assert.deepEqual(olderPage.prompts.map((prompt) => prompt.pureText), ["oldest prompt"]);
+assert.equal(olderPage.hasMore, false);
+
+const sparseReverseFile = jsonlFile([
+  { type: "user_message", timestamp: "2026-08-13T07:00:00.000Z", payload: { text: "prompt at reverse scan boundary" } },
+  ...Array.from({ length: 9_999 }, (_, index) => ({
+    type: "event_msg",
+    timestamp: "2026-08-13T07:01:00.000Z",
+    payload: { type: "status", message: `status-${index}` }
+  }))
+], "rollout-sparse-reverse.jsonl");
+const sparseReverseWorkspace = promptWorkspace("thread-sparse-reverse", sparseReverseFile);
+const sparseFirstPage = await readBrowserThreadPrompts(sparseReverseWorkspace, "thread-sparse-reverse", {
+  order: "desc",
+  scope: "pure",
+  limit: 2
+});
+assert.deepEqual(sparseFirstPage.prompts, []);
+assert.equal(sparseFirstPage.hasMore, true);
+assert.ok(sparseFirstPage.nextCursor);
+const sparseSecondPage = await readBrowserThreadPrompts(sparseReverseWorkspace, "thread-sparse-reverse", {
+  order: "desc",
+  scope: "pure",
+  limit: 2,
+  cursor: sparseFirstPage.nextCursor
+});
+assert.deepEqual(sparseSecondPage.prompts.map((prompt) => prompt.pureText), ["prompt at reverse scan boundary"]);
+assert.equal(sparseSecondPage.hasMore, false);
 assert.deepEqual(
   protocolPrompts.prompts.slice(0, 7).map((prompt) => prompt.text),
   [

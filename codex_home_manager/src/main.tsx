@@ -71,6 +71,7 @@ import {
 } from "./threadContentSearch";
 import { loadThreadPagesToDepth, useDismissOpenDetailsOutside, useThreadScrollAnchor } from "./uiBehavior";
 import { TimelineEntry } from "./TimelineEntry";
+import { buildPromptCopyText, mergeOrderedPromptRecords, PromptOrderControls, usePromptOrdering } from "./PromptOrdering";
 type Visibility =
   | "visible"
   | "hidden_by_initial_limit"
@@ -317,6 +318,7 @@ type PromptRecord = {
   index: number;
   lineNumber: number;
   byteOffset?: number;
+  ordinalExact?: boolean;
   timestamp: string | null;
   text: string;
   characterCount: number;
@@ -340,6 +342,7 @@ type ThreadPrompts = {
   sourceCounts?: Record<string, number>;
   matchCount?: number;
   matchCountComplete?: boolean;
+  order?: "asc" | "desc";
   nextCursor?: string | null;
   hasMore?: boolean;
   prompts: PromptRecord[];
@@ -350,6 +353,7 @@ type ThreadPromptPage = ThreadPrompts & {
   scope: string;
   search: string;
   sourceType?: string | null;
+  order: "asc" | "desc";
   purePromptCount: number;
   visiblePromptCount: number;
   hiddenPromptCount: number;
@@ -1579,6 +1583,11 @@ const englishText: Record<string, string> = {
   "已循环到最后一个匹配。": "Wrapped to the last match.",
   "已循环到第一个匹配。": "Wrapped to the first match.",
   "清空搜索": "Clear search",
+  "内容顺序": "Content order",
+  "最新在前": "Newest first",
+  "时间顺序": "Chronological",
+  "跳到最新": "Jump to latest",
+  "文件位置": "File position",
   "原始记录": "Raw record",
   "（已截断）": " (truncated)",
   "上一页": "Previous",
@@ -2379,6 +2388,7 @@ async function fetchThreadPromptPageFromLocalApi(
     search: string;
     scope: string;
     sourceType?: string | null;
+    order: "asc" | "desc";
     scanBudgetMs: number;
     requestId: string;
   },
@@ -2392,6 +2402,7 @@ async function fetchThreadPromptPageFromLocalApi(
     scanBudgetMs: String(options.scanBudgetMs),
     requestId: options.requestId
   });
+  params.set("order", options.order);
   if (options.cursor) params.set("cursor", options.cursor);
   if (options.sourceType) params.set("sourceType", options.sourceType);
   return await fetchJson<ThreadPromptPage>(`/api/threads/${thread.id}/prompts/page?${params.toString()}`, {
@@ -6464,13 +6475,6 @@ function highlightSearchMatches(text: string, query: string, activeMatchIndex = 
   return fragments;
 }
 
-function mergePromptRecords(current: PromptRecord[], incoming: PromptRecord[], replace: boolean): PromptRecord[] {
-  if (replace) return incoming.map((prompt) => normalizePromptRecord(prompt));
-  const recordsByIndex = new Map(current.map((prompt) => [prompt.index, prompt]));
-  for (const prompt of incoming) recordsByIndex.set(prompt.index, normalizePromptRecord(prompt));
-  return Array.from(recordsByIndex.values()).sort((left, right) => left.index - right.index);
-}
-
 function PromptVirtualList({
   prompts,
   filterMode,
@@ -6520,8 +6524,10 @@ function PromptVirtualList({
             <div key={`${prompt.index}-${prompt.lineNumber}`} ref={virtualizer.measureElement} data-index={virtualRow.index} className="prompt-entry-wrap" style={{ transform: `translateY(${virtualRow.start}px)` }}>
               <article className={`prompt-entry prompt-entry-${prompt.sourceType || "unknown"} ${virtualRow.index === activeSearchIndex ? "prompt-entry-active-match" : ""}`} aria-current={virtualRow.index === activeSearchIndex ? "true" : undefined}>
                 <div className="prompt-entry-head">
-                  <strong>Prompt {formatCount(prompt.index)}</strong>
-                  <span>{t("行")} {formatCount(prompt.lineNumber)}</span>
+                  <strong>{prompt.ordinalExact === false
+                    ? `${t("文件位置")} ${formatBytes(prompt.byteOffset || 0)}`
+                    : `Prompt ${formatCount(prompt.index)}`}</strong>
+                  {prompt.lineNumber > 0 ? <span>{t("行")} {formatCount(prompt.lineNumber)}</span> : null}
                   {prompt.timestamp ? <time>{prompt.timestamp}</time> : null}
                   {prompt.sourceLabel || prompt.sourceType ? <span className="prompt-source-badge">{localizedPromptSourceLabel(prompt, language)}</span> : null}
                   <em>{formatCount(displayText.length)} {t("字符")}</em>
@@ -6562,6 +6568,7 @@ function ThreadPromptModal({
   const [copyMode, setCopyMode] = React.useState<PromptCopyMode>("clean");
   const [copySpacingMode, setCopySpacingMode] = React.useState<PromptCopySpacingMode>("spaced");
   const [contentMode, setContentMode] = React.useState<"prompts" | "timeline">("timeline");
+  const { promptOrder, promptListResetNonce, changePromptOrder, jumpToLatestPrompt, resetPromptOrdering } = usePromptOrdering();
   const [promptSearchText, setPromptSearchText] = React.useState("");
   const [promptSearchQuery, setPromptSearchQuery] = React.useState("");
   const [activePromptSearchIndex, setActivePromptSearchIndex] = React.useState(-1);
@@ -6669,6 +6676,7 @@ function ThreadPromptModal({
     setCopyMode("clean");
     setCopySpacingMode("spaced");
     setContentMode("timeline");
+    resetPromptOrdering();
     setPromptSearchText("");
     setPromptSearchQuery("");
     setActivePromptSearchIndex(-1);
@@ -6729,19 +6737,18 @@ function ThreadPromptModal({
     setBrowserPrompts(null);
     setPromptsLoading(true);
     setPromptsError("");
-    const readInitialPage = activePromptScope === "pure" && !promptSearchQuery
-      ? readBrowserThreadPrompts(browserWorkspace, threadId)
-      : readBrowserThreadPrompts(browserWorkspace, threadId, {
-          limit: 60,
-          scope: browserScope,
-          search: promptSearchQuery,
-          signal: controller.signal
-        });
+    const readInitialPage = readBrowserThreadPrompts(browserWorkspace, threadId, {
+      limit: 60,
+      scope: browserScope,
+      search: promptSearchQuery,
+      order: promptOrder,
+      signal: controller.signal
+    });
     const applyBrowserPage = (result: ThreadPrompts, replace: boolean) => {
       if (result.threadId !== threadId) throw new Error(t("prompt 响应属于其他线程，已丢弃。"));
       setBrowserPrompts((current) => ({
         ...result,
-        prompts: mergePromptRecords(replace ? [] : current?.prompts || [], result.prompts, replace)
+        prompts: mergeOrderedPromptRecords(replace ? [] : current?.prompts || [], result.prompts, replace, promptOrder, normalizePromptRecord)
       }));
       browserNextCursorRef.current = result.nextCursor || null;
       setBrowserNextCursor(result.nextCursor || null);
@@ -6757,6 +6764,7 @@ function ThreadPromptModal({
           limit: 60,
           scope: browserScope,
           search: promptSearchQuery,
+          order: promptOrder,
           signal: controller.signal
         }) as ThreadPrompts;
         if (controller.signal.aborted || browserPromptSequenceRef.current !== sequence) return 0;
@@ -6789,7 +6797,7 @@ function ThreadPromptModal({
       loadMorePromptsRef.current = async () => 0;
       if (browserPromptSequenceRef.current === sequence) browserPromptSequenceRef.current += 1;
     };
-  }, [activePromptScope, browserWorkspace, contentMode, promptSearchQuery, t, thread]);
+  }, [activePromptScope, browserWorkspace, contentMode, promptOrder, promptSearchQuery, t, thread]);
 
   React.useEffect(() => {
     if (!thread || browserWorkspace || contentMode !== "prompts") return undefined;
@@ -6812,7 +6820,7 @@ function ThreadPromptModal({
 
     const applyPage = (page: ThreadPromptPage, mode: "initial" | "scan" | "more"): number => {
       const beforeCount = loadedPromptsRef.current.length;
-      const merged = mergePromptRecords(loadedPromptsRef.current, page.prompts, mode === "initial");
+      const merged = mergeOrderedPromptRecords(loadedPromptsRef.current, page.prompts, mode === "initial", promptOrder, normalizePromptRecord);
       loadedPromptsRef.current = merged;
       setLocalPromptPage({ ...page, prompts: merged });
       if (mode === "more") {
@@ -6843,12 +6851,13 @@ function ThreadPromptModal({
           limit: 60,
           search,
           scope,
+          order: promptOrder,
           scanBudgetMs: 1_200,
           requestId
         }, controller.signal);
         const ownsRequest = ownsQuery() && !controller.signal.aborted && promptPageRequestRef.current === request;
         if (!ownsRequest) return null;
-        if (page.threadId !== threadId || page.requestId !== requestId || page.scope !== scope || page.search !== search) {
+        if (page.threadId !== threadId || page.requestId !== requestId || page.scope !== scope || page.search !== search || page.order !== promptOrder) {
           throw new Error(t("prompt 响应与当前线程或筛选条件不一致，已丢弃。"));
         }
         return { page, added: applyPage(page, mode) };
@@ -6911,7 +6920,7 @@ function ThreadPromptModal({
       setPromptsLoadingMore(false);
       loadMorePromptsRef.current = async () => 0;
     };
-  }, [activePromptScope, browserWorkspace, cancelActivePageRequest, codexHome, contentMode, promptContentRefreshNonce, promptSearchQuery, t, thread]);
+  }, [activePromptScope, browserWorkspace, cancelActivePageRequest, codexHome, contentMode, promptContentRefreshNonce, promptOrder, promptSearchQuery, t, thread]);
 
   React.useEffect(() => () => cancelActiveCopyRequest(), [activePromptScope, cancelActiveCopyRequest, promptSearchQuery, thread?.id]);
 
@@ -7041,28 +7050,17 @@ function ThreadPromptModal({
 
   if (!thread) return null;
 
-  function selectAdjacentContentTab(direction: -1 | 1) {
-    setContentMode((current) => {
-      const next = current === "timeline"
-        ? (direction > 0 ? "prompts" : "prompts")
-        : (direction > 0 ? "timeline" : "timeline");
-      window.requestAnimationFrame(() => document.getElementById(`thread-content-tab-${next}`)?.focus());
-      return next;
-    });
+  function selectAdjacentContentTab(_direction: -1 | 1) {
+    const next = contentMode === "timeline" ? "prompts" : "timeline";
+    setContentMode(next);
+    window.requestAnimationFrame(() => document.getElementById(`thread-content-tab-${next}`)?.focus());
   }
 
-  const formatPromptForCopy = (prompt: PromptRecord) => {
-    const rawPromptText = copyMode === "clean" ? promptTextForCleanCopy(prompt) : promptTextForFilter(prompt, filterMode).trim();
-    const promptText = copySpacingMode === "compact" ? removeBlankLines(rawPromptText) : rawPromptText;
-    if (!promptText) return "";
-    if (copyMode === "clean") return promptText;
-    return (
-      `## Prompt ${prompt.index}\n\n` +
-      `${t("行")} ${prompt.lineNumber}${prompt.timestamp ? ` | ${prompt.timestamp}` : ""}` +
-      `${prompt.sourceLabel || prompt.sourceType ? ` | ${localizedPromptSourceLabel(prompt, language)}` : ""}\n\n` +
-      promptText
-    );
-  };
+  const formatPromptForCopy = (prompt: PromptRecord) => buildPromptCopyText(prompt, {
+    rawText: copyMode === "clean" ? promptTextForCleanCopy(prompt) : promptTextForFilter(prompt, filterMode).trim(),
+    clean: copyMode === "clean", compact: copySpacingMode === "compact",
+    sourceLabel: prompt.sourceLabel || prompt.sourceType ? localizedPromptSourceLabel(prompt, language) : "", lineLabel: t("行"), filePositionLabel: t("文件位置")
+  });
   const promptJoiner = copySpacingMode === "compact" ? (copyMode === "metadata" ? "\n---\n" : "\n") : (copyMode === "clean" ? "\n\n" : "\n\n---\n\n");
   const allPromptText = searchedPrompts.map(formatPromptForCopy).filter(Boolean).join(
     promptJoiner
@@ -7082,6 +7080,7 @@ function ThreadPromptModal({
         limit: 80,
         scope: activePromptScope,
         search: promptSearchQuery,
+        order: "asc",
         signal
       }) as ThreadPrompts;
       for (const rawPrompt of page.prompts) {
@@ -7571,9 +7570,10 @@ function ThreadPromptModal({
               : `${formatCount(searchedPrompts.length)} / ${formatCount(promptMatchCount)} · ${!promptMatchCountComplete ? `${t("扫描中")}${promptScanPercent === null ? "" : ` ${promptScanPercent.toFixed(1)}%`}` : promptsHaveMore ? t("仍有结果未加载") : t("完整")}`}</span>
             {promptNavigationStatus ? <span className="prompt-navigation-note">{promptNavigationStatus}</span> : null}
           </span>
-          <button onClick={() => void selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
-          <button onClick={() => void selectPromptSearchResult(1)} disabled={!promptSearchQuery || (!searchedPrompts.length && !promptsHaveMore)} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={16} /></button>
-          <button onClick={clearPromptSearch} disabled={!promptSearchText} title={t("清空搜索")} aria-label={t("清空搜索")} type="button"><X size={16} /></button>
+          <PromptOrderControls order={promptOrder} newestLabel={t("最新在前")} chronologicalLabel={t("时间顺序")} jumpLabel={t("跳到最新")} groupLabel={t("内容顺序")} onChange={(order) => { changePromptOrder(order); setActivePromptSearchIndex(-1); setPromptNavigationStatus(""); }} onJumpLatest={jumpToLatestPrompt} />
+          <button className="prompt-search-previous" onClick={() => void selectPromptSearchResult(-1)} disabled={!promptSearchQuery || !searchedPrompts.length} title={t("上一个匹配")} aria-label={t("上一个匹配")} type="button"><ChevronUp size={16} /></button>
+          <button className="prompt-search-next" onClick={() => void selectPromptSearchResult(1)} disabled={!promptSearchQuery || (!searchedPrompts.length && !promptsHaveMore)} title={t("下一个匹配")} aria-label={t("下一个匹配")} type="button"><ChevronDown size={16} /></button>
+          <button className="prompt-search-clear" onClick={clearPromptSearch} disabled={!promptSearchText} title={t("清空搜索")} aria-label={t("清空搜索")} type="button"><X size={16} /></button>
         </div>
 
         <div className="prompt-modal-content">
@@ -7581,7 +7581,7 @@ function ThreadPromptModal({
           {promptsLoading && !promptDataReady ? <div className="panel-loading" role="status" aria-live="polite">{t("读取 prompts...")}</div> : null}
           {promptDataReady ? (
             searchedPrompts.length
-              ? <PromptVirtualList prompts={searchedPrompts} filterMode={filterMode} searchQuery={promptSearchQuery} activeSearchIndex={activePromptSearchIndex} hasMore={promptsHaveMore} isLoadingMore={promptsLoadingMore} onLoadMore={() => void loadMorePromptsRef.current()} />
+              ? <PromptVirtualList key={`${promptOrder}-${promptListResetNonce}`} prompts={searchedPrompts} filterMode={filterMode} searchQuery={promptSearchQuery} activeSearchIndex={activePromptSearchIndex} hasMore={promptsHaveMore} isLoadingMore={promptsLoadingMore} onLoadMore={() => void loadMorePromptsRef.current()} />
               : <div className="empty-state">
                   <span>{promptMatchCountComplete ? promptSearchQuery ? t("没有匹配内容") : t("当前筛选没有 prompt") : t("正在扫描索引...")}</span>
                   {promptsHaveMore ? <button type="button" onClick={() => void loadMorePromptsRef.current()} disabled={promptsLoadingMore}>{promptsLoadingMore ? t("正在加载更多...") : t("加载更多")}</button> : null}

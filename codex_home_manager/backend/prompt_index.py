@@ -1334,9 +1334,14 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
     return payload
 
 
-def _query_signature(scope: str, search: str, source_type: str | None) -> str:
+def _query_signature(scope: str, search: str, source_type: str | None, order: str = "asc") -> str:
     value = json.dumps(
-        {"scope": scope.strip().lower(), "search": normalize_search_text(search), "sourceType": source_type or ""},
+        {
+            "scope": scope.strip().lower(),
+            "search": normalize_search_text(search),
+            "sourceType": source_type or "",
+            "order": order,
+        },
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -1366,30 +1371,37 @@ def read_prompt_page(
     cursor: str | None,
     limit: int,
     index_state: dict[str, Any],
+    order: str = "asc",
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     safe_limit = max(1, min(500, int(limit)))
+    normalized_order = (order or "asc").strip().lower()
+    if normalized_order not in {"asc", "desc"}:
+        raise ValueError(f"unsupported prompt order: {order}")
     scope_sql, scope_parameters = _scope_clause(scope, "p")
     normalized_search = normalize_search_text(search.strip())
     search_column = _prompt_search_column(scope)
     use_fts = bool(normalized_search and _use_trigram_index(normalized_search))
-    query_signature = _query_signature(scope, search, source_type)
-    after_index = 0
+    query_signature = _query_signature(scope, search, source_type, normalized_order)
+    cursor_index = 0
     if cursor:
         cursor_payload = _decode_cursor(cursor)
         if cursor_payload.get("generation") != index_state["generation"]:
             raise ValueError("prompt cursor is stale because the rollout index was rebuilt")
         if cursor_payload.get("query") != query_signature:
             raise ValueError("prompt cursor does not match the current filters")
-        after_index = max(0, int(cursor_payload.get("after") or 0))
+        cursor_index = max(0, int(cursor_payload.get("position") or cursor_payload.get("after") or 0))
 
     path_text = str(rollout_path.expanduser().resolve(strict=False))
     with _database_read(database_path), closing(_connect_read_only(database_path)) as connection, _cancelable_query(connection, cancel_check):
         file_row = connection.execute("SELECT * FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
         if file_row is None:
             raise RuntimeError("prompt index metadata is missing")
-        clauses = ["p.file_id = ?", "p.prompt_index > ?", scope_sql]
-        parameters: list[Any] = [int(file_row["id"]), after_index, *scope_parameters]
+        clauses = ["p.file_id = ?", scope_sql]
+        parameters: list[Any] = [int(file_row["id"]), *scope_parameters]
+        if cursor:
+            clauses.append("p.prompt_index > ?" if normalized_order == "asc" else "p.prompt_index < ?")
+            parameters.append(cursor_index)
         if source_type:
             clauses.append("p.source_type = ?")
             parameters.append(source_type)
@@ -1408,11 +1420,11 @@ def read_prompt_page(
                 " AND CAST(f.prompt_index AS INTEGER) = p.prompt_index"
             )
         row_cursor = connection.execute(
-            f"SELECT p.* FROM {from_sql} WHERE {where_sql} ORDER BY p.prompt_index LIMIT ?",
+            f"SELECT p.* FROM {from_sql} WHERE {where_sql} ORDER BY p.prompt_index {normalized_order.upper()} LIMIT ?",
             (*parameters, safe_limit + 1),
         )
         prompts: list[dict[str, Any]] = []
-        last_index = after_index
+        last_index = cursor_index
         remaining_page_bytes = prompt_search_result_page_characters
         has_indexed_more = False
         while len(prompts) < safe_limit:
@@ -1434,7 +1446,7 @@ def read_prompt_page(
         next_cursor = None
         if has_indexed_more or not index_state["complete"]:
             next_cursor = _encode_cursor(
-                {"generation": index_state["generation"], "query": query_signature, "after": last_index}
+                {"generation": index_state["generation"], "query": query_signature, "position": last_index}
             )
         count_clauses = ["p.file_id = ?", scope_sql]
         count_parameters: list[Any] = [int(file_row["id"]), *scope_parameters]
@@ -1461,6 +1473,7 @@ def read_prompt_page(
         "hasMore": bool(has_indexed_more or not index_state["complete"]),
         "matchCount": match_count,
         "matchCountComplete": bool(index_state["complete"]),
+        "order": normalized_order,
         "sourceCounts": summary["sourceCounts"],
         "promptCount": summary["promptCount"],
         "purePromptCount": summary["purePromptCount"],

@@ -6422,6 +6422,7 @@ def read_thread_prompt_page(
     search: str = "",
     scope: str = "visible",
     source_type: str | None = None,
+    order: str = "asc",
     scan_budget_ms: int = 250,
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -6444,6 +6445,7 @@ def read_thread_prompt_page(
         scope=scope,
         search=search,
         source_type=source_type,
+        order=order,
         cursor=cursor,
         limit=limit,
         index_state=index_state,
@@ -6456,6 +6458,7 @@ def read_thread_prompt_page(
         "scope": scope,
         "search": search,
         "sourceType": source_type,
+        "order": order,
         **page,
     }
 
