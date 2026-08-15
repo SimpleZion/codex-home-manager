@@ -1063,14 +1063,16 @@ def validate_windows_build_metadata(
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(metadata, dict)
-        or metadata.get("schemaVersion") != 1
+        or metadata.get("schemaVersion") != 2
         or metadata.get("version") != expected_version
         or re.fullmatch(r"\d+\.\d+\.\d+", expected_version) is None
     ):
         raise ReleaseManifestError("Windows build metadata has an invalid schema or version")
     artifacts = metadata.get("artifacts")
-    if not isinstance(artifacts, list) or len(artifacts) != 2:
-        raise ReleaseManifestError("Windows build metadata must contain exactly the final EXE and ZIP")
+    if not isinstance(artifacts, list) or len(artifacts) != 3:
+        raise ReleaseManifestError(
+            "Windows build metadata must contain exactly the connector EXE, connector ZIP, and verifier"
+        )
     normalized: list[dict[str, Any]] = []
     kinds: set[str] = set()
     for artifact in artifacts:
@@ -1082,17 +1084,21 @@ def validate_windows_build_metadata(
         expected_size = artifact.get("size")
         if (
             not isinstance(name, str)
-            or kind not in {"exe", "zip"}
+            or kind not in {"exe", "zip", "verifier"}
             or kind in kinds
             or re.fullmatch(r"[0-9a-f]{64}", expected_hash or "") is None
             or not isinstance(expected_size, int)
             or isinstance(expected_size, bool)
             or expected_size < 1
-            or re.fullmatch(
-                rf"codex-home-manager-local-win-x64-v{re.escape(expected_version)}-{expected_hash[:12]}\.{kind}",
-                name,
+            or (
+                kind in {"exe", "zip"}
+                and re.fullmatch(
+                    rf"codex-home-manager-local-win-x64-v{re.escape(expected_version)}-{expected_hash[:12]}\.{kind}",
+                    name,
+                )
+                is None
             )
-            is None
+            or (kind == "verifier" and name != "codex-home-manager-verifier-win-x64.exe")
         ):
             raise ReleaseManifestError("Windows build metadata has an invalid artifact")
         artifact_path = artifact_directory / name
@@ -1134,8 +1140,10 @@ def validate_windows_build_metadata(
             normalized_artifact["authenticode"] = artifact["authenticode"]
         normalized.append(normalized_artifact)
         kinds.add(kind)
-    if kinds != {"exe", "zip"}:
-        raise ReleaseManifestError("Windows build metadata must contain exactly the final EXE and ZIP")
+    if kinds != {"exe", "zip", "verifier"}:
+        raise ReleaseManifestError(
+            "Windows build metadata must contain exactly the connector EXE, connector ZIP, and verifier"
+        )
     return sorted(normalized, key=lambda artifact: artifact["name"])
 
 
@@ -1162,8 +1170,8 @@ def resolve_windows_evidence_paths(evidence_directory: Path, source_commit: str)
     attestation_paths = list(attestation_directory.iterdir())
     if (
         any(not path.is_file() or path.is_symlink() for path in [*binary_paths, *attestation_paths])
-        or len(binary_paths) != 3
-        or len(attestation_paths) != 7
+        or len(binary_paths) != 4
+        or len(attestation_paths) != 9
     ):
         raise ReleaseManifestError("Windows evidence file set mismatch")
     binary_by_name = {path.name: path for path in binary_paths}
@@ -1171,8 +1179,12 @@ def resolve_windows_evidence_paths(evidence_directory: Path, source_commit: str)
     duplicated_names = set(binary_by_name) & set(attestation_by_name)
     if (
         windows_build_metadata_name not in binary_by_name
-        or {Path(name).suffix.lower() for name in duplicated_names} != {".exe", ".zip"}
-        or len(duplicated_names) != 2
+        or duplicated_names
+        != {
+            windows_build_metadata_name,
+            "codex-home-manager-verifier-win-x64.exe",
+            *{name for name in binary_by_name if name.endswith((".exe", ".zip")) and name != "codex-home-manager-verifier-win-x64.exe"},
+        }
     ):
         raise ReleaseManifestError("Windows evidence artifact directory layout is invalid")
     for name in duplicated_names:
@@ -1229,13 +1241,17 @@ def prepare_windows_binary_evidence(
     )
     artifact_hashes = {artifact["name"]: artifact["sha256"] for artifact in artifacts}
     if sbom_subjects != artifact_hashes:
-        raise ReleaseManifestError("Windows SBOM subject set does not match the final EXE and ZIP")
+        raise ReleaseManifestError(
+            "Windows SBOM subject set does not match the connector EXE, connector ZIP, and verifier"
+        )
     expected_provenance_subjects = {
         **artifact_hashes,
         sbom_name: sha256_file(evidence_paths[sbom_name]),
     }
     if provenance_subjects != expected_provenance_subjects:
-        raise ReleaseManifestError("Windows provenance subject set does not match the EXE, ZIP, and SBOM")
+        raise ReleaseManifestError(
+            "Windows provenance subject set does not match the connector EXE, connector ZIP, verifier, and SBOM"
+        )
 
     sbom_path = evidence_paths[sbom_name]
     try:
@@ -1286,7 +1302,11 @@ def prepare_windows_binary_evidence(
 
     release_directory.mkdir(parents=True, exist_ok=True)
     public_site_directory.mkdir(parents=True, exist_ok=True)
-    local_names = {"exe": local_artifact_names[0], "zip": local_artifact_names[1]}
+    local_names = {
+        "exe": local_artifact_names[0],
+        "zip": local_artifact_names[1],
+        "verifier": "codex-home-manager-verifier-win-x64.exe",
+    }
     for artifact in artifacts:
         source_path = evidence_paths[artifact["name"]]
         copy_verified_bytes(
@@ -1295,9 +1315,10 @@ def prepare_windows_binary_evidence(
             artifact["sha256"],
             artifact["size"],
         )
+        public_name = local_names[artifact["kind"]] if artifact["kind"] == "verifier" else artifact["name"]
         copy_verified_bytes(
             source_path,
-            public_site_directory / artifact["name"],
+            public_site_directory / public_name,
             artifact["sha256"],
             artifact["size"],
         )
@@ -1926,7 +1947,7 @@ def load_windows_binary_evidence_proof(
     validate_signer_workflow(repository, signer_workflow)
     expected_asset_names = set(windows_binary_evidence_public_names(source_commit))
     if (
-        len(artifacts) != 2
+        len(artifacts) != 3
         or any(not isinstance(artifact, dict) or not isinstance(artifact.get("name"), str) for artifact in artifacts)
     ):
         raise ReleaseManifestError("Windows binary evidence artifact set is invalid")
@@ -1953,14 +1974,23 @@ def load_windows_binary_evidence_proof(
     if artifacts != validated_artifacts:
         raise ReleaseManifestError("Windows binary evidence artifacts differ from build metadata")
     bundle, _ = load_public_bundle(public_site_directory)
-    if bundle.get("version") != version or sorted(bundle["artifacts"], key=lambda item: item["name"]) != artifacts:
+    connector_artifacts = sorted(
+        (artifact for artifact in artifacts if artifact["kind"] in {"exe", "zip"}),
+        key=lambda item: item["name"],
+    )
+    if bundle.get("version") != version or sorted(bundle["artifacts"], key=lambda item: item["name"]) != connector_artifacts:
         raise ReleaseManifestError("public connector bundle differs from verified Windows CI artifacts")
 
-    local_by_kind = {"exe": local_artifact_names[0], "zip": local_artifact_names[1]}
+    local_by_kind = {
+        "exe": local_artifact_names[0],
+        "zip": local_artifact_names[1],
+        "verifier": "codex-home-manager-verifier-win-x64.exe",
+    }
     for artifact in artifacts:
+        public_name = local_by_kind[artifact["kind"]] if artifact["kind"] == "verifier" else artifact["name"]
         for path, label in (
             (release_directory / local_by_kind[artifact["kind"]], "local release"),
-            (public_site_directory / artifact["name"], "public"),
+            (public_site_directory / public_name, "public"),
         ):
             if (
                 not path.is_file()
@@ -2072,7 +2102,9 @@ def validate_github_release_evidence(
         if isinstance(artifact, dict) and artifact.get("kind") in {"exe", "zip"}
     }
     binary_artifacts = {
-        artifact["name"]: artifact for artifact in windows_binary_evidence["artifacts"]
+        artifact["name"]: artifact
+        for artifact in windows_binary_evidence["artifacts"]
+        if artifact["kind"] in {"exe", "zip"}
     }
     if expected_artifacts != binary_artifacts:
         raise ReleaseManifestError("GitHub connector artifacts differ from verified Windows CI artifacts")
@@ -2498,11 +2530,12 @@ def validate_online_windows_binary_evidence(
         or not isinstance(version, str)
         or re.fullmatch(r"\d+\.\d+\.\d+", version) is None
         or not isinstance(artifacts, list)
-        or len(artifacts) != 2
+        or len(artifacts) != 3
         or not isinstance(assets, list)
     ):
         raise ReleaseManifestError("online Windows binary evidence source identity is invalid")
-    normalized_bundle = {"schemaVersion": 2, "version": version, "artifacts": artifacts}
+    connector_artifacts = [artifact for artifact in artifacts if artifact.get("kind") in {"exe", "zip"}]
+    normalized_bundle = {"schemaVersion": 2, "version": version, "artifacts": connector_artifacts}
     validate_public_bundle_metadata(normalized_bundle)
     artifact_names: set[str] = set()
     artifact_kinds: set[str] = set()
@@ -2511,11 +2544,16 @@ def validate_online_windows_binary_evidence(
         kind = artifact["kind"]
         expected_hash = artifact["sha256"]
         if (
-            re.fullmatch(
-                rf"codex-home-manager-local-win-x64-v{re.escape(version)}-{expected_hash[:12]}\.{kind}",
-                name,
+            (
+                kind in {"exe", "zip"}
+                and re.fullmatch(
+                    rf"codex-home-manager-local-win-x64-v{re.escape(version)}-{expected_hash[:12]}\.{kind}",
+                    name,
+                )
+                is None
             )
-            is None
+            or (kind == "verifier" and name != "codex-home-manager-verifier-win-x64.exe")
+            or kind not in {"exe", "zip", "verifier"}
             or name in artifact_names
             or kind in artifact_kinds
         ):
@@ -2542,6 +2580,8 @@ def validate_online_windows_binary_evidence(
                 raise ReleaseManifestError("online Windows EXE build audit is invalid")
         artifact_names.add(name)
         artifact_kinds.add(kind)
+    if artifact_kinds != {"exe", "zip", "verifier"}:
+        raise ReleaseManifestError("online Windows binary artifact set is invalid")
     expected_attestations = {
         "verifier": "gh attestation verify",
         "deny_self_hosted_runners": True,
@@ -2756,6 +2796,7 @@ def verify_online_release(
             "size": artifact["size"],
         }
         for artifact in windows_binary_evidence["artifacts"]
+        if artifact["kind"] in {"exe", "zip"}
     }
     if {
         name: github_records_by_name[name] for name in connector_names
@@ -2772,11 +2813,20 @@ def verify_online_release(
         ),
         None,
     )
+    ci_verifier = next(
+        (artifact for artifact in windows_binary_evidence["artifacts"] if artifact["kind"] == "verifier"),
+        None,
+    )
+    expected_verifier_record = None if ci_verifier is None else {
+        "name": verifier_name,
+        "sha256": ci_verifier["sha256"],
+        "size": ci_verifier["size"],
+    }
     if verifier_public_record is None or github_records_by_name[verifier_name] != {
         "name": verifier_name,
         "sha256": verifier_public_record["sha256"],
         "size": verifier_public_record["size"],
-    }:
+    } or github_records_by_name[verifier_name] != expected_verifier_record:
         raise ReleaseManifestError("online GitHub verifier differs from the signed public verifier")
 
     github_api_url = f"https://api.github.com/repos/{expected_github_repository}/releases/tags/{quote(expected_github_tag, safe='')}"
@@ -2827,7 +2877,14 @@ def verify_online_release(
         not isinstance(public_bundle, dict)
         or public_bundle.get("version") != windows_binary_evidence["version"]
         or sorted(public_bundle.get("artifacts", []), key=lambda item: item.get("name", ""))
-        != windows_binary_evidence["artifacts"]
+        != sorted(
+            (
+                artifact
+                for artifact in windows_binary_evidence["artifacts"]
+                if artifact["kind"] in {"exe", "zip"}
+            ),
+            key=lambda item: item["name"],
+        )
     ):
         raise ReleaseManifestError("online connector release metadata differs from verified Windows CI artifacts")
     for asset in windows_binary_evidence["assets"]:

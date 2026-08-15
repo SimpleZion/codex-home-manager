@@ -206,8 +206,19 @@ def write_windows_binary_evidence_assets(
 ) -> tuple[Path, dict[str, object]]:
     public_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     artifacts = sorted(public_bundle["artifacts"], key=lambda artifact: artifact["name"])
+    verifier_content = b"self-contained verifier fixture"
+    verifier_name = "codex-home-manager-verifier-win-x64.exe"
+    verifier_artifact = {
+        "name": verifier_name,
+        "kind": "verifier",
+        "sha256": release_manifest.sha256_bytes(verifier_content),
+        "size": len(verifier_content),
+    }
+    artifacts = sorted([*artifacts, verifier_artifact], key=lambda artifact: artifact["name"])
+    (release_directory / verifier_name).write_bytes(verifier_content)
+    (site_directory / verifier_name).write_bytes(verifier_content)
     sbom_name = f"codex-home-manager-windows-x64-{'d' * 40}.cdx.json"
-    metadata = {"schemaVersion": 1, "version": public_bundle["version"], "artifacts": artifacts}
+    metadata = {"schemaVersion": 2, "version": public_bundle["version"], "artifacts": artifacts}
     contents = {
         release_manifest.windows_build_metadata_name: (json.dumps(metadata) + "\n").encode(),
         sbom_name: b'{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:test"}\n',

@@ -104,6 +104,8 @@ def test_source_ci_generates_standard_sbom_and_provenance_evidence() -> None:
     assert "-CiBuild" in workflow
     assert "-VerifyReproducibleBuild" in workflow
     assert "windows-release-binaries-${{ github.sha }}" in workflow
+    assert "codex-home-manager-verifier-win-x64.exe" in workflow
+    assert "Binary SBOM subjects must be the connector EXE, connector ZIP, and verifier" in workflow
     assert 'Copy-Item -LiteralPath $buildMetadataPath -Destination (Join-Path $outputRoot "windows-build-metadata.json")' in workflow
     assert "Generate binary CycloneDX SBOM with Syft" in workflow
     assert "BINARY-SBOM-SUBJECTS.txt" in workflow

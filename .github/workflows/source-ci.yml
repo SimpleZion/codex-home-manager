@@ -247,12 +247,13 @@ jobs:
           $inputRoot = Join-Path $env:RUNNER_TEMP "windows-release-binaries"
           $outputRoot = Join-Path $env:RUNNER_TEMP "windows-release-evidence"
           New-Item -ItemType Directory -Force $outputRoot | Out-Null
-          $executables = @(Get-ChildItem -LiteralPath $inputRoot -File -Filter "*.exe")
+          $connectorExecutables = @(Get-ChildItem -LiteralPath $inputRoot -File | Where-Object { $_.Name -match '^codex-home-manager-local-win-x64-v.+\.exe$' })
+          $verifiers = @(Get-ChildItem -LiteralPath $inputRoot -File | Where-Object { $_.Name -ceq 'codex-home-manager-verifier-win-x64.exe' })
           $archives = @(Get-ChildItem -LiteralPath $inputRoot -File -Filter "*.zip")
-          if ($executables.Count -ne 1 -or $archives.Count -ne 1) {
-            throw "CI packaging must produce exactly one final EXE and one final ZIP"
+          if ($connectorExecutables.Count -ne 1 -or $archives.Count -ne 1 -or $verifiers.Count -ne 1) {
+            throw "CI packaging must produce exactly one connector EXE, one connector ZIP, and one verifier"
           }
-          foreach ($artifact in @($executables[0], $archives[0])) {
+          foreach ($artifact in @($connectorExecutables[0], $archives[0], $verifiers[0])) {
             Copy-Item -LiteralPath $artifact.FullName -Destination (Join-Path $outputRoot $artifact.Name)
           }
           $buildMetadataPath = Join-Path $inputRoot "windows-build-metadata.json"
@@ -276,7 +277,7 @@ jobs:
         run: |
           $binaryRoot = Join-Path $env:RUNNER_TEMP "windows-release-evidence"
           $binarySubjects = @(Get-ChildItem -LiteralPath $binaryRoot -File | Where-Object Extension -In ".exe", ".zip")
-          if ($binarySubjects.Count -ne 2) { throw "Binary SBOM subjects must be the final EXE and ZIP" }
+          if ($binarySubjects.Count -ne 3) { throw "Binary SBOM subjects must be the connector EXE, connector ZIP, and verifier" }
           $subjectLines = $binarySubjects | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
             "$hash *$($_.Name)"
@@ -285,7 +286,7 @@ jobs:
           $provenanceSubjects = @(Get-ChildItem -LiteralPath $binaryRoot -File | Where-Object {
             $_.Extension -in ".exe", ".zip" -or $_.Name -like "*.cdx.json"
           })
-          if ($provenanceSubjects.Count -ne 3) { throw "Binary provenance must cover the EXE, ZIP, and binary SBOM" }
+          if ($provenanceSubjects.Count -ne 4) { throw "Binary provenance must cover the connector EXE, connector ZIP, verifier, and binary SBOM" }
           $provenanceLines = $provenanceSubjects | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
             "$hash *$($_.Name)"

@@ -400,50 +400,11 @@ function Assert-ReleaseZipBoundary {
         if ($blockedEntries.Count -gt 0) {
             throw "Release ZIP contains backend, source, source map, or debug entries: $($blockedEntries -join ', ')"
         }
-    }
-    finally {
-        $archive.Dispose()
-    }
-}
-
-function Export-VerifierFromReleaseZip {
-    param(
-        [Parameter(Mandatory = $true)][string]$ArchivePath,
-        [Parameter(Mandatory = $true)][string]$DestinationPath
-    )
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
-    try {
-        $matches = @($archive.Entries | Where-Object { $_.FullName -ceq "Verify Codex Home Manager.exe" })
-        if ($matches.Count -ne 1 -or $matches[0].Length -lt 1MB) {
-            throw "Verified release ZIP must contain exactly one non-empty self-contained verifier"
-        }
-        $temporaryPath = "$DestinationPath.$PID.tmp"
-        try {
-            $sourceStream = $matches[0].Open()
-            try {
-                $destinationStream = [System.IO.File]::Open(
-                    $temporaryPath,
-                    [System.IO.FileMode]::Create,
-                    [System.IO.FileAccess]::Write,
-                    [System.IO.FileShare]::None
-                )
-                try {
-                    $sourceStream.CopyTo($destinationStream)
-                }
-                finally {
-                    $destinationStream.Dispose()
-                }
-            }
-            finally {
-                $sourceStream.Dispose()
-            }
-            Move-Item -LiteralPath $temporaryPath -Destination $DestinationPath -Force
-        }
-        finally {
-            if (Test-Path -LiteralPath $temporaryPath) {
-                Remove-Item -LiteralPath $temporaryPath -Force
-            }
+        $embeddedVerifiers = @($archive.Entries | Where-Object {
+            $_.FullName.Replace("\", "/") -ceq "Verify Codex Home Manager.exe"
+        })
+        if ($embeddedVerifiers.Count -gt 0) {
+            throw "Release ZIP must not duplicate the separately published self-contained verifier"
         }
     }
     finally {
@@ -662,7 +623,7 @@ ZIP fallback:
 5. Run "Install browser launch protocol.cmd" only when the browser protocol is not registered.
 6. Set CODEX_HOME before starting the connector if your .codex directory is not in a common location.
 
-Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. "Verify Codex Home Manager.exe" is a self-contained verifier from the same reproducible Windows build. Authenticode is used only when an existing publicly trusted certificate is available; otherwise Windows and release metadata explicitly report NotSigned.
+Authenticity is established by the detached Ed25519 release manifest signature and independently pinned public-key fingerprint. The separately downloaded codex-home-manager-verifier-win-x64.exe is a self-contained verifier from the same reproducible Windows build. Authenticode is used only when an existing publicly trusted certificate is available; otherwise Windows and release metadata explicitly report NotSigned.
 '@ | Set-Content -LiteralPath (Join-Path $PackageDirectory "README.txt") -Encoding UTF8
 }
 
@@ -729,7 +690,6 @@ function Invoke-IsolatedConnectorBuild {
         }
     }
     Copy-Item -LiteralPath (Join-Path $payloadRoot "CodexHomeManagerLocal") -Destination (Join-Path $packageRoot "CodexHomeManagerLocal") -Recurse -Force
-    Copy-Item -LiteralPath $verifierExecutable -Destination (Join-Path $packageRoot "Verify Codex Home Manager.exe") -Force
     Write-ConnectorPackageFiles -PackageDirectory $packageRoot
     & python $releaseManifestScript deterministic-zip --source $packageRoot --output $archive --source-date-epoch $sourceDateEpoch
     if ($LASTEXITCODE -ne 0) {
@@ -952,20 +912,24 @@ try {
         $executableAudit["versionInfo"] = $versionAudit
         $directExecutableHash = Get-Sha256HashText -Path $firstBuild.Exe
         $archiveHash = Get-Sha256HashText -Path $firstBuild.Zip
+        $verifierHash = Get-Sha256HashText -Path $firstBuild.Verifier
         $publicExecutableName = Get-ContentAddressedReleaseName -Extension "exe" -Sha256 $directExecutableHash
         $publicArchiveName = Get-ContentAddressedReleaseName -Extension "zip" -Sha256 $archiveHash
         $resolvedCiOutputDirectory = [System.IO.Path]::GetFullPath($CiOutputDirectory)
         New-Item -ItemType Directory -Force -Path $resolvedCiOutputDirectory | Out-Null
         $ciExecutablePath = Join-Path $resolvedCiOutputDirectory $publicExecutableName
         $ciArchivePath = Join-Path $resolvedCiOutputDirectory $publicArchiveName
+        $ciVerifierPath = Join-Path $resolvedCiOutputDirectory "codex-home-manager-verifier-win-x64.exe"
         Copy-Item -LiteralPath $firstBuild.Exe -Destination $ciExecutablePath -Force
         Copy-Item -LiteralPath $firstBuild.Zip -Destination $ciArchivePath -Force
+        Copy-Item -LiteralPath $firstBuild.Verifier -Destination $ciVerifierPath -Force
         $ciMetadata = [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             version = $releaseVersion
             artifacts = @(
                 [ordered]@{ name = $publicExecutableName; kind = "exe"; sha256 = $directExecutableHash; size = (Get-Item -LiteralPath $ciExecutablePath).Length; audit = $executableAudit; authenticode = $authenticodeAudit },
-                [ordered]@{ name = $publicArchiveName; kind = "zip"; sha256 = $archiveHash; size = (Get-Item -LiteralPath $ciArchivePath).Length }
+                [ordered]@{ name = $publicArchiveName; kind = "zip"; sha256 = $archiveHash; size = (Get-Item -LiteralPath $ciArchivePath).Length },
+                [ordered]@{ name = "codex-home-manager-verifier-win-x64.exe"; kind = "verifier"; sha256 = $verifierHash; size = (Get-Item -LiteralPath $ciVerifierPath).Length }
             )
         }
         [System.IO.File]::WriteAllText(
@@ -992,8 +956,9 @@ try {
     $windowsBinaryEvidence = Get-Content -LiteralPath $windowsBinaryEvidenceProofPath -Raw | ConvertFrom-Json
     $ciExecutableArtifact = @($windowsBinaryEvidence.artifacts | Where-Object kind -CEQ "exe")
     $ciArchiveArtifact = @($windowsBinaryEvidence.artifacts | Where-Object kind -CEQ "zip")
-    if ($ciExecutableArtifact.Count -ne 1 -or $ciArchiveArtifact.Count -ne 1) {
-        throw "Verified Source CI Windows evidence must identify exactly one EXE and one ZIP"
+    $ciVerifierArtifact = @($windowsBinaryEvidence.artifacts | Where-Object kind -CEQ "verifier")
+    if ($ciExecutableArtifact.Count -ne 1 -or $ciArchiveArtifact.Count -ne 1 -or $ciVerifierArtifact.Count -ne 1) {
+        throw "Verified Source CI Windows evidence must identify exactly one connector EXE, one connector ZIP, and one verifier"
     }
     $publicExecutableName = [string]$ciExecutableArtifact[0].name
     $publicArchiveName = [string]$ciArchiveArtifact[0].name
@@ -1002,7 +967,6 @@ try {
     $executableAudit = $ciExecutableArtifact[0].audit
     $authenticodeAudit = $ciExecutableArtifact[0].authenticode
     Assert-ReleaseZipBoundary -Path $archivePath
-    Export-VerifierFromReleaseZip -ArchivePath $archivePath -DestinationPath $verifierExecutablePath
     Assert-WindowsVersionMetadata -Path $directExecutablePath | Out-Null
     Assert-WindowsVersionMetadata -Path $verifierExecutablePath | Out-Null
     Assert-CiAuthenticodeEvidence -Path $directExecutablePath -Evidence $authenticodeAudit

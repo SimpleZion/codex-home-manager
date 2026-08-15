@@ -69,7 +69,8 @@ import {
   type SearchMatch,
   type ThreadTimelineSearchPage
 } from "./threadContentSearch";
-
+import { loadThreadPagesToDepth, useDismissOpenDetailsOutside, useThreadScrollAnchor } from "./uiBehavior";
+import { TimelineEntry } from "./TimelineEntry";
 type Visibility =
   | "visible"
   | "hidden_by_initial_limit"
@@ -1778,6 +1779,7 @@ const englishText: Record<string, string> = {
   "已到本次扫描预算，可继续读取更早内容。": "This scan reached its budget. Continue to scan older content.",
   "已从超大原始记录中安全恢复可显示文本。": "Displayable text was safely recovered from oversized raw records.",
   "部分超大原始记录超过恢复预算，未载入正文。": "Some oversized raw records exceeded the recovery budget, so their body text was not loaded.",
+  "源记录没有可区分的逐条时间，已隐藏重复时间。": "The source records do not contain distinguishable per-item times, so repeated timestamps are hidden.",
   "正文": "content",
   "助手回复": "Assistant reply",
   "工具结果": "Tool result",
@@ -3362,6 +3364,7 @@ function ThreadTable({
   onShowThread,
   onHideThread,
   onRepairThread,
+  scrollContextKey,
   hasMore = false,
   isLoadingMore = false,
   onLoadMore
@@ -3377,11 +3380,13 @@ function ThreadTable({
   onShowThread: (thread: ThreadRecord) => void;
   onHideThread: (thread: ThreadRecord) => void;
   onRepairThread: (thread: ThreadRecord) => void;
+  scrollContextKey: string;
   hasMore?: boolean;
   isLoadingMore?: boolean;
   onLoadMore?: () => void;
 }) {
   const { t, formatDate } = useI18n();
+  const { scrollElementRef, captureScrollAnchor } = useThreadScrollAnchor(scrollContextKey, threads);
   const lastRowClickRef = React.useRef<{ id: string; at: number } | null>(null);
   const handleRowClick = (thread: ThreadRecord, event: React.MouseEvent<HTMLTableRowElement>) => {
     const now = Date.now();
@@ -3411,9 +3416,11 @@ function ThreadTable({
   };
   return (
     <div
+      ref={scrollElementRef}
       className="table-wrap"
       onScroll={(event) => {
         const target = event.currentTarget;
+        captureScrollAnchor();
         if (hasMore && !isLoadingMore && target.scrollHeight - target.scrollTop - target.clientHeight < 240) {
           onLoadMore?.();
         }
@@ -3446,6 +3453,7 @@ function ThreadTable({
           {threads.map((thread) => (
             <tr
               key={thread.id}
+              data-thread-id={thread.id}
               className={selectedThreadId === thread.id ? "selected" : ""}
               tabIndex={0}
               aria-label={`${t("完整线程详情")}: ${thread.title}. ${statusLabel(thread.visibility, t)}`}
@@ -4021,6 +4029,12 @@ function ThreadsModule({
   const [pageResetNonce, setPageResetNonce] = React.useState(0);
   const pageRequestSequenceRef = React.useRef(0);
   const pageAbortControllerRef = React.useRef<AbortController | null>(null);
+  const pageQueryIdentityRef = React.useRef("");
+  const pagedThreadsRef = React.useRef<ThreadRecord[]>([]);
+
+  React.useEffect(() => {
+    pagedThreadsRef.current = pagedThreads;
+  }, [pagedThreads]);
 
   React.useEffect(() => {
     const timeoutId = window.setTimeout(() => setDebouncedSearchText(searchText), 220);
@@ -4047,17 +4061,25 @@ function ThreadsModule({
       return;
     }
     const requestSequence = ++pageRequestSequenceRef.current;
+    const queryChanged = pageQueryIdentityRef.current !== pageQueryString;
+    pageQueryIdentityRef.current = pageQueryString;
+    const targetThreadCount = queryChanged ? 50 : Math.max(50, pagedThreadsRef.current.length);
     pageAbortControllerRef.current?.abort();
     const controller = new AbortController();
     pageAbortControllerRef.current = controller;
     setThreadPageLoading(true);
     setThreadPageError("");
-    setPagedThreads([]);
-    setThreadPage(null);
-    void fetchJson<ThreadPage>(`/api/threads/page?${pageQueryString}`, { cache: "no-store", signal: controller.signal })
-      .then((page) => {
+    if (queryChanged) {
+      setPagedThreads([]);
+      setThreadPage(null);
+    }
+    void loadThreadPagesToDepth<ThreadRecord, ThreadPage>(pageQueryString, targetThreadCount, (queryString) => (
+      fetchJson<ThreadPage>(`/api/threads/page?${queryString}`, { cache: "no-store", signal: controller.signal })
+    ))
+      .then(({ page, threads }) => {
         if (pageRequestSequenceRef.current !== requestSequence) return;
-        setPagedThreads(page.threads);
+        if (!page) return;
+        setPagedThreads(threads);
         setThreadPage(page);
       })
       .catch((error) => {
@@ -4290,6 +4312,7 @@ function ThreadsModule({
             onShowThread={onShowThread}
             onHideThread={onHideThread}
             onRepairThread={onRepairThread}
+            scrollContextKey={pageQueryString}
             hasMore={Boolean(serverPaged && threadPage?.hasMore)}
             isLoadingMore={threadPageLoading}
             onLoadMore={loadMoreThreads}
@@ -6352,6 +6375,10 @@ function ThreadTimelinePanel({
     usesIndexedSearch ? searchPage?.nextCursor : timeline?.hasMore
   ));
   const searchMatchCount = usesIndexedSearch ? (searchPage?.matchCount || items.length) : items.length;
+  const distinctTimelineTimestamps = React.useMemo(() => new Set(
+    items.map((item) => item.timestamp).filter((value): value is string => Boolean(value))
+  ), [items]);
+  const timestampsAreIndistinguishable = items.length > 1 && distinctTimelineTimestamps.size === 1;
   const searchCountText = !search
     ? ""
     : items.length
@@ -6393,6 +6420,7 @@ function ThreadTimelinePanel({
         {timeline?.scanLimited && !searchIsScanning ? <span>{t("已到本次扫描预算，可继续读取更早内容。")}</span> : null}
         {timeline?.recoveredOversizedRecords ? <span>{t("已从超大原始记录中安全恢复可显示文本。")} {formatCount(timeline.recoveredOversizedRecords)}</span> : null}
         {timeline?.skippedOversizedRecords ? <span>{t("部分超大原始记录超过恢复预算，未载入正文。")} {formatCount(timeline.skippedOversizedRecords)}</span> : null}
+        {timestampsAreIndistinguishable ? <span>{t("源记录没有可区分的逐条时间，已隐藏重复时间。")}</span> : null}
         {timeline?.rolloutPath ? <code title={timeline.rolloutPath}>{timeline.rolloutPath}</code> : null}
       </div>
       <div ref={parentRef} className="timeline-scroll" data-testid="thread-timeline-list">
@@ -6405,33 +6433,12 @@ function ThreadTimelinePanel({
             const item = items[virtualRow.index];
             const displayItem = fullItems[item.id] || item;
             const isExpanded = expanded.has(item.id);
-            const canExpand = Boolean(displayItem.text || item.encrypted);
-            return (
-              <article
-                key={item.id}
-                ref={virtualizer.measureElement}
-                data-index={virtualRow.index}
-                className={`timeline-entry timeline-entry-${item.kind} ${isExpanded ? "expanded" : "collapsed"} ${virtualRow.index === activeSearchIndex ? "timeline-entry-active-match" : ""}`}
-                style={{ transform: `translateY(${virtualRow.start}px)` }}
-              >
-                <button className="timeline-entry-head" onClick={() => canExpand && void expandItem(item)} aria-expanded={isExpanded} type="button">
-                  <span className="timeline-kind-badge">{language === "en" ? (englishText[item.label] || item.label) : item.label}</span>
-                  {item.timestamp ? <time>{new Date(item.timestamp).toLocaleString()}</time> : null}
-                  {item.callId ? <code>{item.callId}</code> : null}
-                  <em>{formatCount(item.characterCount)} {t("字符")}</em>
-                  {canExpand ? isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} /> : null}
-                </button>
-                {isExpanded ? (
-                  <div className="timeline-entry-body">
-                    {item.encrypted && !displayItem.text ? <p className="encrypted-reasoning-note">{t("该条推理只存储了加密内容，无法读取正文。")}</p> : <pre tabIndex={0} aria-label={`${language === "en" ? (englishText[item.label] || item.label) : item.label} ${t("正文")}`}>{highlightSearchMatches(displayItem.text, search)}</pre>}
-                    {item.hasEncryptedContent && displayItem.text ? <p className="encrypted-reasoning-note">{t("该记录另含加密推理正文；这里只显示可读摘要。")}</p> : null}
-                    {loadingFullItems.has(item.id) ? <span className="timeline-loading-full">{t("正在读取完整内容...")}</span> : null}
-                    {item.textTruncated && !fullItems[item.id] && !loadingFullItems.has(item.id) ? <span className="timeline-loading-full">{t("当前为内容预览；折叠后重新展开可重试完整读取。")}</span> : null}
-                    {fullItems[item.id]?.textTruncated ? <span className="timeline-loading-full">{t("该记录超过单次读取上限，已显示可安全读取的部分。")}</span> : null}
-                  </div>
-                ) : displayItem.text ? <p className="timeline-preview">{highlightSearchMatches(displayItem.text.slice(0, 180), search)}</p> : null}
-              </article>
-            );
+            const label = language === "en" ? (englishText[item.label] || item.label) : item.label;
+            return <TimelineEntry key={item.id} item={item} displayItem={displayItem} index={virtualRow.index} start={virtualRow.start}
+              isExpanded={isExpanded} isActiveMatch={virtualRow.index === activeSearchIndex} hideTimestamp={timestampsAreIndistinguishable}
+              isLoadingFullItem={loadingFullItems.has(item.id)} hasFullItem={Boolean(fullItems[item.id])} label={label} bodyLabel={`${label} ${t("正文")}`}
+              t={t} formatCount={formatCount} renderText={(text) => highlightSearchMatches(text, search)} measureElement={virtualizer.measureElement}
+              onToggle={() => void expandItem(item)} />;
           })}
         </div>
       </div>
@@ -6598,7 +6605,13 @@ function ThreadPromptModal({
   const loadMorePromptsRef = React.useRef<() => Promise<number>>(async () => 0);
   const promptIndexStatusSequenceRef = React.useRef(0);
   const refreshPromptIndexAfterContentRef = React.useRef(false);
+  const promptIndexDetailsRef = React.useRef<HTMLDetailsElement>(null);
   const clearSearchOnEscape = React.useCallback(() => {
+    if (promptIndexDetailsRef.current?.open) {
+      promptIndexDetailsRef.current.open = false;
+      window.requestAnimationFrame(() => promptIndexDetailsRef.current?.querySelector<HTMLElement>("summary")?.focus());
+      return true;
+    }
     if (!promptSearchText) return false;
     setPromptSearchText("");
     setPromptSearchQuery("");
@@ -6609,7 +6622,7 @@ function ThreadPromptModal({
   const dialogRef = useModalAccessibility(Boolean(thread), onClose, clearSearchOnEscape);
   const currentBrowserPrompts = browserPrompts?.threadId === thread?.id ? browserPrompts : null;
   const isBrowserPromptMode = Boolean(browserWorkspace);
-
+  useDismissOpenDetailsOutside(promptIndexDetailsRef, Boolean(thread));
   const loadPromptIndexStatus = React.useCallback(async () => {
     if (!thread || isBrowserPromptMode) return null;
     const sequence = promptIndexStatusSequenceRef.current + 1;
@@ -7466,7 +7479,7 @@ function ThreadPromptModal({
             </button>
           </div>
           {!isBrowserPromptMode ? (
-            <details className="prompt-index-management" onToggle={(event) => {
+            <details ref={promptIndexDetailsRef} className="prompt-index-management" onToggle={(event) => {
               if (event.currentTarget.open) void loadPromptIndexStatus();
             }}>
               <summary>

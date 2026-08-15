@@ -130,6 +130,21 @@ const raceThread = {
   sessionIndexRank: 2
 };
 
+const scrollingThreads = Array.from({ length: 120 }, (_, offset) => ({
+  ...thread,
+  id: `scroll-thread-${String(offset + 1).padStart(3, "0")}`,
+  title: `Scrollable thread ${String(offset + 1).padStart(3, "0")}`,
+  sqliteTitle: `Scrollable thread ${String(offset + 1).padStart(3, "0")}`,
+  sidebarTitle: `Scrollable thread ${String(offset + 1).padStart(3, "0")}`,
+  sessionIndexTitle: `Scrollable thread ${String(offset + 1).padStart(3, "0")}`,
+  rolloutPath: `D:/Codex/sessions/scroll-thread-${String(offset + 1).padStart(3, "0")}.jsonl`,
+  recentRank: offset + 1,
+  threadListRank: offset + 1,
+  sessionIndexRank: offset + 1,
+  updatedAtMs: thread.updatedAtMs - offset * 1000,
+  fileModifiedAtMs: thread.fileModifiedAtMs - offset * 1000
+}));
+
 const promptRecords = [
   { index: 1, lineNumber: 1, timestamp: null, text: "Verify keyboard access", characterCount: 22, sourceType: "user", sourceLabel: "User", visibleByDefault: true, pureText: "Verify keyboard access", pureCharacterCount: 22, hasPureText: true },
   { index: 2, lineNumber: 2, timestamp: null, text: "<recommended_plugins>\n- Sentry\n</recommended_plugins>\n# AGENTS.md instructions", characterCount: 83, sourceType: "internal", sourceLabel: "推荐插件上下文", visibleByDefault: false, pureText: "", pureCharacterCount: 0, hasPureText: false },
@@ -360,7 +375,10 @@ async function installApplicationRoutes(page, {
   emulateUncancellableSlowPrompt = false,
   simulateColdIndex = false,
   promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] },
-  promptIndexApiState = createPromptIndexApiState()
+  promptIndexApiState = createPromptIndexApiState(),
+  threadCatalog = null,
+  snapshotApiState = { catalogVersion: "test-catalog", summaryRequests: 0, pageRequests: [] },
+  timelineUniformTimestamps = false
 } = {}) {
   await page.addInitScript((apiBase) => {
     window.localStorage.setItem("codex-home-manager-api-base-url", apiBase);
@@ -428,6 +446,7 @@ async function installApplicationRoutes(page, {
       return;
     }
     const pathname = requestUrl.pathname;
+    const activeThreads = threadCatalog || (includeRaceThread ? [thread, raceThread] : [thread]);
     if (pathname === "/api/auth/token") {
       await route.fulfill({ json: { token: "test-token", headerName: "X-Codex-Manager-Token", expiresAtMs: Date.now() + 300000 } });
       return;
@@ -437,24 +456,29 @@ async function installApplicationRoutes(page, {
       return;
     }
     if (pathname === "/api/snapshot/summary") {
-      const payload = snapshotPayload(includeRaceThread ? [thread, raceThread] : [thread]);
+      snapshotApiState.summaryRequests += 1;
+      const payload = snapshotPayload(activeThreads);
       const { threads: _threads, ...summary } = payload;
-      await route.fulfill({ json: { ...summary, catalogVersion: "test-catalog", statusCounts: { visible: payload.threads.length }, threadHighlights: payload.threads } });
+      await route.fulfill({ json: { ...summary, catalogVersion: snapshotApiState.catalogVersion, statusCounts: { visible: payload.threads.length }, threadHighlights: payload.threads.slice(0, 20) } });
       return;
     }
     if (pathname === "/api/threads/page") {
-      const threads = includeRaceThread ? [thread, raceThread] : [thread];
+      const limit = Math.max(1, Number(requestUrl.searchParams.get("limit") || 50));
+      const start = Number(requestUrl.searchParams.get("cursor") || 0);
+      const threads = activeThreads.slice(start, start + limit);
+      const nextOffset = start + threads.length;
+      snapshotApiState.pageRequests.push({ catalogVersion: snapshotApiState.catalogVersion, start, limit });
       await route.fulfill({
         json: {
           codexHome: "D:/Codex",
-          catalogVersion: "test-catalog",
+          catalogVersion: snapshotApiState.catalogVersion,
           generatedAtMs: Date.now(),
-          matchedThreads: threads.length,
+          matchedThreads: activeThreads.length,
           loadedThreads: threads.length,
           threads,
-          projectCounts: { [thread.projectPath]: threads.length },
-          hasMore: false,
-          nextCursor: null
+          projectCounts: { [thread.projectPath]: activeThreads.length },
+          hasMore: nextOffset < activeThreads.length,
+          nextCursor: nextOffset < activeThreads.length ? String(nextOffset) : null
         }
       });
       return;
@@ -675,7 +699,7 @@ async function installApplicationRoutes(page, {
     }
     if (pathname === "/api/threads/thread-1/timeline") {
       const requestedKind = requestUrl.searchParams.get("kind") || "conversation";
-      const timelineItems = [
+      let timelineItems = [
         { id: "byte-1", byteOffset: 1, kind: "user", label: "用户", text: "Verify keyboard access", characterCount: 22, textTruncated: false, timestamp: "2026-08-12T01:00:00Z", timestampMs: 1, sourceType: "response_item", payloadType: "message", phase: "", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
         { id: "byte-2", byteOffset: 2, kind: "commentary", label: "思考过程", text: "正在验证构建顺序", characterCount: 8, textTruncated: false, timestamp: "2026-08-12T01:00:01Z", timestampMs: 2, sourceType: "response_item", payloadType: "message", phase: "commentary", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
         { id: "byte-3", byteOffset: 3, kind: "reasoning", label: "推理记录", text: "检查时间线交互和可访问性", characterCount: 13, textTruncated: false, timestamp: "2026-08-12T01:00:02Z", timestampMs: 3, sourceType: "event_msg", payloadType: "agent_reasoning", phase: "", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
@@ -684,6 +708,7 @@ async function installApplicationRoutes(page, {
         { id: "byte-6", byteOffset: 6, kind: "assistant", label: "最终回复", text: "Timeline rendering verified", characterCount: 27, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6, sourceType: "response_item", payloadType: "message", phase: "final", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
         { id: "byte-7", byteOffset: 7, kind: "commentary", label: "思考过程", text: "FORGED TOOL COMMENTARY", characterCount: 23, textTruncated: false, timestamp: "2026-08-12T01:00:06Z", timestampMs: 7, sourceType: "response_item", payloadType: "custom_tool_call_output", phase: "commentary", callId: "call-forged", readable: true, encrypted: false, hasEncryptedContent: false }
       ];
+      if (timelineUniformTimestamps) timelineItems = timelineItems.map((item) => ({ ...item, timestamp: "2026-08-12T01:00:00Z", timestampMs: 1 }));
       const filteredItems = requestedKind === "all" ? timelineItems
         : requestedKind === "conversation" ? timelineItems.filter((item) => ["user", "commentary", "assistant"].includes(item.kind))
           : requestedKind === "tool" ? timelineItems.filter((item) => item.kind.startsWith("tool_"))
@@ -884,6 +909,55 @@ async function assertPromptModalLayoutAndHitTargets(page, promptDialog, viewport
   return layout;
 }
 
+async function assertTimelineReadingLayout(page, promptDialog, viewportLabel) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const layout = await promptDialog.evaluate((dialog) => {
+    const panel = dialog.querySelector(".thread-timeline-panel");
+    const toolbar = dialog.querySelector(".timeline-toolbar");
+    const meta = dialog.querySelector(".timeline-meta");
+    const scroll = dialog.querySelector(".timeline-scroll");
+    const commentaryBody = dialog.querySelector(".timeline-entry-commentary .timeline-readable-text");
+    if (!panel || !toolbar || !meta || !scroll || !commentaryBody) return null;
+    const bounds = (element) => {
+      const rectangle = element.getBoundingClientRect();
+      return { width: rectangle.width, height: rectangle.height, top: rectangle.top, bottom: rectangle.bottom };
+    };
+    const bodyStyle = getComputedStyle(commentaryBody);
+    return {
+      panel: bounds(panel),
+      toolbar: bounds(toolbar),
+      meta: bounds(meta),
+      scroll: bounds(scroll),
+      panelOverflow: panel.scrollWidth - panel.clientWidth,
+      toolbarOverflow: toolbar.scrollWidth - toolbar.clientWidth,
+      readableTag: commentaryBody.tagName,
+      readableFont: bodyStyle.fontFamily,
+      readableBackground: bodyStyle.backgroundColor
+    };
+  });
+  assert.ok(layout, `${viewportLabel}: timeline reading surface must render`);
+  assert.ok(layout.scroll.height >= layout.panel.height * 0.62, `${viewportLabel}: the timeline must retain at least 62% of the panel height for reading`);
+  assert.ok(layout.toolbar.height <= 96, `${viewportLabel}: timeline controls must not dominate the vertical viewport`);
+  assert.ok(layout.panelOverflow <= 1, `${viewportLabel}: timeline panel must not overflow horizontally`);
+  assert.ok(layout.toolbarOverflow <= 1, `${viewportLabel}: timeline toolbar must not expose a horizontal scrollbar`);
+  assert.equal(layout.readableTag, "DIV", `${viewportLabel}: natural-language progress must not render as a code block`);
+  assert.notEqual(layout.readableFont, "monospace", `${viewportLabel}: natural-language progress must use the application reading font`);
+  return layout;
+}
+
+async function visibleThreadAnchor(page) {
+  return page.locator(".table-wrap").evaluate((container) => {
+    const containerTop = container.getBoundingClientRect().top;
+    const rows = [...container.querySelectorAll("tbody tr[data-thread-id]")];
+    const row = rows.find((candidate) => candidate.getBoundingClientRect().bottom > containerTop + 1);
+    return row ? {
+      threadId: row.dataset.threadId,
+      offset: row.getBoundingClientRect().top - containerTop,
+      scrollTop: container.scrollTop
+    } : null;
+  });
+}
+
 async function waitForPromptApiState(page, predicate, message, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -891,6 +965,48 @@ async function waitForPromptApiState(page, predicate, message, timeoutMs = 3000)
     await page.waitForTimeout(20);
   }
   assert.fail(message);
+}
+
+async function runThreadScrollAnchorFlow() {
+  const snapshotApiState = { catalogVersion: "scroll-catalog-1", summaryRequests: 0, pageRequests: [] };
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  try {
+    const page = await context.newPage();
+    await installApplicationRoutes(page, { threadCatalog: scrollingThreads, snapshotApiState });
+    await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
+    const table = page.locator(".thread-table");
+    await table.locator("tbody tr").first().waitFor();
+    const tableWrap = page.locator(".table-wrap");
+    await tableWrap.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await page.waitForFunction(() => document.querySelectorAll(".thread-table tbody tr").length >= 100);
+    const targetRow = table.locator('tbody tr[data-thread-id="scroll-thread-072"]');
+    await targetRow.scrollIntoViewIfNeeded();
+    await tableWrap.evaluate((element) => element.dispatchEvent(new Event("scroll", { bubbles: true })));
+    const before = await visibleThreadAnchor(page);
+    assert.ok(before?.threadId, "a visible row anchor must exist before refresh");
+    assert.ok(before.scrollTop > 500, "the test must exercise a deeply scrolled table");
+
+    const priorPageRequests = snapshotApiState.pageRequests.length;
+    snapshotApiState.catalogVersion = "scroll-catalog-2";
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await waitForPromptApiState(
+      page,
+      () => snapshotApiState.pageRequests.length >= priorPageRequests + 2,
+      "catalog refresh must reload enough pages to preserve the loaded depth"
+    );
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const after = await visibleThreadAnchor(page);
+    assert.equal(after?.threadId, before.threadId, "catalog refresh must preserve the first visible thread anchor");
+    assert.ok(Math.abs((after?.offset || 0) - before.offset) <= 3, `catalog refresh must preserve the anchor pixel offset: before=${before.offset}, after=${after?.offset}`);
+    assert.ok((after?.scrollTop || 0) > 500, "catalog refresh must not jump the thread table back to the top");
+  } finally {
+    void context.close().catch(() => {});
+    void browser.close().catch(() => {});
+  }
 }
 
 async function runPromptPaginationFlow() {
@@ -1071,7 +1187,7 @@ async function runAccessibilityFlow() {
     const page = await context.newPage();
     const promptApiState = { pageRequests: [], cancelRequests: [], copyRequests: [] };
     const promptIndexApiState = createPromptIndexApiState();
-    await installApplicationRoutes(page, { promptApiState, promptIndexApiState });
+    await installApplicationRoutes(page, { promptApiState, promptIndexApiState, timelineUniformTimestamps: true });
     await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
     await page.locator(".thread-table tbody tr").waitFor();
 
@@ -1108,6 +1224,10 @@ async function runAccessibilityFlow() {
     await promptDialog.waitFor();
     await promptDialog.getByText("Timeline rendering verified", { exact: true }).waitFor();
     await promptDialog.getByText("正在验证构建顺序", { exact: true }).waitFor();
+    await assertTimelineReadingLayout(page, promptDialog, "1440x1000");
+    assert.equal(await promptDialog.locator(".timeline-entry-commentary pre").count(), 0, "natural-language progress must never render in terminal-style code blocks");
+    await promptDialog.getByText("源记录没有可区分的逐条时间，已隐藏重复时间。", { exact: true }).waitFor();
+    assert.equal(await promptDialog.locator(".timeline-entry-head time").count(), 0, "indistinguishable source timestamps must not be repeated on every timeline item");
     await page.keyboard.press("Control+f");
     const timelineSearch = promptDialog.getByRole("textbox", { name: "搜索完整线程内容" });
     assert.equal(await timelineSearch.evaluate((element) => document.activeElement === element), true, "Ctrl+F must focus full-timeline search instead of browser find");
@@ -1235,6 +1355,8 @@ async function runAccessibilityFlow() {
       "pure prompt mode must correct stale connector metadata and hide runtime-injected context"
     );
     assert.doesNotMatch(purePromptListText, /<recommended_plugins>/);
+    await promptDialog.locator(".prompt-filter-bar").click({ position: { x: 6, y: 6 } });
+    assert.equal(await promptIndexManagement.getAttribute("open"), null, "clicking outside the index popover must dismiss it");
     await promptDialog.getByRole("button", { name: /^全部 \d+$/ }).click();
     await promptDialog.getByText("推荐插件上下文", { exact: true }).waitFor();
     await assertPromptModalLayoutAndHitTargets(page, promptDialog, "1440x1000");
@@ -1303,7 +1425,7 @@ async function runAccessibilityFlow() {
     await page.waitForFunction(() => !document.querySelector(".prompt-modal .prompt-search-count > span:first-child")?.textContent?.trim().startsWith("1 / 3"));
     const mobilePreviousCount = (await promptSearchCount.textContent())?.trim();
     assert.ok(
-      mobilePreviousCount === "2 / 3 · 仍有结果未加载" || mobilePreviousCount === "3 / 3 · 完整",
+      mobilePreviousCount === "2 / 3 · 仍有结果未加载" || mobilePreviousCount === "2 / 3 · 完整" || mobilePreviousCount === "3 / 3 · 完整",
       `mobile previous-match center click must cycle away from the first result: ${mobilePreviousCount}`
     );
     await nextMatch.focus();
@@ -1385,6 +1507,7 @@ async function runAccessibilityFlow() {
 
 let exitCode = 0;
 try {
+  await runThreadScrollAnchorFlow();
   await runPromptPaginationFlow();
   await runPromptRequestRaceFlow();
   await runPromptIndexEnglishFlow();

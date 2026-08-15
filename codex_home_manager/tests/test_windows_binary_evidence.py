@@ -18,16 +18,20 @@ def write_windows_evidence(directory: Path) -> dict[str, Path]:
     directory.mkdir()
     executable_content = b"final Source CI executable"
     archive_content = b"final Source CI archive"
+    verifier_content = b"self-contained Source CI verifier"
     executable_hash = release_manifest.sha256_bytes(executable_content)
     archive_hash = release_manifest.sha256_bytes(archive_content)
+    verifier_hash = release_manifest.sha256_bytes(verifier_content)
     executable_name = f"codex-home-manager-local-win-x64-v{version}-{executable_hash[:12]}.exe"
     archive_name = f"codex-home-manager-local-win-x64-v{version}-{archive_hash[:12]}.zip"
     executable_path = directory / executable_name
     archive_path = directory / archive_name
+    verifier_path = directory / "codex-home-manager-verifier-win-x64.exe"
     executable_path.write_bytes(executable_content)
     archive_path.write_bytes(archive_content)
+    verifier_path.write_bytes(verifier_content)
     metadata = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "version": version,
         "artifacts": [
             {
@@ -65,6 +69,12 @@ def write_windows_evidence(directory: Path) -> dict[str, Path]:
                 "sha256": archive_hash,
                 "size": len(archive_content),
             },
+            {
+                "name": verifier_path.name,
+                "kind": "verifier",
+                "sha256": verifier_hash,
+                "size": len(verifier_content),
+            },
         ],
     }
     metadata_path = directory / release_manifest.windows_build_metadata_name
@@ -76,12 +86,22 @@ def write_windows_evidence(directory: Path) -> dict[str, Path]:
         encoding="utf-8",
     )
     (directory / release_manifest.windows_sbom_subjects_name).write_text(
-        "".join(f"{digest} *{name}\n" for name, digest in sorted({executable_name: executable_hash, archive_name: archive_hash}.items())),
+        "".join(
+            f"{digest} *{name}\n"
+            for name, digest in sorted(
+                {
+                    executable_name: executable_hash,
+                    archive_name: archive_hash,
+                    verifier_path.name: verifier_hash,
+                }.items()
+            )
+        ),
         encoding="ascii",
     )
     provenance_subjects = {
         executable_name: executable_hash,
         archive_name: archive_hash,
+        verifier_path.name: verifier_hash,
         sbom_name: release_manifest.sha256_file(sbom_path),
     }
     (directory / release_manifest.windows_provenance_subjects_name).write_text(
@@ -99,6 +119,7 @@ def write_windows_evidence(directory: Path) -> dict[str, Path]:
     return {
         "executable": executable_path,
         "archive": archive_path,
+        "verifier": verifier_path,
         "metadata": metadata_path,
         "sbom": sbom_path,
     }
@@ -135,22 +156,26 @@ def test_prepares_only_verified_source_ci_windows_outputs_without_changing_bytes
     assert proof_path.read_bytes() == release_manifest.canonical_json_bytes(proof)
     assert proof["source_commit"] == source_commit
     assert proof["version"] == version
-    assert {artifact["kind"] for artifact in proof["artifacts"]} == {"exe", "zip"}
+    assert {artifact["kind"] for artifact in proof["artifacts"]} == {"exe", "zip", "verifier"}
     assert {asset["name"] for asset in proof["assets"]} == set(
         release_manifest.windows_binary_evidence_public_names(source_commit)
     )
     assert (release_directory / release_manifest.local_artifact_names[0]).read_bytes() == files["executable"].read_bytes()
     assert (release_directory / release_manifest.local_artifact_names[1]).read_bytes() == files["archive"].read_bytes()
+    assert (release_directory / "codex-home-manager-verifier-win-x64.exe").read_bytes() == files["verifier"].read_bytes()
     for artifact in proof["artifacts"]:
-        assert (public_site_directory / artifact["name"]).read_bytes() == (
-            files["executable"] if artifact["kind"] == "exe" else files["archive"]
-        ).read_bytes()
-    assert len(verification_calls) == 5
+        expected_file = {
+            "exe": files["executable"],
+            "zip": files["archive"],
+            "verifier": files["verifier"],
+        }[artifact["kind"]]
+        assert (public_site_directory / artifact["name"]).read_bytes() == expected_file.read_bytes()
+    assert len(verification_calls) == 7
     assert all(call["repository"] == repository for call in verification_calls)
     assert all(call["signer_workflow"] == signer_workflow for call in verification_calls)
     assert all(call["source_commit"] == source_commit for call in verification_calls)
-    assert sum(call["predicate_type"] == release_manifest.source_sbom_predicate_type for call in verification_calls) == 2
-    assert sum(call["predicate_type"] == release_manifest.source_provenance_predicate_type for call in verification_calls) == 3
+    assert sum(call["predicate_type"] == release_manifest.source_sbom_predicate_type for call in verification_calls) == 3
+    assert sum(call["predicate_type"] == release_manifest.source_provenance_predicate_type for call in verification_calls) == 4
 
 
 def test_gh_download_layout(tmp_path: Path) -> None:
@@ -164,8 +189,7 @@ def test_gh_download_layout(tmp_path: Path) -> None:
     for path in merged_directory.iterdir():
         if path.name == release_manifest.windows_build_metadata_name or path.suffix.lower() in {".exe", ".zip"}:
             (binary_directory / path.name).write_bytes(path.read_bytes())
-        if path.name != release_manifest.windows_build_metadata_name:
-            (evidence_directory / path.name).write_bytes(path.read_bytes())
+        (evidence_directory / path.name).write_bytes(path.read_bytes())
 
     proof = release_manifest.prepare_windows_binary_evidence(
         evidence_directory=download_directory,
@@ -182,6 +206,7 @@ def test_gh_download_layout(tmp_path: Path) -> None:
     assert {artifact["sha256"] for artifact in proof["artifacts"]} == {
         release_manifest.sha256_file(files["executable"]),
         release_manifest.sha256_file(files["archive"]),
+        release_manifest.sha256_file(files["verifier"]),
     }
 
 

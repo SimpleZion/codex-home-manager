@@ -2084,8 +2084,9 @@ body:has(.modal-backdrop),
 }
 
 .prompt-modal {
-  width: min(1160px, calc(100vw - 48px));
-  height: min(840px, calc(100vh - 48px));
+  width: min(1560px, calc(100vw - 32px));
+  height: calc(100dvh - 32px);
+  max-height: 1040px;
   min-height: 0;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -2096,11 +2097,25 @@ body:has(.modal-backdrop),
   overflow: hidden;
 }
 
+.prompt-modal > .modal-header {
+  align-items: center;
+  padding: 11px 16px;
+}
+
+.prompt-modal > .modal-header h2 {
+  margin: 2px 0;
+  font-size: 18px;
+}
+
+.prompt-modal > .modal-header p {
+  font-size: 11px;
+}
+
 .thread-content-tabs {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px 16px;
+  padding: 6px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-soft);
 }
@@ -2155,10 +2170,10 @@ body:has(.modal-backdrop),
 .timeline-toolbar {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(320px, 520px) auto;
+  grid-template-columns: minmax(500px, max-content) minmax(260px, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 7px 16px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -2194,8 +2209,10 @@ body:has(.modal-backdrop),
 .timeline-filter-tabs {
   min-width: 0;
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .timeline-filter-tabs button,
@@ -2242,7 +2259,8 @@ body:has(.modal-backdrop),
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 16px;
+  min-height: 30px;
+  padding: 5px 16px;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 11px;
@@ -2263,8 +2281,8 @@ body:has(.modal-backdrop),
   position: relative;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 10px 16px 16px;
-  background: color-mix(in srgb, var(--surface-soft) 42%, var(--surface));
+  padding: 0 16px 12px;
+  background: var(--surface);
 }
 
 .load-older-button {
@@ -2283,24 +2301,27 @@ body:has(.modal-backdrop),
   position: absolute;
   left: 0;
   top: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
   background: var(--surface);
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .04);
+  box-shadow: none;
 }
 
 .timeline-entry-user {
-  width: min(82%, 860px);
+  width: min(86%, 980px);
+  margin-block: 5px;
   left: auto;
   right: 0;
-  border-color: color-mix(in srgb, var(--blue) 35%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, var(--line));
+  border-radius: 9px;
   background: color-mix(in srgb, var(--blue-soft) 34%, var(--surface));
 }
 
 .timeline-entry-commentary {
-  border-left: 3px solid var(--blue);
-  background: color-mix(in srgb, var(--blue-soft) 18%, var(--surface));
+  border-left: 2px solid color-mix(in srgb, var(--blue) 72%, var(--line));
+  background: color-mix(in srgb, var(--blue-soft) 9%, var(--surface));
 }
 
 .timeline-entry-reasoning {
@@ -2365,6 +2386,37 @@ body:has(.modal-backdrop),
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.timeline-readable-text {
+  max-height: min(440px, 52dvh);
+  margin: 5px 0 0;
+  overflow: auto;
+  padding: 0 2px 2px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1120px) {
+  .timeline-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .timeline-filter-tabs {
+    grid-column: 1 / -1;
+  }
+
+  .timeline-search-controls {
+    grid-column: 1;
+  }
+
+  .timeline-toolbar-actions {
+    grid-column: 2;
+  }
 }
 
 .timeline-preview {
@@ -3357,8 +3409,8 @@ body:has(.modal-backdrop),
   align-items: center;
   flex-wrap: wrap;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: 8px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -3486,17 +3538,22 @@ body:has(.modal-backdrop),
 
 .prompt-index-management {
   min-width: 0;
-  flex: 1 0 100%;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
 }
 
 .prompt-index-management > summary {
   min-width: 0;
-  min-height: 30px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
   color: var(--muted-strong);
   cursor: pointer;
   list-style: none;
@@ -3525,6 +3582,7 @@ body:has(.modal-backdrop),
   font-style: normal;
   font-weight: 750;
   text-overflow: ellipsis;
+  max-width: 180px;
   white-space: nowrap;
 }
 
@@ -3551,10 +3609,21 @@ body:has(.modal-backdrop),
 
 .prompt-index-body {
   min-width: 0;
+  width: min(940px, calc(100vw - 72px));
+  max-height: min(560px, 64dvh);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 9px 16px;
-  padding: 10px 0 2px 22px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .18);
 }
 
 .prompt-index-intro {
@@ -3697,7 +3766,7 @@ body:has(.modal-backdrop),
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px;
+  padding: 7px 16px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface-soft) 70%, var(--surface));
 }
@@ -3773,7 +3842,7 @@ body:has(.modal-backdrop),
   grid-template-columns: auto minmax(180px, 1fr) auto auto auto auto;
   align-items: center;
   gap: 7px;
-  padding: 9px 16px;
+  padding: 7px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   color: var(--muted);
@@ -6024,11 +6093,9 @@ pre {
   .prompt-modal-toolbar {
     align-items: stretch;
     flex-direction: column;
-    max-height: min(360px, 42dvh);
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    max-height: none;
+    overflow: visible;
     padding: 10px 12px;
-    scrollbar-gutter: stable;
   }
 
   .thread-content-tabs {
@@ -6037,7 +6104,7 @@ pre {
   }
 
   .timeline-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr);
     padding: 9px 12px;
   }
 
@@ -6109,10 +6176,12 @@ pre {
   }
 
   .prompt-index-body {
+    width: calc(100vw - 48px);
+    max-height: min(520px, 58dvh);
+    right: 0;
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
-    padding-left: 0;
-    padding-right: 3px;
+    padding: 12px;
   }
 
   .prompt-index-facts {
