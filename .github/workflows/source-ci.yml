@@ -305,27 +305,27 @@ jobs:
 
       - name: Attest source SBOM
         id: sbom-attestation
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.source-archive.outputs.archive-path }}
           sbom-path: evidence/codex-home-manager-source-${{ github.sha }}.cdx.json
 
       - name: Attest binary SBOM
         id: binary-sbom-attestation
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/windows-release-evidence/BINARY-SBOM-SUBJECTS.txt
           sbom-path: ${{ runner.temp }}/windows-release-evidence/codex-home-manager-windows-x64-${{ github.sha }}.cdx.json
 
       - name: Attest CI evidence provenance
         id: provenance-attestation
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: evidence/SHA256SUMS.txt
 
       - name: Attest binary provenance
         id: binary-provenance-attestation
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/windows-release-evidence/BINARY-PROVENANCE-SUBJECTS.txt
 
