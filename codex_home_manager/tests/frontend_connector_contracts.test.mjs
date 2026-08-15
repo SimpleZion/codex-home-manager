@@ -58,7 +58,11 @@ assert.doesNotMatch(mainSource, /"思考过程": "Progress reasoning"/);
 assert.match(mainSource, /useState<TimelineFilter>\("conversation"\)/, "main content must remain the default timeline filter");
 assert.match(mainSource, /\/prompts\/page\?\$\{params\.toString\(\)\}/, "local prompt reads must use the paged backend endpoint");
 assert.doesNotMatch(mainSource, /fetchThreadPromptsFromLocalApi/, "the frontend must not retain the legacy full prompt loader");
-assert.match(mainSource, /readBrowserThreadPrompts\(browserWorkspace, threadId\)/, "browser folder mode must retain its in-memory prompt reader");
+assert.match(
+  mainSource,
+  /readBrowserThreadPrompts\(browserWorkspace, threadId,\s*\{/,
+  "browser folder mode must retain its paged prompt reader with explicit options"
+);
 assert.match(mainSource, /if \(isBrowserPromptMode\)[\s\S]{0,300}copyTextToClipboard\(allPromptText\)/, "browser folder copy must remain in memory");
 assert.match(mainSource, /response\.body\.getReader\(\)/, "connector copy must consume the streaming response body");
 assert.match(mainSource, /maxClipboardBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024/, "clipboard copy must have a hard memory bound");

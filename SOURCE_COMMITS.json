@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-15T04:03:42.068988+00:00",
+  "generatedAt": "2026-08-15T04:20:48.323716+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "a65b99efc125b4607646753551848cfc80923c88",
+      "commit": "16c8870efffb8ce6fa2f12079d300b346725f879",
       "selection": [
         "**"
       ],
@@ -743,9 +743,9 @@
           "path": "codex_home_manager/tests/frontend_connector_contracts.test.mjs",
           "sourcePath": "tests/frontend_connector_contracts.test.mjs",
           "gitMode": "100644",
-          "gitObject": "728f68494423ac1b38ae285149f42baffe0c6f5c",
-          "bytes": 8318,
-          "sha256": "5ba86ea3f3cdb4298c62ea298cf553b72944ff27dcf1eebc7d3df7070650c5e5"
+          "gitObject": "29ead366ab00ce59f9112d9ac14e6a5540102c35",
+          "bytes": 8348,
+          "sha256": "499d19d7f7d97044fa29f1ed111bccac524e6cf79c75da15f16dc842f225d225"
         },
         {
           "path": "codex_home_manager/tests/frontend_quality.test.mjs",
