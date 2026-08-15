@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-15T04:20:48.323716+00:00",
+  "generatedAt": "2026-08-15T04:39:39.267086+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -182,7 +182,7 @@
     },
     "managerRepository": {
       "branch": "main",
-      "commit": "16c8870efffb8ce6fa2f12079d300b346725f879",
+      "commit": "43ab2a8d7ec347a8a96f6c4210c6790654c97f53",
       "selection": [
         "**"
       ],
@@ -631,9 +631,9 @@
           "path": "codex_home_manager/scripts/ui_overflow_check.mjs",
           "sourcePath": "scripts/ui_overflow_check.mjs",
           "gitMode": "100644",
-          "gitObject": "41254dcbcad5ac08e018f5a23546f2128926ac38",
-          "bytes": 60255,
-          "sha256": "adbbfb31da4ea395880b3ae378e16bee1de6c59dc91fbd32dd08e54e01338290"
+          "gitObject": "c0843b55cae8669c330fcf3d61c999ada94857ad",
+          "bytes": 60696,
+          "sha256": "67ce9e6e84aa64f9c1ee455f43540d5033c8d19be52e02c2116008ba84593fd9"
         },
         {
           "path": "codex_home_manager/src/PromptOrdering.tsx",

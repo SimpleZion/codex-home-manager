@@ -691,7 +691,15 @@ async function verifyRowActionClickability(page) {
   assertCondition(buttonMetrics.buttonWidth >= 60 && buttonMetrics.buttonHeight >= 30, "visible row hide action has a practical click target");
   assertCondition(buttonMetrics.insideCell, "visible row hide action stays inside operation cell");
 
-  await page.getByRole("button", { name: "全部" }).nth(1).click();
+  const statusFilter = page.locator(".toolbar .segmented").nth(1);
+  const allStatusButton = statusFilter.getByRole("button", { name: "全部", exact: true });
+  await allStatusButton.click();
+  await page.waitForFunction(() => {
+    const groups = document.querySelectorAll(".toolbar .segmented");
+    const allButton = Array.from(groups[1]?.querySelectorAll("button") || [])
+      .find((button) => button.textContent?.trim() === "全部");
+    return allButton?.classList.contains("active") === true;
+  });
   const allFilterButtonMetrics = await page.evaluate(() => {
     const legacyActionButton = Array.from(document.querySelectorAll(".row-action-button"))
       .find((button) => button.textContent?.includes("提到首轮"));
