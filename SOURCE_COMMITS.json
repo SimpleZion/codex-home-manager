@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-10T09:20:41.744323+00:00",
+  "generatedAt": "2026-10-10T10:12:24.750406+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -10,7 +10,7 @@
   "sources": {
     "rootRepository": {
       "branch": "",
-      "commit": "e6216aef7814fc8520f593bb29e9d0740d25d325",
+      "commit": "125ee46043b57b41baf82680171ab435b8806371",
       "selection": [
         ".gitattributes",
         ".source-publication.gitignore -> .gitignore",
@@ -247,7 +247,7 @@
     },
     "managerRepository": {
       "branch": "",
-      "commit": "1ea873921eea3d820edb3e6e64aacecc11127526",
+      "commit": "5e81648a1010bb883b7c0f9898c31aac47173886",
       "selection": [
         "**"
       ],
@@ -280,9 +280,9 @@
           "path": ".github/workflows/source-ci.yml",
           "sourcePath": ".github/workflows/source-ci.yml",
           "gitMode": "100644",
-          "gitObject": "6e6bf2f601e274b5f994bffc5117cecd7750f278",
-          "bytes": 16849,
-          "sha256": "9bc6142484fdf4fc8055957c22eae7f9667cb3a7f527cf2e1dd5c6ef1a5e21cd"
+          "gitObject": "d3674acdf22b2be6853801cf2501deede137012e",
+          "bytes": 16919,
+          "sha256": "0cd721c046a868a84dcfe6300b2450af945f38e4858173cabbf50b01f30e2509"
         },
         {
           "path": "CONTRIBUTING.md",
