@@ -1,8 +1,8 @@
-# Codex Home Manager
+# Codex Cockpit
 
 [![Source CI](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml/badge.svg?branch=source)](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource)
 
-The default `source` branch contains the complete open-source Codex Home Manager product. This `main` branch is the deployed static-site and release-artifact boundary.
+The default `source` branch contains the open-source product. This `main` branch is the deployed static-site and release-artifact boundary. The display name is Codex Cockpit; the repository name, website domain and existing application identifiers remain unchanged so existing links and upgrades continue to work.
 
 The hosted page has two operating modes:
 
@@ -11,20 +11,12 @@ The hosted page has two operating modes:
 
 The hosted browser bundle does not execute the local connector backend and does not upload `.codex` data. The complete local connector and backend source remains available on the [`source` branch](https://github.com/SimpleZion/codex-home-manager/tree/source).
 
-![Codex Home Manager thread dashboard](site/assets/codex-home-manager-screenshot.png)
-
-Diagnostics view:
-
-![Codex Home Manager diagnostics](site/assets/codex-home-manager-diagnostics.webp)
-
-Thread detail daily token timeline:
-
-![Codex Home Manager daily token timeline](site/assets/codex-home-manager-daily-tokens.png)
+![Codex Cockpit application icon](site/cockpit-icon.png)
 
 ## What is included on `main`
 
 - The static web frontend deployed on Cloudflare Pages.
-- Public release downloads for the Windows local connector.
+- Public release downloads for the Windows Codex Cockpit desktop installer.
 - A public API capability overview, MCP-oriented endpoints, and safety boundary notes.
 - Cloudflare Pages deployment files.
 - Signed release metadata and public verification material.
@@ -49,14 +41,14 @@ Open:
 
 For read-only use, choose `.codex` directly from the hosted page in a Chromium browser.
 
-For the full local management mode on Windows, download and run the local connector:
+For the full local management mode on Windows, download and install Codex Cockpit:
 
-- [Download the stable Windows connector](https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe)
+- [Download the stable Windows installer](https://codex-home-manager.simplezion.com/downloads/latest/windows-x64.exe)
 - [Open the latest GitHub Release](https://github.com/SimpleZion/codex-home-manager/releases/latest) for release notes and immutable, content-addressed assets.
 
 The website URL is the stable download alias. It redirects to the current content-addressed EXE published by the same release process; GitHub Releases intentionally contains the content-addressed asset name rather than a second mutable `codex-home-manager-local-win-x64.exe` asset.
 
-Before running the connector, use [`verify-codex-home-manager.ps1`](https://codex-home-manager.simplezion.com/verify-codex-home-manager.ps1). The verifier has the independently retained Ed25519 SPKI SHA-256 trust anchor `sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208` embedded in its source. It verifies the downloaded PEM against that fixed fingerprint, verifies `release-manifest.json.sig`, and only then reads the signed EXE or ZIP size and SHA-256 from the manifest:
+Before running the installer, use [`verify-codex-home-manager.ps1`](https://codex-home-manager.simplezion.com/verify-codex-home-manager.ps1). The verifier has the independently retained Ed25519 SPKI SHA-256 trust anchor `sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f` embedded in its source. It verifies the downloaded PEM against that fixed fingerprint, verifies `release-manifest.json.sig`, and only then reads the signed EXE or ZIP size and SHA-256 from the manifest:
 
 ```powershell
 $releaseBase = "https://codex-home-manager.simplezion.com"
@@ -70,7 +62,9 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File .\verify-codex-home-manager.
 
 Windows PowerShell 5.1 has no native Ed25519 API, so the verifier requires an installed Python 3 interpreter with the audited `cryptography` package. If that dependency is absent, verification stops with an explicit error; it never falls back to `SHA256SUMS.txt`, `connector-release.json`, or another replaceable hash from the same origin. The published [`release-signing-public-key.sha256`](https://codex-home-manager.simplezion.com/release-signing-public-key.sha256) is informational and is not a trust anchor for this verifier.
 
-The verifier checks [`release-manifest.json.sig`](https://codex-home-manager.simplezion.com/release-manifest.json.sig) over the downloaded manifest with [`release-signing-public-key.pem`](https://codex-home-manager.simplezion.com/release-signing-public-key.pem). The signed manifest binds the source commits, immutable EXE/ZIP hashes, Cloudflare deployment, and GitHub Release identity. [`SHA256SUMS.txt`](https://codex-home-manager.simplezion.com/SHA256SUMS.txt) remains useful for transfer diagnostics after signature verification, but a same-origin checksum alone does not authenticate a release.
+The verifier checks [`release-manifest.json.sig`](https://codex-home-manager.simplezion.com/release-manifest.json.sig) over the downloaded manifest with [`release-signing-public-key.pem`](https://codex-home-manager.simplezion.com/release-signing-public-key.pem). The desktop schema-6 manifest binds the frozen installer, complete source ZIP, isolated local source quality gate, frontend files and GitHub release identity. It explicitly identifies the installer as a publisher-local Tauri/NSIS build, not a GitHub CI binary or a byte-reproducible build. Cloudflare deployment evidence is retained separately after deployment. [`SHA256SUMS.txt`](https://codex-home-manager.simplezion.com/SHA256SUMS.txt) is useful for transfer diagnostics, not as an independent trust anchor.
+
+The ZIP contains the same NSIS installer and installation instructions; it is not a portable application. The source snapshot includes later publication-tool changes, while installer and runtime resources remain bound to their original frozen build fingerprints. Historical schema-5 connector releases retain their original signatures and CI attestations.
 
 The connector starts the full local product at `http://127.0.0.1:8765/` and registers the `codex-home-manager://start` browser protocol for the current Windows user.
 
@@ -80,12 +74,23 @@ Agents can use the same local connector directly through HTTP or MCP. Thread det
 
 ## Local preview
 
-Open `site/index.html` directly in a browser, or serve the directory with any static server:
+Serve `site` over loopback HTTP; do not open the HTML with a `file://` URL:
 
 ```powershell
 cd codex-home-manager-public
 npx wrangler pages dev site
 ```
+
+Open the HTTP address printed by the server and inspect the rendered page before considering a preview accepted.
+
+## Release-key rotation
+
+For the 1.0.34 release, the publisher has generated a new Ed25519 key because the old private key is unavailable. The old key was assigned to a disposable backup location; its recovery payload is no longer present. This does not establish key compromise or prove when the key was lost, and the new key is not cross-signed by the old one.
+
+- Historical anchor: `sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208`.
+- New anchor: `sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f`.
+
+Historical release assets and verifiers remain unchanged. Use the historical verifier for historical downloads and the new, independently pinned verifier for new releases. This announcement is not a publication receipt: a release is complete only after its source, downloadable artifacts, signed manifest and hosted files have all been verified together. Do not treat a hash or public key downloaded from the same origin as an independent authenticity guarantee.
 
 ## Deployment
 
@@ -99,9 +104,9 @@ Production custom domain: <https://codex-home-manager.simplezion.com/>.
 
 ## Source CI and supply-chain evidence
 
-[`Source CI`](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource) runs on GitHub-hosted Windows runners for every push and pull request targeting `source`. It verifies the exported source manifest, installs Python dependencies from hash-locked requirements and Node dependencies with `npm ci`, builds the frontend, runs the complete quality gate, and builds the final content-addressed Windows EXE and ZIP with the same packaging script used by release preparation.
+[`Source CI`](https://github.com/SimpleZion/codex-home-manager/actions/workflows/source-ci.yml?query=branch%3Asource) runs on GitHub-hosted Windows runners for every push and pull request targeting `source`. It verifies the exported source manifest, installs Python dependencies from hash-locked requirements and Node dependencies with `npm ci`, builds the frontend and runs the complete quality gate. Its additional packaging jobs build the legacy Python connector, not the current Tauri/NSIS desktop installer.
 
-Successful pushes to `source` preserve two independent evidence sets. `source-release-evidence-<commit>` contains the exact source archive, source CycloneDX SBOM, tests, and source attestations. `windows-release-evidence-<commit>` contains the final EXE and ZIP, a binary CycloneDX SBOM generated from those artifacts, an SBOM attestation bound to the EXE and ZIP, and provenance covering the EXE, ZIP, and binary SBOM. Download the artifacts from the matching workflow run and verify each subject with:
+Successful pushes to `source` preserve two independent evidence sets. `source-release-evidence-<commit>` contains the exact source archive, source CycloneDX SBOM, tests, and source attestations. `windows-release-evidence-<commit>` contains the legacy connector EXE and ZIP, a binary CycloneDX SBOM generated from those artifacts, an SBOM attestation bound to the EXE and ZIP, and provenance covering the EXE, ZIP, and binary SBOM. These attestations are not desktop-installer provenance. Download the legacy artifacts from the matching workflow run and verify each subject with:
 
 ```powershell
 gh attestation verify .\codex-home-manager-source-<commit>.zip --repo SimpleZion/codex-home-manager
@@ -110,11 +115,11 @@ gh attestation verify .\codex-home-manager-local-win-x64-v<version>-<hash>.zip -
 gh attestation verify .\codex-home-manager-windows-x64-<commit>.cdx.json --repo SimpleZion/codex-home-manager
 ```
 
-Release publication must select evidence from the exact source commit, verify the attestation before use, and include the SBOM/provenance hashes in the Ed25519-signed release manifest. A passing badge or an unverified workflow artifact alone is not release proof.
+Historical schema-5 connector publication selects evidence from the exact source commit, verifies the attestation before use and includes the SBOM/provenance hashes in its signed manifest. The current schema-6 desktop release instead records its frozen local installer build and exact isolated local source validation. A passing badge or an unverified workflow artifact alone is not release proof.
 
 ## Signed release proof
 
-The release manifest signs the immutable artifact deployment, GitHub Release identity, EXE and ZIP hashes, and source commits. Release mode refuses to proceed unless `release-manifest.json`, its detached Ed25519 signature, the public key, and the published fingerprint are all present. Publication gates require `CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256` from an independently retained publisher trust record. The user verifier separately embeds the same reviewed SPKI fingerprint and does not learn trust from either download channel.
+The release manifest signs the release artifacts, frozen frontend snapshot, GitHub Release identity, EXE and ZIP hashes, and source commits. Cloudflare deployment identity is recorded separately after deployment. Release mode refuses to proceed unless `release-manifest.json`, its detached Ed25519 signature, the public key, and the published fingerprint are all present. Publication gates require `CODEX_HOME_MANAGER_RELEASE_PUBLIC_KEY_SHA256` from an independently retained publisher trust record. The user verifier separately embeds the same reviewed SPKI fingerprint and does not learn trust from either download channel.
 
 Final publication downloads the EXE, ZIP, manifest, detached signature, and public key independently from Cloudflare Pages and GitHub Release. It requires byte-identical metadata and artifacts, an exact GitHub asset set, valid Cloudflare deployment evidence, valid Ed25519 signing, and stable aliases that resolve to the current content-addressed files.
 

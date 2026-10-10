@@ -2,19 +2,19 @@
   "name": "codex-home-manager-public",
   "version": "1.0.0",
   "private": true,
-  "description": "Hosted frontend and Windows connector release downloads for Codex Home Manager.",
+  "description": "Hosted Codex Cockpit console and Windows release downloads.",
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "npx wrangler pages dev site",
     "deploy": "npx wrangler pages deploy site --project-name codex-home-manager --branch main",
-    "test": "node --test scripts/check-public-boundary.test.mjs",
+    "test": "node --test scripts/check-public-boundary.test.mjs scripts/check-desktop-release.test.mjs",
     "audit": "npm audit --audit-level=high",
     "check": "npm test && node scripts/check-public-boundary.mjs"
   },
   "devDependencies": {
-    "fflate": "0.8.2",
-    "wrangler": "4.122.0"
+    "fflate": "0.8.3",
+    "wrangler": "4.149.0"
   }
 }

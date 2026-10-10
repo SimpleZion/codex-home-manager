@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 2,
+  "builtAt": "2026-10-10T16:35:54.902Z",
+  "sourceDigest": "ae024ba5b3397adf87b099ea2b2e2bd3f1bca787a5e0d9bdc97619e0fe792734",
+  "files": [
+    "assets/MarkdownContent-C8eA98gZ.js",
+    "assets/core-DhEqZVGG.js",
+    "assets/event-CNdo2oXa.js",
+    "assets/icons-B9yzhoVd.js",
+    "assets/index-Bu8vkdzt.js",
+    "assets/index-DSUUa_1a.css",
+    "assets/react-runtime-CQeFXaZh.js",
+    "assets/sql-runtime-BM41guon.js",
+    "assets/sql-wasm-UFUCzYNW.wasm",
+    "assets/virtual-list-CTFSqtWj.js",
+    "cockpit-icon.png",
+    "favicon.svg",
+    "index.html"
+  ],
+  "artifactDigest": "98feff87e7485dc31a428df04264c0498499c8ccdf9aed4cba27d6fe41890df3",
+  "stagedAt": "2026-10-10T16:36:17.368Z"
+}

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -9,6 +8,9 @@ import { fileURLToPath } from "node:url";
 import { zipSync } from "fflate";
 
 const checker = fileURLToPath(new URL("./check-public-boundary.mjs", import.meta.url));
+const fixtureDirectory = process.env.RUNNER_TEMP
+  ? join(process.env.RUNNER_TEMP, "cockpit-public-tests")
+  : fileURLToPath(new URL("../.tmp/public-tests/", import.meta.url));
 const baselineHeaderLines = [
   "/*",
   "  Cache-Control: no-store",
@@ -22,7 +24,8 @@ const baselineHeaderLines = [
 ];
 
 async function createReleaseFixture() {
-  const root = await mkdtemp(join(tmpdir(), "codex-home-manager-public-"));
+  await mkdir(fixtureDirectory, { recursive: true });
+  const root = await mkdtemp(join(fixtureDirectory, "boundary-"));
   await mkdir(join(root, "site", "assets"), { recursive: true });
   await mkdir(join(root, "scripts"), { recursive: true });
   await writeFile(join(root, "package.json"), JSON.stringify({ name: "fixture" }));
@@ -386,6 +389,43 @@ test("rejects sensitive backend implementation symbols in public text", async ()
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /sensitive implementation symbol/i);
+});
+
+test("accepts the documented public source reference without allowing private paths", async () => {
+  const root = await createReleaseFixture();
+  const asset = join(root, "site", "assets", "app-abc123.js");
+  const reference = "codex_home_manager/backend/thread_history_repair.py";
+  await writeFile(asset, `const documentation = ${JSON.stringify({ files: [reference] })};\n`);
+  const accepted = runChecker(root);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const privatePath = ["D:", "Users", "private-user", "history"].join("/");
+  await writeFile(asset, `const documentation = ${JSON.stringify({ files: [reference, privatePath] })};\n`);
+  const rejected = runChecker(root);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /public boundary violation by pattern/i);
+});
+
+for (const prefix of [["D:", "CXProject", "Codex"].join("/") + "/", "private-copy/", "../"]) {
+  test(`rejects a prefixed source reference: ${prefix}`, async () => {
+    const root = await createReleaseFixture();
+    const reference = prefix + "codex_home_manager/backend/thread_history_repair.py";
+    await writeFile(join(root, "site", "assets", "app-abc123.js"), `const documentation = ${JSON.stringify(reference)};\n`);
+    const result = runChecker(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /sensitive implementation symbol/i);
+  });
+}
+
+test("accepts the frozen frontend receipt but rejects arbitrary root JSON", async () => {
+  const root = await createReleaseFixture();
+  await writeFile(join(root, "site", "frontend-release-manifest.json"), '{"schemaVersion":2}\n');
+  await writeFile(join(root, "site", "cockpit-icon.png"), Buffer.from([137, 80, 78, 71]));
+  const accepted = runChecker(root);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  await writeFile(join(root, "site", "unreviewed.json"), "{}\n");
+  const rejected = runChecker(root);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /not in the public release allowlist/i);
 });
 
 test("rejects a release ZIP containing backend or source files", async () => {

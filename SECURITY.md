@@ -1,6 +1,6 @@
 # Security Boundary
 
-Codex Home Manager is local-first by design. The complete product is open source on the default `source` branch. The `main` branch contains the hosted static frontend, public release downloads, deployment files, and public safety checks.
+Codex Cockpit is local-first by design. The complete product is open source on the default `source` branch. The `main` branch contains the hosted static frontend, public release downloads, deployment files, and public safety checks.
 
 Windows Authenticode is optional evidence, not a fallback trust root. A release may claim valid Authenticode only when Windows validates an existing trusted code-signing certificate. Releases without such a certificate explicitly report Authenticode as unavailable and still require the detached Ed25519 manifest signature plus an independently pinned public-key fingerprint. Self-signed certificates are not accepted as publisher trust.
 

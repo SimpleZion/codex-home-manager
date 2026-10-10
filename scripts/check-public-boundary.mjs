@@ -3,6 +3,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unzipSync } from "fflate";
+import { validateDesktopRelease } from "./check-desktop-release.mjs";
 
 const scriptRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const rootArgumentIndex = process.argv.indexOf("--root");
@@ -30,6 +31,8 @@ const exactAllowedPaths = new Set([
   "functions/assets/[name].js",
   "scripts/check-public-boundary.mjs",
   "scripts/check-public-boundary.test.mjs",
+  "scripts/check-desktop-release.mjs",
+  "scripts/check-desktop-release.test.mjs",
   "site/404.html",
   "site/SHA256SUMS.txt",
   "site/_headers",
@@ -45,6 +48,8 @@ const exactAllowedPaths = new Set([
   "site/codex-home-manager-source.cdx.json",
   "site/codex-home-manager-source.zip",
   "site/favicon.svg",
+  "site/cockpit-icon.png",
+  "site/frontend-release-manifest.json",
   "site/index.html",
   "site/public-api.json",
   "site/release-manifest.json",
@@ -106,7 +111,7 @@ const windowsEvidenceStaticNames = new Set([
   "windows-sbom-attestation.sigstore.json",
   "windows-provenance-attestation.sigstore.json"
 ]);
-const publicDistRootNames = new Set(["favicon.svg", "index.html"]);
+const publicDistRootNames = new Set(["cockpit-icon.png", "favicon.svg", "index.html", "frontend-release-manifest.json"]);
 const publicDistAssetExtensions = new Set([".css", ".js", ".wasm"]);
 
 function isPublicDistPath(path) {
@@ -178,8 +183,16 @@ function assertSafeExtension(relativePath) {
 }
 
 function assertSafeText(relativePath, content) {
+  // A public source filename in the maintenance documentation is not backend code.
+  // Privacy checks below still inspect the original text, including these references.
+  const publicSourceReference = "codex_home_manager/backend/thread_history_repair.py";
+  const publicReferencePattern = new RegExp(
+    String.raw`(?<![a-zA-Z0-9_./\\:\-])` + publicSourceReference.replaceAll(".", String.raw`\.`) +
+    String.raw`(?![a-zA-Z0-9_./\\:\-])`, "g",
+  );
+  const symbolContent = content.replace(publicReferencePattern, "[public-source-reference]");
   for (const symbol of sensitiveImplementationSymbols) {
-    if (content.includes(symbol)) {
+    if (symbolContent.includes(symbol)) {
       throw new Error(`public boundary violation: sensitive implementation symbol in ${relativePath}`);
     }
   }
@@ -228,11 +241,11 @@ for (const artifact of releaseManifest.artifacts) {
   if (artifact.kind === "exe") {
     const audit = artifact.audit;
     const versionInfo = audit?.versionInfo;
-    if (audit?.method !== "pyi-archive-viewer+strings" || !Number.isInteger(audit.archiveEntryCount) ||
+    if (releaseManifest.flavor !== "tauri-desktop" && (audit?.method !== "pyi-archive-viewer+strings" || !Number.isInteger(audit.archiveEntryCount) ||
         audit.archiveEntryCount < 1 || audit.sourceFiles?.length !== 0 || audit.sensitiveStrings?.length !== 0 ||
         versionInfo?.FileVersion !== releaseManifest.version || versionInfo?.ProductVersion !== releaseManifest.version ||
         versionInfo?.CompanyName !== "SimpleZion" || versionInfo?.ProductName !== "Codex Home Manager" ||
-        versionInfo?.FileDescription !== "Codex Home Manager") {
+        versionInfo?.FileDescription !== "Codex Home Manager")) {
       throw new Error(`EXE lacks passing PyInstaller and strings boundary evidence: ${artifact.name}`);
     }
     const authenticode = artifact.authenticode;
@@ -324,12 +337,17 @@ if (hasManifest || hasSignature) {
   } catch {
     throw new Error("signed release manifest is not valid JSON");
   }
-  if (![2, 3, 4, 5].includes(signedManifest.schema_version) ||
-      (releaseMode && signedManifest.schema_version !== 5) ||
+  if (![2, 3, 4, 5, 6].includes(signedManifest.schema_version) ||
+      (releaseMode && ![5, 6].includes(signedManifest.schema_version)) ||
       signedManifest.public_key_fingerprint !== actualFingerprint) {
     throw new Error("signed release manifest has an invalid schema or public key fingerprint");
   }
-  if ([3, 4, 5].includes(signedManifest.schema_version)) {
+  if (signedManifest.schema_version === 6) {
+    await validateDesktopRelease(signedManifest, releaseManifest, siteDirectory);
+  } else if (releaseManifest.flavor === "tauri-desktop") {
+    throw new Error("desktop publication requires signed desktop schema 6");
+  }
+  if ([3, 4, 5, 6].includes(signedManifest.schema_version)) {
     const distRecords = validateSignedPublicDistRecords(signedManifest.dist_files, "build dist");
     signedPublicSiteDistRecords = validateSignedPublicDistRecords(
       signedManifest.public_site_dist_files,
@@ -348,10 +366,10 @@ if (hasManifest || hasSignature) {
     }
   }
   const deployment = signedManifest.cloudflare?.artifact_deployment;
-  if (!deployment || deployment.project !== "codex-home-manager" || deployment.branch !== "main" ||
+  if (signedManifest.schema_version !== 6 && (!deployment || deployment.project !== "codex-home-manager" || deployment.branch !== "main" ||
       deployment.status !== "success" || !/^https:\/\/[^/]+$/.test(deployment.url || "") ||
       !/^[0-9a-f-]+$/i.test(deployment.id || "") || !/^[0-9a-f]{40}$/i.test(deployment.public_commit || "") ||
-      signedManifest.cloudflare?.metadata_deployment !== undefined) {
+      signedManifest.cloudflare?.metadata_deployment !== undefined)) {
     throw new Error("signed release manifest has invalid artifact deployment proof");
   }
   if (!Array.isArray(signedManifest.public_artifacts) || !signedManifest.public_artifacts.length) {

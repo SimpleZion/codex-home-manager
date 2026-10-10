@@ -10,8 +10,8 @@
     "mcp": "/mcp"
   },
   "counts": {
-    "restCapabilities": 52,
-    "mcpTools": 52
+    "restCapabilities": 45,
+    "mcpTools": 47
   },
   "capabilities": [
     {
@@ -108,7 +108,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/codex/official-thread-tools/repair/preview",
       "writeEndpoint": "/api/codex/official-thread-tools/repair",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -503,7 +503,7 @@
       "name": "preview_thread_action",
       "method": "GET",
       "path": "/api/threads/{thread_id}/action-preview",
-      "purpose": "Preview show, hide, repair, archive or duplicate before writing. Duplicate preview requires targetProjectPath.",
+      "purpose": "Preview show, hide, repair or archive before writing.",
       "required": [
         "thread_id",
         "action"
@@ -543,7 +543,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/threads/{thread_id}/action-preview?action=show",
       "writeEndpoint": "/api/threads/{thread_id}/show",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -570,7 +570,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/threads/{thread_id}/action-preview?action=hide",
       "writeEndpoint": "/api/threads/{thread_id}/hide",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -628,38 +628,6 @@
       "rollbackMode": null
     },
     {
-      "name": "duplicate_thread",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/duplicate",
-      "purpose": "Copy one thread inside the current Codex Home with a new thread id and rollout JSONL into a selected target project path.",
-      "required": [
-        "thread_id",
-        "targetProjectPath",
-        "X-Codex-Manager-Token",
-        "operationPreviewId",
-        "inputHash"
-      ],
-      "backup": "thread action backup before write; restore archives created copy",
-      "bodyExample": {
-        "targetProjectPath": "C:\\\\Project",
-        "acknowledgeCodexRunningRisk": true,
-        "operationPreviewId": "PREVIEW_ID",
-        "inputHash": "INPUT_HASH"
-      },
-      "successFields": [
-        "newThreadId",
-        "newRolloutPath",
-        "targetProjectPath",
-        "backup.backupId"
-      ],
-      "rollback": "POST /api/backups/{backup_id}/restore",
-      "riskLevel": "write",
-      "previewEndpoint": null,
-      "writeEndpoint": "/api/threads/{thread_id}/duplicate",
-      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
-      "rollbackMode": "restore backup by backup.backupId"
-    },
-    {
       "name": "archive_thread",
       "method": "POST",
       "path": "/api/threads/{thread_id}/archive",
@@ -679,130 +647,8 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/threads/{thread_id}/action-preview?action=archive",
       "writeEndpoint": "/api/threads/{thread_id}/archive",
-      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
-      "rollbackMode": "restore backup by backup.backupId"
-    },
-    {
-      "name": "preview_migrate_thread",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/migrate/preview",
-      "purpose": "Preview thread project migration before rewriting SQLite/global state/JSONL workspace metadata.",
-      "required": [
-        "thread_id",
-        "targetProjectPath"
-      ],
-      "backup": "read-only",
-      "bodyExample": {
-        "targetProjectPath": "C:\\\\Project"
-      },
-      "successFields": [
-        "operationPreviewId",
-        "inputHash",
-        "threadId",
-        "targetProjectPath",
-        "warnings"
-      ],
-      "rollback": null,
-      "riskLevel": "read",
-      "previewEndpoint": null,
-      "writeEndpoint": null,
-      "idempotency": "idempotent read",
-      "rollbackMode": null
-    },
-    {
-      "name": "migrate_thread",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/migrate",
-      "purpose": "Move a thread to another project path and rewrite structured workspace metadata in JSONL.",
-      "required": [
-        "thread_id",
-        "targetProjectPath",
-        "X-Codex-Manager-Token",
-        "operationPreviewId",
-        "inputHash"
-      ],
-      "backup": "thread action backup before write; Codex must be closed",
-      "bodyExample": {
-        "targetProjectPath": "C:\\\\Project",
-        "operationPreviewId": "PREVIEW_ID",
-        "inputHash": "INPUT_HASH"
-      },
-      "successFields": [
-        "threadId",
-        "oldProjectPath",
-        "newProjectPath",
-        "backup.backupId"
-      ],
-      "rollback": "POST /api/backups/{backup_id}/restore",
-      "riskLevel": "write",
-      "previewEndpoint": null,
-      "writeEndpoint": "/api/threads/{thread_id}/migrate",
-      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
-      "rollbackMode": "restore backup by backup.backupId"
-    },
-    {
-      "name": "preview_move_thread_workspace",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/move-workspace/preview",
-      "purpose": "Preview moving the selected thread, optional same-source-cwd threads, actual workspace files, SQLite/global state and rollout workspace metadata.",
-      "required": [
-        "thread_id",
-        "targetProjectPath"
-      ],
-      "backup": "read-only",
-      "bodyExample": {
-        "targetProjectPath": "C:\\\\Project",
-        "includeSameSourceCwdThreads": true,
-        "moveWorkspaceFiles": true
-      },
-      "successFields": [
-        "operationPreviewId",
-        "inputHash",
-        "matchedThreads",
-        "fileMove",
-        "blockingErrors",
-        "warnings"
-      ],
-      "rollback": null,
-      "riskLevel": "read",
-      "previewEndpoint": null,
-      "writeEndpoint": null,
-      "idempotency": "idempotent read",
-      "rollbackMode": null
-    },
-    {
-      "name": "move_thread_workspace",
-      "method": "POST",
-      "path": "/api/threads/{thread_id}/move-workspace",
-      "purpose": "Move the selected thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.",
-      "required": [
-        "thread_id",
-        "targetProjectPath",
-        "X-Codex-Manager-Token",
-        "operationPreviewId",
-        "inputHash"
-      ],
-      "backup": "thread/workspace move backup before write; Codex must be closed",
-      "bodyExample": {
-        "targetProjectPath": "C:\\\\Project",
-        "includeSameSourceCwdThreads": true,
-        "moveWorkspaceFiles": true,
-        "operationPreviewId": "PREVIEW_ID",
-        "inputHash": "INPUT_HASH"
-      },
-      "successFields": [
-        "threadId",
-        "matchedThreads",
-        "fileMove",
-        "rolloutRewrites",
-        "backup.backupId"
-      ],
-      "rollback": "POST /api/backups/{backup_id}/restore",
-      "riskLevel": "write",
-      "previewEndpoint": null,
-      "writeEndpoint": "/api/threads/{thread_id}/move-workspace",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
     },
@@ -835,7 +681,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/threads/{thread_id}/slim/preview",
       "writeEndpoint": "/api/threads/{thread_id}/slim",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -855,69 +701,6 @@
         "scan",
         "canRemoveImages",
         "canReduceCompacted",
-        "warnings"
-      ],
-      "rollback": null,
-      "riskLevel": "read",
-      "previewEndpoint": null,
-      "writeEndpoint": null,
-      "idempotency": "idempotent read",
-      "rollbackMode": null
-    },
-    {
-      "name": "rename_project",
-      "method": "POST",
-      "path": "/api/projects/rename",
-      "purpose": "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed because they can rewrite sidebar cache state while running.",
-      "required": [
-        "sourceProjectPath",
-        "targetProjectPath",
-        "X-Codex-Manager-Token",
-        "operationPreviewId",
-        "inputHash"
-      ],
-      "backup": "backs up all matched thread rows, rollout JSONLs, global state, global state backup and config",
-      "bodyExample": {
-        "sourceProjectPath": "C:\\\\OldProject",
-        "targetProjectPath": "C:\\\\NewProject",
-        "renameFolder": true,
-        "operationPreviewId": "PREVIEW_ID",
-        "inputHash": "INPUT_HASH"
-      },
-      "successFields": [
-        "updatedThreads",
-        "rolloutBackups",
-        "globalStateRewrite",
-        "backup.backupId"
-      ],
-      "rollback": "POST /api/backups/{backup_id}/restore",
-      "riskLevel": "write",
-      "previewEndpoint": null,
-      "writeEndpoint": "/api/projects/rename",
-      "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
-      "rollbackMode": "restore backup by backup.backupId"
-    },
-    {
-      "name": "preview_rename_project",
-      "method": "POST",
-      "path": "/api/projects/rename/preview",
-      "purpose": "Preview matched threads, rollout bytes, folder impact and whether running Codex blocks the project rename.",
-      "required": [
-        "sourceProjectPath",
-        "targetProjectPath"
-      ],
-      "backup": "read-only",
-      "bodyExample": {
-        "sourceProjectPath": "C:\\\\OldProject",
-        "targetProjectPath": "C:\\\\NewProject",
-        "renameFolder": true
-      },
-      "successFields": [
-        "matchedThreads",
-        "existingRollouts",
-        "rolloutBytes",
-        "willRenameFolder",
-        "blockedByRunningCodex",
         "warnings"
       ],
       "rollback": null,
@@ -954,7 +737,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/import/thread/preview",
       "writeEndpoint": "/api/import/thread",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1015,7 +798,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/import/project/preview",
       "writeEndpoint": "/api/import/project",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1170,7 +953,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/resources/write/preview",
       "writeEndpoint": "/api/resources/write",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1205,7 +988,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/resources/copy-from-home/preview",
       "writeEndpoint": "/api/resources/copy-from-home",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1284,7 +1067,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/backups/{backup_id}/portable/preview",
       "writeEndpoint": "/api/backups/{backup_id}/portable",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1337,7 +1120,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/backups/{backup_id}/portable/restore/preview",
       "writeEndpoint": "/api/backups/{backup_id}/portable/restore",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1385,7 +1168,7 @@
       ],
       "rollback": "POST /api/backups/{backup_id}/restore",
       "riskLevel": "write",
-      "previewEndpoint": null,
+      "previewEndpoint": "/api/backups/{backup_id}/restore/preview",
       "writeEndpoint": "/api/backups/{backup_id}/restore",
       "idempotency": "not idempotent; each successful write creates a backup and may create or move records",
       "rollbackMode": "restore backup by backup.backupId"
@@ -1615,7 +1398,7 @@
     },
     {
       "name": "codex_snapshot",
-      "description": "List and classify local Codex threads and projects.",
+      "description": "Compatibility tool that returns the complete classified thread catalog. Prefer codex_snapshot_summary plus codex_thread_page for bounded agent reads.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1632,6 +1415,126 @@
             "minimum": 1,
             "maximum": 1000,
             "default": 50
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_snapshot_summary",
+      "description": "Read a bounded Codex Home summary with project aggregates, status counts, and four large-thread highlights without returning the complete thread catalog.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "refresh": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "apiToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "codex_thread_page",
+      "description": "Page and search classified threads with an opaque catalog-bound cursor. This is the preferred agent interface for thread inventory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "codexHome": {
+            "type": "string",
+            "description": "Optional CODEX_HOME path. Empty uses the local default."
+          },
+          "apiToken": {
+            "type": "string",
+            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
+          },
+          "sidebarLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50
+          },
+          "threadKind": {
+            "type": "string",
+            "enum": [
+              "main",
+              "all",
+              "subagent"
+            ],
+            "default": "main"
+          },
+          "filterMode": {
+            "type": "string",
+            "enum": [
+              "all",
+              "visible",
+              "manual_hidden",
+              "repair",
+              "archived"
+            ],
+            "default": "all"
+          },
+          "projectPath": {
+            "type": "string",
+            "default": "all"
+          },
+          "search": {
+            "type": "string",
+            "default": ""
+          },
+          "sortMode": {
+            "type": "string",
+            "enum": [
+              "rank",
+              "status",
+              "title",
+              "project",
+              "updated",
+              "size",
+              "tokens"
+            ],
+            "default": "rank"
+          },
+          "sortDirection": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "asc"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "refresh": {
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [
@@ -2027,7 +1930,7 @@
     },
     {
       "name": "codex_thread_prompt_page",
-      "description": "Incrementally page and search all classified user inputs with source filters, explicit index completeness and an opaque cursor; requestId enables cancellation.",
+      "description": "Incrementally page and search all classified user inputs with source filters, chronological or newest-first ordering, explicit index completeness and an opaque cursor; requestId enables cancellation.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2075,6 +1978,14 @@
             "type": "string",
             "default": ""
           },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "asc"
+          },
           "scanBudgetMs": {
             "type": "integer",
             "minimum": 1,
@@ -2111,7 +2022,7 @@
     },
     {
       "name": "codex_preview_thread_action",
-      "description": "Preview show, hide, repair, archive or duplicate before writing.",
+      "description": "Preview show, hide, repair or archive before writing.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2133,13 +2044,8 @@
               "show",
               "hide",
               "repair_user_event",
-              "archive",
-              "duplicate"
+              "archive"
             ]
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
           },
           "sidebarLimit": {
             "type": "integer",
@@ -2185,94 +2091,6 @@
         },
         "required": [
           "threadId",
-          "apiToken"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_preview_migrate_thread",
-      "description": "Preview moving a thread to another project path.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "threadId": {
-            "type": "string",
-            "description": "Codex thread UUID."
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
-          },
-          "sidebarLimit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 1000,
-            "default": 50
-          }
-        },
-        "required": [
-          "threadId",
-          "targetProjectPath",
-          "apiToken"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_preview_move_thread_workspace",
-      "description": "Preview moving a thread, same-source-cwd threads, actual workspace files, SQLite/global state and rollout metadata.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "threadId": {
-            "type": "string",
-            "description": "Codex thread UUID."
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
-          },
-          "includeSameSourceCwdThreads": {
-            "type": "boolean",
-            "default": true,
-            "description": "Also move all threads whose cwd exactly matches the selected thread source cwd."
-          },
-          "moveWorkspaceFiles": {
-            "type": "boolean",
-            "default": true,
-            "description": "Move top-level filesystem entries from the source workspace directory into the target workspace directory."
-          },
-          "repairUserEvent": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set has_user_event=1 for moved threads so they remain visible in project views."
-          },
-          "preservePinned": {
-            "type": "boolean",
-            "default": false,
-            "description": "Keep moved threads in pinned-thread-ids instead of moving them into the target project group."
-          }
-        },
-        "required": [
-          "threadId",
-          "targetProjectPath",
           "apiToken"
         ],
         "additionalProperties": false
@@ -2353,39 +2171,6 @@
         "required": [
           "sourceCodexHome",
           "sourceProjectPath",
-          "apiToken"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_preview_rename_project",
-      "description": "Preview project path rename impact and whether running Codex blocks the write.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "sourceProjectPath": {
-            "type": "string"
-          },
-          "targetProjectPath": {
-            "type": "string"
-          },
-          "renameFolder": {
-            "type": "boolean",
-            "default": true
-          }
-        },
-        "required": [
-          "sourceProjectPath",
-          "targetProjectPath",
           "apiToken"
         ],
         "additionalProperties": false
@@ -2727,179 +2512,6 @@
         },
         "required": [
           "threadId",
-          "apiToken",
-          "operationPreviewId",
-          "inputHash"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_duplicate_thread",
-      "description": "Duplicate a thread to a target project path.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "operationPreviewId": {
-            "type": "string",
-            "description": "operationPreviewId returned by the matching preview tool."
-          },
-          "inputHash": {
-            "type": "string",
-            "description": "inputHash returned by the matching preview tool."
-          },
-          "acknowledgeCodexRunningRisk": {
-            "type": "boolean",
-            "default": false,
-            "description": "Set true after reviewing runtime warnings when Codex is running."
-          },
-          "createBackup": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set false to skip automatic rollback backup for this write."
-          },
-          "threadId": {
-            "type": "string",
-            "description": "Codex thread UUID."
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
-          }
-        },
-        "required": [
-          "threadId",
-          "targetProjectPath",
-          "apiToken",
-          "operationPreviewId",
-          "inputHash"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_migrate_thread",
-      "description": "Move a thread to another project path.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "operationPreviewId": {
-            "type": "string",
-            "description": "operationPreviewId returned by the matching preview tool."
-          },
-          "inputHash": {
-            "type": "string",
-            "description": "inputHash returned by the matching preview tool."
-          },
-          "acknowledgeCodexRunningRisk": {
-            "type": "boolean",
-            "default": false,
-            "description": "Set true after reviewing runtime warnings when Codex is running."
-          },
-          "createBackup": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set false to skip automatic rollback backup for this write."
-          },
-          "threadId": {
-            "type": "string",
-            "description": "Codex thread UUID."
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
-          }
-        },
-        "required": [
-          "threadId",
-          "targetProjectPath",
-          "apiToken",
-          "operationPreviewId",
-          "inputHash"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_move_thread_workspace",
-      "description": "Move a thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "operationPreviewId": {
-            "type": "string",
-            "description": "operationPreviewId returned by the matching preview tool."
-          },
-          "inputHash": {
-            "type": "string",
-            "description": "inputHash returned by the matching preview tool."
-          },
-          "acknowledgeCodexRunningRisk": {
-            "type": "boolean",
-            "default": false,
-            "description": "Set true after reviewing runtime warnings when Codex is running."
-          },
-          "createBackup": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set false to skip automatic rollback backup for this write."
-          },
-          "threadId": {
-            "type": "string",
-            "description": "Codex thread UUID."
-          },
-          "targetProjectPath": {
-            "type": "string",
-            "description": "Target project cwd/path for the operation."
-          },
-          "includeSameSourceCwdThreads": {
-            "type": "boolean",
-            "default": true,
-            "description": "Also move all threads whose cwd exactly matches the selected thread source cwd."
-          },
-          "moveWorkspaceFiles": {
-            "type": "boolean",
-            "default": true,
-            "description": "Move top-level filesystem entries from the source workspace directory into the target workspace directory."
-          },
-          "repairUserEvent": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set has_user_event=1 for moved threads so they remain visible in project views."
-          },
-          "preservePinned": {
-            "type": "boolean",
-            "default": false,
-            "description": "Keep moved threads in pinned-thread-ids instead of moving them into the target project group."
-          }
-        },
-        "required": [
-          "threadId",
-          "targetProjectPath",
           "apiToken",
           "operationPreviewId",
           "inputHash"
@@ -3284,59 +2896,6 @@
         "required": [
           "sourceCodexHome",
           "sourceProjectPath",
-          "apiToken",
-          "operationPreviewId",
-          "inputHash"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "codex_rename_project",
-      "description": "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed first.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "codexHome": {
-            "type": "string",
-            "description": "Optional CODEX_HOME path. Empty uses the local default."
-          },
-          "apiToken": {
-            "type": "string",
-            "description": "Short-lived local data token returned by codex_auth_token. Required for every other MCP tool."
-          },
-          "operationPreviewId": {
-            "type": "string",
-            "description": "operationPreviewId returned by the matching preview tool."
-          },
-          "inputHash": {
-            "type": "string",
-            "description": "inputHash returned by the matching preview tool."
-          },
-          "acknowledgeCodexRunningRisk": {
-            "type": "boolean",
-            "default": false,
-            "description": "Set true after reviewing runtime warnings when Codex is running."
-          },
-          "createBackup": {
-            "type": "boolean",
-            "default": true,
-            "description": "Set false to skip automatic rollback backup for this write."
-          },
-          "sourceProjectPath": {
-            "type": "string"
-          },
-          "targetProjectPath": {
-            "type": "string"
-          },
-          "renameFolder": {
-            "type": "boolean",
-            "default": true
-          }
-        },
-        "required": [
-          "sourceProjectPath",
-          "targetProjectPath",
           "apiToken",
           "operationPreviewId",
           "inputHash"
