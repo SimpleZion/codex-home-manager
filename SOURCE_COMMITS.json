@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-10T08:31:49.400547+00:00",
+  "generatedAt": "2026-10-10T08:49:11.059427+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -10,7 +10,7 @@
   "sources": {
     "rootRepository": {
       "branch": "",
-      "commit": "54f52d883ef87300f208305581e2ec2b097257e3",
+      "commit": "bfe6cdd5cd45866032b9e48cc8db19991501e0e4",
       "selection": [
         ".gitattributes",
         ".source-publication.gitignore -> .gitignore",
@@ -79,9 +79,9 @@
           "path": "scripts/codex_artifact_lifecycle.py",
           "sourcePath": "scripts/codex_artifact_lifecycle.py",
           "gitMode": "100644",
-          "gitObject": "3d8ed8b6e91ca2e657ab88ec5d99de45c57d116b",
-          "bytes": 39839,
-          "sha256": "019e50e45a9d37b5afe61023c2dc9d78c2d2ee2ed5bd170519165c49b42b1223"
+          "gitObject": "ff23a197c65c988fa2f7dd33cfc906879633f00f",
+          "bytes": 39971,
+          "sha256": "85182c3dfa29d9ca972399ce71705a7dd95e5ef007c25174f2ac83d3461ea68a"
         },
         {
           "path": "scripts/codex_directory_layout.py",
@@ -247,7 +247,7 @@
     },
     "managerRepository": {
       "branch": "",
-      "commit": "456a327b38725e97a251e54dbd019a23ee34e8dd",
+      "commit": "4d0a6623a69ca313289353f7d4a3657ead8becf3",
       "selection": [
         "**"
       ],
@@ -280,9 +280,9 @@
           "path": ".github/workflows/source-ci.yml",
           "sourcePath": ".github/workflows/source-ci.yml",
           "gitMode": "100644",
-          "gitObject": "f325594b2c3cad4fc5c124b51ee8e6667a6fcecb",
-          "bytes": 16724,
-          "sha256": "85073d9f6c75823d87783946115e2bd735ef201ef5ab6c9b6b58dc886f30d4db"
+          "gitObject": "6e6bf2f601e274b5f994bffc5117cecd7750f278",
+          "bytes": 16849,
+          "sha256": "9bc6142484fdf4fc8055957c22eae7f9667cb3a7f527cf2e1dd5c6ef1a5e21cd"
         },
         {
           "path": "CONTRIBUTING.md",
@@ -2120,9 +2120,9 @@
           "path": "codex_home_manager/tests/test_source_ci_workflow.py",
           "sourcePath": "tests/test_source_ci_workflow.py",
           "gitMode": "100644",
-          "gitObject": "b1afdcbb562388d48f8f8304b048ef388e554d6c",
-          "bytes": 7763,
-          "sha256": "73add3f954a7fc78ea4455157fe503eac23311d4baad61d8c642374c71821aa5"
+          "gitObject": "850ddd7872f14d506f04d19070af2f041b99cf00",
+          "bytes": 7902,
+          "sha256": "d5b9913cfc090ab29dd7b5ff3703a76b2b5811b9be2761b182b283e4e7cb1fce"
         },
         {
           "path": "codex_home_manager/tests/test_source_monorepo_export.py",

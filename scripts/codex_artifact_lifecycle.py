@@ -310,6 +310,7 @@ cockpit_budget_grants = {
     "request_user_input_async/call_934d4dca7a3a43e2942a7fe3ccdc0c14/0": ("1.0.32", "cockpit-prompt-1032", 2 * gib, 30 * gib, 53 * gib),
     "request_user_input_async/call_db06005aa1a047768ff1d0775a0c008a/0": ("1.0.33", "cockpit-classification-1033", 2 * gib, 30 * gib, 53 * gib),
     "request_user_input_async/call_18MgAYXSEqKSwWkoiofrkAbx/0": ("1.0.34", "cockpit-icon-1034", 2 * gib, 31 * gib, 55 * gib),
+    "request_user_input_async/call_cdafac576ac044eaaf49c354a3b8970e/0": ("1.0.34", "cockpit-layout-1034", gib, 31 * gib, 55 * gib),
 }
 
 

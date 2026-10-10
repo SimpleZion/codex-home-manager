@@ -65,6 +65,8 @@ def test_source_ci_runs_on_the_exported_source_branch_with_layered_quality_gates
     assert workflow.index("Enforce maintainability ratchet") < workflow.index("Run complete quality gate")
     assert workflow.count('Join-Path $env:RUNNER_TEMP "source-ci-artifacts"') == 4
     assert workflow.count("New-Item -ItemType Directory -Force $artifactRoot") == 2
+    assert "New-Item -ItemType Directory -Force codex_home_manager/.tmp" in workflow
+    assert 'PYTHONDONTWRITEBYTECODE: "1"' in workflow
     assert "path: ${{ runner.temp }}/source-ci-artifacts/" in workflow
 
 

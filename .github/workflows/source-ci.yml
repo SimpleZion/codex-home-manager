@@ -19,6 +19,8 @@ jobs:
     name: Windows quality gate
     runs-on: windows-latest
     timeout-minutes: 150
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     defaults:
       run:
         shell: pwsh
@@ -34,6 +36,7 @@ jobs:
         run: |
           $artifactRoot = Join-Path $env:RUNNER_TEMP "source-ci-artifacts"
           New-Item -ItemType Directory -Force $artifactRoot | Out-Null
+          New-Item -ItemType Directory -Force codex_home_manager/.tmp | Out-Null
           "not-run" | Set-Content -Encoding utf8 (Join-Path $artifactRoot "quality-gate-status.txt")
 
       - name: Set up Python
