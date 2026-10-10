@@ -15,6 +15,29 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts import release_manifest
 
 
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("page", [
+    "https://github.com/SimpleZion/codex-home-manager/releases/tag/v1.0.34",
+    "https://github.com/SimpleZion/codex-home-manager/releases/tag/untagged-061f0f19011a53fb5b93",
+    "https://github.com/Other/project/releases/tag/untagged-061f0f19011a53fb5b93",
+    "https://github.com/SimpleZion/codex-home-manager/releases/tag/v1.0.33",
+    "https://github.com/SimpleZion/codex-home-manager/releases/tag/untagged-nothex",
+    "https://github.com/SimpleZion/codex-home-manager/releases/tag/untagged-061f?redirect=evil",
+])
+def test_github_release_page_identity_includes_official_draft_urls(draft: bool, page: str) -> None:
+    payload = {"id": 408816279, "tag_name": "v1.0.34", "draft": draft,
+               "prerelease": False, "html_url": page, "assets": []}
+    arguments = {"expected_repository": "SimpleZion/codex-home-manager", "expected_tag": "v1.0.34",
+                 "expected_release_id": 408816279, "expected_asset_names": set(), "require_draft": draft}
+    allowed = page.endswith("/v1.0.34") or (draft and page.endswith("/untagged-061f0f19011a53fb5b93") and 
+              page.startswith("https://github.com/SimpleZion/codex-home-manager/"))
+    if allowed:
+        assert release_manifest.validate_github_release_payload(payload, **arguments)["draft"] is draft
+    else:
+        with pytest.raises(release_manifest.ReleaseManifestError, match="repository URL mismatch"):
+            release_manifest.validate_github_release_payload(payload, **arguments)
+
+
 def test_current_release_verifiers_share_the_explicit_rotated_trust_anchor() -> None:
     manager = Path(__file__).resolve().parents[1]
     expected = release_manifest.embedded_release_public_key_fingerprint

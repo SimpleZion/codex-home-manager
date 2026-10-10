@@ -374,7 +374,11 @@ def validate_github_release_payload(
     if release.get("draft") is not require_draft or release.get("prerelease") is not False:
         raise ReleaseManifestError("GitHub release publication state mismatch")
     expected_html_url = f"https://github.com/{expected_repository}/releases/tag/{expected_tag}"
-    if release.get("html_url") != expected_html_url:
+    html_url = release.get("html_url")
+    draft_page = require_draft and isinstance(html_url, str) and re.fullmatch(
+        rf"https://github\.com/{re.escape(expected_repository)}/releases/tag/untagged-[0-9a-f]{{1,64}}", html_url
+    ) is not None
+    if html_url != expected_html_url and not draft_page:
         raise ReleaseManifestError("GitHub release repository URL mismatch")
     assets = release.get("assets")
     if not isinstance(assets, list):
