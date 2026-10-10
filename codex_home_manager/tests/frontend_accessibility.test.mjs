@@ -377,6 +377,14 @@ function promptIndexStatusPayload(state) {
   };
 }
 
+const markdownTimelineItem = {
+  id: "byte-6-md", byteOffset: 6.5, kind: "assistant", label: "最终回复",
+  text: "## Storage report\n\n| Table | Size |\n| --- | ---: |\n| scoring_results | **17 GB** |\n\n- [x] Verified\n\n```text\nsearch_inside_code\n```\n\n[unsafe](javascript:window.__markdownXss=true) [data](data:text/html,unsafe)\n\n![remote](https://example.invalid/private.png)\n\n<img src=x onerror=window.__markdownXss=true>",
+  characterCount: 304, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6.5,
+  sourceType: "response_item", payloadType: "message", phase: "final", callId: "",
+  readable: true, encrypted: false, hasEncryptedContent: false
+};
+
 async function installApplicationRoutes(page, {
   includeRaceThread = false,
   emulateUncancellableSlowPrompt = false,
@@ -760,9 +768,10 @@ async function installApplicationRoutes(page, {
         ["cafe", "Cafe\u0301"],
         ["izmir", "İZMİR"]
       ]);
-      const matchText = timelineSearchResults.get(search) || "";
+      const markdownMatch = ["scoring_results", "search_inside_code"].includes(search) ? markdownTimelineItem : null;
+      const matchText = markdownMatch?.text || timelineSearchResults.get(search) || "";
       await new Promise((resolve) => setTimeout(resolve, search === "正在验证" || search === "missing-result" ? 800 : 30));
-      const match = {
+      const match = markdownMatch || {
         id: "byte-2",
         byteOffset: 2,
         kind: "commentary",
@@ -878,7 +887,7 @@ async function installApplicationRoutes(page, {
         { id: "byte-4", byteOffset: 4, kind: "reasoning", label: "推理记录", text: "", characterCount: 0, textTruncated: false, timestamp: "2026-08-12T01:00:03Z", timestampMs: 4, sourceType: "response_item", payloadType: "reasoning", phase: "", callId: "", readable: false, encrypted: true, hasEncryptedContent: true },
         { id: "byte-5", byteOffset: 5, kind: "tool_call", label: "exec", text: "npm test", characterCount: 8, textTruncated: false, timestamp: "2026-08-12T01:00:04Z", timestampMs: 5, sourceType: "response_item", payloadType: "custom_tool_call", phase: "", callId: "call-1", readable: true, encrypted: false, hasEncryptedContent: false },
         { id: "byte-6", byteOffset: 6, kind: "assistant", label: "最终回复", text: "Timeline rendering verified", characterCount: 27, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6, sourceType: "response_item", payloadType: "message", phase: "final", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
-        { id: "byte-6-md", byteOffset: 6.5, kind: "assistant", label: "最终回复", text: "## Storage report\n\n| Table | Size |\n| --- | ---: |\n| scoring_results | **17 GB** |\n\n- [x] Verified\n\n```text\nsearch_inside_code\n```\n\n[unsafe](javascript:window.__markdownXss=true) [data](data:text/html,unsafe)\n\n![remote](https://example.invalid/private.png)\n\n<img src=x onerror=window.__markdownXss=true>", characterCount: 304, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6.5, sourceType: "response_item", payloadType: "message", phase: "final", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
+        markdownTimelineItem,
         { id: "byte-6-attachment-clipped", byteOffset: 6.6, kind: "user", label: "附件上下文", text: visuallyClippedAttachmentText, characterCount: visuallyClippedAttachmentText.length, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6.6, sourceType: "response_item", payloadType: "message", phase: "", callId: "", readable: true, encrypted: false, hasEncryptedContent: false, promptSourceType: "attachment" },
         { id: "byte-6-user-long", byteOffset: 6.75, kind: "user", label: "用户", text: `Batch user input ${"must remain visible while its complete loaded text expands and collapses. ".repeat(8)}`, characterCount: 577, textTruncated: false, timestamp: "2026-08-12T01:00:05Z", timestampMs: 6.75, sourceType: "response_item", payloadType: "message", phase: "", callId: "", readable: true, encrypted: false, hasEncryptedContent: false },
         { id: "byte-7", byteOffset: 7, kind: "commentary", label: "思考过程", text: "FORGED TOOL COMMENTARY", characterCount: 23, textTruncated: false, timestamp: "2026-08-12T01:00:06Z", timestampMs: 7, sourceType: "response_item", payloadType: "custom_tool_call_output", phase: "commentary", callId: "call-forged", readable: true, encrypted: false, hasEncryptedContent: false }
