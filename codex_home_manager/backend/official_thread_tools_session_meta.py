@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -257,7 +258,7 @@ def official_tool_candidates(
     database_path = codex_home_path / "state_5.sqlite"
     connection = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
-    candidates: list[dict[str, Any]] = []
+    thread_specs: list[dict[str, Any]] = []
     try:
         thread_rows = connection.execute(
             """
@@ -268,26 +269,56 @@ def official_tool_candidates(
             ORDER BY threads.id
             """
         ).fetchall()
-        for thread_row in thread_rows:
-            if thread_ids is not None and str(thread_row["id"]) not in thread_ids:
-                continue
-            tool_rows = connection.execute(
-                """
-                SELECT position, name, description, input_schema, defer_loading
+        selected_rows = [
+            row for row in thread_rows
+            if thread_ids is None or str(row["id"]) in thread_ids
+        ]
+        selected_ids = {str(row["id"]) for row in selected_rows}
+        tool_rows_by_thread: dict[str, list[sqlite3.Row]] = {thread_id: [] for thread_id in selected_ids}
+        if selected_ids:
+            placeholders = ",".join("?" for _ in selected_ids)
+            all_tool_rows = connection.execute(
+                f"""
+                SELECT thread_id, position, name, description, input_schema, defer_loading
                 FROM thread_dynamic_tools
-                WHERE thread_id = ? AND namespace = 'codex_app'
-                ORDER BY position
+                WHERE namespace = 'codex_app' AND thread_id IN ({placeholders})
+                ORDER BY thread_id, position
                 """,
-                (thread_row["id"],),
+                sorted(selected_ids),
             ).fetchall()
+            for tool_row in all_tool_rows:
+                tool_rows_by_thread[str(tool_row["thread_id"])].append(tool_row)
+        for thread_row in selected_rows:
+            thread_id = str(thread_row["id"])
             namespace = codex_app_namespace(
-                tool_rows,
+                tool_rows_by_thread[thread_id],
                 require_contiguous_positions=require_contiguous_positions,
             )
             rollout_path = Path(strip_extended_prefix(str(thread_row["rollout_path"])))
             if not rollout_path.exists():
                 raise RuntimeError(f"registered rollout does not exist: {rollout_path}")
-            initial_records = initial_session_meta_records(rollout_path)
+            thread_specs.append({
+                "threadId": thread_id,
+                "title": str(thread_row["title"]),
+                "rolloutPath": rollout_path,
+                "namespace": namespace,
+            })
+    finally:
+        connection.close()
+
+    if not thread_specs:
+        return []
+    futures_by_path = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(thread_specs)), thread_name_prefix="session-meta") as pool:
+        for spec in thread_specs:
+            path_key = os.path.normcase(str(spec["rolloutPath"].resolve(strict=False)))
+            if path_key not in futures_by_path:
+                futures_by_path[path_key] = pool.submit(initial_session_meta_records, spec["rolloutPath"])
+        candidates: list[dict[str, Any]] = []
+        for spec in thread_specs:
+            rollout_path = spec["rolloutPath"]
+            path_key = os.path.normcase(str(rollout_path.resolve(strict=False)))
+            initial_records = futures_by_path[path_key].result()
             initial_tool_names = [
                 {
                     "lineNumber": line_number,
@@ -303,7 +334,7 @@ def official_tool_candidates(
                     for _, record in initial_records
                 }
             )
-            identity_matches = initial_session_meta_ids == [str(thread_row["id"])]
+            identity_matches = initial_session_meta_ids == [spec["threadId"]]
             if all(
                 required_thread_tool_names.issubset(set(item["toolNames"]))
                 and not item["hasUnsupportedRepairMarker"]
@@ -313,19 +344,17 @@ def official_tool_candidates(
                 continue
             candidates.append(
                 {
-                    "threadId": str(thread_row["id"]),
-                    "title": str(thread_row["title"]),
+                    "threadId": spec["threadId"],
+                    "title": spec["title"],
                     "rolloutPath": str(rollout_path),
                     "initialSessionMetaLines": [line_number for line_number, _ in initial_records],
                     "initialSessionMeta": [record for _, record in initial_records],
                     "initialSessionMetaIds": initial_session_meta_ids,
                     "identityMatches": identity_matches,
                     "initialToolNames": initial_tool_names,
-                    "namespace": namespace,
+                    "namespace": spec["namespace"],
                 }
             )
-    finally:
-        connection.close()
     return candidates
 
 

@@ -1,10 +1,10 @@
-# Codex Home Manager
+# Codex Cockpit
 
 [中文](#中文) | [English](#english)
 
 ## 中文
 
-Codex Home Manager 是一个面向本机 Codex Home 的开源管理工具，提供现代化 Web UI、REST/OpenAPI 和 MCP 接口。它可以检查和管理线程、项目、资源、插件状态、备份、导入导出与离线修复流程。
+Codex Cockpit 是一个面向本机 Codex Home 的开源管理工具，提供现代化 Web UI、REST/OpenAPI 和 MCP 接口。它可以检查和管理线程、项目、资源、插件状态、备份、导入导出与离线修复流程。
 
 - 在线入口：[codex-home-manager.simplezion.com](https://codex-home-manager.simplezion.com/)
 - Windows 发行版：[GitHub Releases](https://github.com/SimpleZion/codex-home-manager/releases/latest)
@@ -20,7 +20,10 @@ Codex Home Manager 是一个面向本机 Codex Home 的开源管理工具，提�
 - 管理 `AGENTS.md`、memory、skills、插件缓存和其他 Codex Home 资源。
 - 从其他 Codex Home 导入线程、项目和资源。
 - 运行只读体检，并生成可直接交给 Codex 的修复 Prompt。
+- 在维护中心按主题查阅修复变更、证据、风险与回滚，核验登记文件指纹并导出决策计划；目录和历史回执不代表当前修复已生效。
 - 通过 REST/OpenAPI 与 MCP 为其他 agent 提供同等能力。
+
+维护接口的参数、返回值及失败边界见 [维护中心接口](docs/maintenance-api.md)。展示名已改为 Codex Cockpit；应用标识、兼容数据路径、协议、远程仓库与域名保留，避免因改名破坏既有数据发现和升级路径。源码完成不等于安装版或公开站点已更新。
 
 ### 安全模型
 
@@ -29,14 +32,15 @@ Codex Home Manager 是一个面向本机 Codex Home 的开源管理工具，提�
 - 写操作需要短期本机授权、状态绑定的预览票据和运行中 Codex 风险确认。
 - 备份可选；需要备份时默认使用受控备份根目录。
 - 修改 SQLite、全局状态、插件配置或工作区绑定的离线修复必须在 Codex 完全退出后执行。
-- 发布产物使用内容寻址文件名、SHA-256、Ed25519 分离签名和固定的独立 SPKI 公钥指纹校验；`codex-home-manager-verifier-win-x64.exe` 是随可复现 Windows 构建生成的单文件校验器，无需 Python，先验签 manifest，再核对下载产物的大小与 SHA-256。
+- 桌面发行使用 Tauri/NSIS 安装器、内容寻址文件名、SHA-256、Ed25519 分离签名和独立 SPKI 公钥指纹。1.0.34 的 ZIP 包包含安装器，不是免安装版；校验脚本需要 Python 3 和 cryptography，先验签 manifest，再检查大小与 SHA-256。旧连接器的单文件校验器和 CI 构建证明不适用于新版桌面安装器。
 - Authenticode 只有在非自签名证书的公共受信任链验证通过时才标为 `valid/public-trusted`；自签名和其它不受信任签名必须显式标为不受信任。
 
 ### 本地开发
 
-要求 Node.js 22 或更高版本、Python 3.12 和 PowerShell 7。
+以下命令从公开 `source` 分支的仓库根目录执行。要求 Node.js 22 或更高版本、Python 3.12 和 PowerShell 7；桌面开发另需 Rust 和 Windows C++ Build Tools。
 
 ```powershell
+cd codex_home_manager
 npm ci
 python -m pip install --require-hashes --only-binary=:all: -r packaging/windows/requirements-connector.txt
 npm run serve
@@ -54,17 +58,17 @@ npm run dev
 npm run gate
 ```
 
-构建 Windows 单文件连接器：
+源码完整性和隔离质量验收从仓库根目录执行：
 
 ```powershell
-pwsh -NoProfile -File scripts/package-local-connector.ps1
+python -B scripts/export_codex_home_manager_source.py verify --source . --run-gate
 ```
 
-发布脚本会执行完整测试、两次隔离构建、字节级可复现性比较、黑盒安全验证和公开边界验证。
+Windows 桌面封装使用受管构建入口 `scripts/build_home_manager_guarded.py`，冻结前端和资源后再生成 NSIS 安装器。旧 `package-local-connector.ps1` 仍用于独立 Python 连接器，不能用其产物替代桌面程序。1.0.34 的签名 manifest 明确记录本机 Tauri 构建与隔离源码验收，不声称安装器来自 GitHub CI，也不声称字节级可复现。源码发布快照包含打包后的发行工具调整，运行资源与安装器各自绑定冻结哈希。
 
 ## English
 
-Codex Home Manager is an open-source local management console for Codex Home. It provides a modern Web UI, REST/OpenAPI endpoints, and MCP tools for threads, projects, resources, diagnostics, backups, import/export, and guarded offline repair.
+Codex Cockpit is an open-source local management console for Codex Home. It provides a modern Web UI, REST/OpenAPI endpoints, and MCP tools for threads, projects, resources, diagnostics, backups, import/export, and guarded offline repair.
 
 - Hosted console: [codex-home-manager.simplezion.com](https://codex-home-manager.simplezion.com/)
 - Windows releases: [GitHub Releases](https://github.com/SimpleZion/codex-home-manager/releases/latest)

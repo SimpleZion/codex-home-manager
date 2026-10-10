@@ -53,9 +53,17 @@ $verifierExecutablePath = Join-Path $releaseRoot "codex-home-manager-verifier-wi
 $checksumPath = Join-Path $releaseRoot "SHA256SUMS.txt"
 $verifyScriptPath = Join-Path $releaseRoot "verify-codex-home-manager.ps1"
 $releasePublicKeyPath = Join-Path $releaseRoot "release-signing-public-key.pem"
-$privateKeyPath = "D:\Backup\codex_home_manager\release-signing\release-signing-key.pem"
-$trustedPublicKeyFingerprintPath = "D:\Backup\codex_home_manager\release-signing\release-signing-public-key.sha256"
-$embeddedReleasePublicKeyFingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
+$releaseSigningDirectory = Join-Path $rootRepository ".codex\release-signing"
+$privateKeyPath = Join-Path $releaseSigningDirectory "release-signing-key.pem"
+$trustedPublicKeyFingerprintPath = Join-Path $releaseSigningDirectory "release-signing-public-key.sha256"
+$embeddedReleasePublicKeyFingerprint = "sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f"
+if ($PSCmdlet.ParameterSetName -eq "Release") {
+    foreach ($signingInput in @($privateKeyPath, $trustedPublicKeyFingerprintPath)) {
+        if (-not (Test-Path -LiteralPath $signingInput -PathType Leaf)) {
+            throw "Required publisher signing material is missing: $signingInput. Restore the original key and independent trust record before release preparation; do not silently generate replacement trust."
+        }
+    }
+}
 $releaseManifestScript = Join-Path $PSScriptRoot "release_manifest.py"
 $buildSourceSnapshotPath = Join-Path $buildRoot "release-build-source.json"
 $sourceEvidenceProofPath = Join-Path $buildRoot "source-release-evidence.json"
@@ -108,8 +116,10 @@ function Assert-PublicDistRelativePath {
         throw "Public dist paths must use canonical forward slashes: $RelativePath"
     }
     if ($RelativePath.Equals("favicon.svg", [System.StringComparison]::OrdinalIgnoreCase) -or
-        $RelativePath.Equals("index.html", [System.StringComparison]::OrdinalIgnoreCase)) {
-        if ($RelativePath -cnotin @("favicon.svg", "index.html")) {
+        $RelativePath.Equals("cockpit-icon.png", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $RelativePath.Equals("index.html", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $RelativePath.Equals("frontend-release-manifest.json", [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($RelativePath -cnotin @("favicon.svg", "cockpit-icon.png", "index.html", "frontend-release-manifest.json")) {
             throw "Public dist root path has non-canonical casing: $RelativePath"
         }
         return
@@ -139,7 +149,8 @@ function Resolve-AllowedChildPath {
 function Invoke-PublicSiteDistSync {
     param(
         [Parameter(Mandatory = $true)][string]$DistDirectory,
-        [Parameter(Mandatory = $true)][string]$PublicSiteDirectory
+        [Parameter(Mandatory = $true)][string]$PublicSiteDirectory,
+        [ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedPlanSha256
     )
     & python $releaseManifestScript plan-public-dist-sync `
         --dist $DistDirectory `
@@ -147,6 +158,9 @@ function Invoke-PublicSiteDistSync {
         --output $publicDistSyncPlanPath
     if ($LASTEXITCODE -ne 0) {
         throw "Public site dist synchronization plan failed"
+    }
+    if ($ExpectedPlanSha256 -and (Get-Sha256HashText -Path $publicDistSyncPlanPath) -cne $ExpectedPlanSha256.ToLowerInvariant()) {
+        throw "Public site dist synchronization differs from the reviewed plan"
     }
     $syncPlan = Get-Content -LiteralPath $publicDistSyncPlanPath -Raw | ConvertFrom-Json
     if ($syncPlan.schema_version -ne 1) {
@@ -639,6 +653,8 @@ function Invoke-IsolatedConnectorBuild {
     $oneFileWorkRoot = Join-Path $iterationRoot "work-onefile"
     $specRoot = Join-Path $iterationRoot "spec"
     $archive = Join-Path $iterationRoot "codex-home-manager-local-win-x64.zip"
+    $skillsSourceRoot = Join-Path $appDirectory "packaging\skills"
+    $runtimeCatalogSourceRoot = Join-Path $appDirectory "packaging\runtime"
 
     $verifierWorkRoot = Join-Path $iterationRoot "work-verifier"
     New-Item -ItemType Directory -Force -Path $iterationRoot, $payloadRoot, $packageRoot, $oneFileRoot, $verifierRoot, $specRoot | Out-Null
@@ -652,6 +668,8 @@ function Invoke-IsolatedConnectorBuild {
             --noconfirm --clean --name CodexHomeManagerLocal --onedir --windowed `
             --icon $iconPath --version-file $versionInfoPath --distpath $payloadRoot --workpath $oneDirWorkRoot --specpath $specRoot `
             --add-data "$distSnapshot;dist" `
+            --add-data "$skillsSourceRoot;packaging/skills" `
+            --add-data "$runtimeCatalogSourceRoot;packaging/runtime" `
             --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.lifespan.on `
             --paths $appDirectory --paths (Join-Path $appDirectory "packaging\windows") `
             $generatedLauncherPath
@@ -663,6 +681,8 @@ function Invoke-IsolatedConnectorBuild {
             --noconfirm --clean --name CodexHomeManagerLocal --onefile --windowed `
             --icon $iconPath --version-file $versionInfoPath --distpath $oneFileRoot --workpath $oneFileWorkRoot --specpath $specRoot `
             --add-data "$distSnapshot;dist" `
+            --add-data "$skillsSourceRoot;packaging/skills" `
+            --add-data "$runtimeCatalogSourceRoot;packaging/runtime" `
             --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.lifespan.on `
             --paths $appDirectory --paths (Join-Path $appDirectory "packaging\windows") `
             $generatedLauncherPath
@@ -992,12 +1012,12 @@ try {
     $stableZipPath = "/codex-home-manager-local-win-x64.zip"
     $latestExePath = "/downloads/latest/windows-x64.exe"
     $latestZipPath = "/downloads/latest/windows-x64.zip"
-    & python $releaseManifestScript keygen `
+    & python $releaseManifestScript export-public-key `
         --private-key $privateKeyPath `
         --public-key $releasePublicKeyPath `
         --trusted-public-key-fingerprint $trustedPublicKeyFingerprintPath
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to prepare the private-root Ed25519 release signing trust"
+        throw "Failed to export the existing Ed25519 release public key; signing state was not regenerated"
     }
     $trustedPublicKeyFingerprint = (Get-Content -LiteralPath $trustedPublicKeyFingerprintPath -Raw).Trim()
     if ($trustedPublicKeyFingerprint -cne $embeddedReleasePublicKeyFingerprint) {

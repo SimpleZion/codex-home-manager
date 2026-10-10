@@ -15,11 +15,14 @@ from backend.thread_history_repair import (
     build_repair_plan,
     compacted_checkpoint_contract,
     create_compatibility_view,
+    create_orphan_custom_tool_call_view,
     create_slim_view,
+    repair_orphan_custom_tool_calls_in_place,
     repair_rollout_compatibility_in_place,
     repair_rollout_in_place,
     scan_rollout,
     select_repair_candidates,
+    unpaired_custom_tool_call_counts,
     validate_user_prompt_contract,
 )
 
@@ -810,6 +813,77 @@ def test_repair_rollout_in_place_archives_exact_original_and_installs_view(tmp_p
     assert "removable pre-checkpoint answer" not in source_path.read_text(encoding="utf-8")
 
 
+def test_orphan_custom_tool_call_view_removes_only_unpaired_calls(tmp_path: Path) -> None:
+    source_path = tmp_path / "rollout-thread-a.jsonl"
+    destination_path = tmp_path / "view.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"id": "thread-a"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "keep this prompt exactly"}],
+            },
+        },
+        {"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "paired"}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "paired"}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "orphan"}},
+        {
+            "type": "response_item",
+            "payload": {"type": "reasoning", "id": "item-existing-parser-warning"},
+        },
+    ]
+    write_jsonl(source_path, records)
+
+    result = create_orphan_custom_tool_call_view(source_path, destination_path, "thread-a")
+
+    assert result.removed_custom_tool_call_count == 1
+    assert result.removed_call_ids == ("orphan",)
+    assert unpaired_custom_tool_call_counts(destination_path) == {}
+    view_text = destination_path.read_text(encoding="utf-8")
+    assert '"call_id":"paired"' in view_text
+    assert '"call_id":"orphan"' not in view_text
+    assert "keep this prompt exactly" in view_text
+    assert "item-existing-parser-warning" in view_text
+
+
+def test_repair_orphan_custom_tool_calls_preserves_prompt_contract_and_backup(tmp_path: Path) -> None:
+    source_path = tmp_path / "rollout-thread-a.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"id": "thread-a"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "prompt one"}],
+            },
+        },
+        {"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "orphan"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "prompt two"}},
+    ]
+    write_jsonl(source_path, records)
+    original_bytes = source_path.read_bytes()
+    source_scan = scan_rollout(source_path)
+    source_stat = source_path.stat()
+
+    result = repair_orphan_custom_tool_calls_in_place(
+        source_path=source_path,
+        backup_root=tmp_path / "backup",
+        expected_thread_id="thread-a",
+        audited_size=source_stat.st_size,
+        audited_mtime_ns=source_stat.st_mtime_ns,
+        audited_sha256=source_scan.source_sha256,
+    )
+
+    active_scan = scan_rollout(source_path)
+    assert Path(result.backup_path).read_bytes() == original_bytes
+    assert result.user_prompt_count == source_scan.user_prompt_count == active_scan.user_prompt_count
+    assert result.user_prompt_sha256 == source_scan.user_prompt_sha256 == active_scan.user_prompt_sha256
+    assert unpaired_custom_tool_call_counts(source_path) == {}
+
+
 def test_repair_rollout_in_place_refuses_source_changed_since_audit(tmp_path: Path) -> None:
     source_path = tmp_path / "rollout-thread-a.jsonl"
     write_jsonl(
@@ -1072,6 +1146,60 @@ def test_create_compatibility_view_strips_proxy_custom_tool_id_and_preserves_cal
     assert preserved_output["call_id"] == migrated_call["call_id"]
     assert preserved_output["output"] == "ok"
     assert result.migrated_proxy_custom_tool_call_count == 1
+    assert scan_rollout(destination_path).incompatible_proxy_item_id_count == 0
+
+
+def test_create_compatibility_view_strips_proxy_function_call_id_and_preserves_call_link(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "rollout-thread-a.jsonl"
+    destination_path = tmp_path / "rollout-thread-a.compat.jsonl"
+    tool_metadata = {"provider": "proxy", "stable": True}
+    write_jsonl(
+        source_path,
+        [
+            {"type": "session_meta", "payload": {"id": "thread-a"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "id": "item_proxy-function-call",
+                    "call_id": "call-stable-function-link",
+                    "name": "wait",
+                    "arguments": "{\"cell_id\":\"cell-1\"}",
+                    "namespace": "functions",
+                    "internal_chat_message_metadata_passthrough": tool_metadata,
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "id": "fco_official-output",
+                    "call_id": "call-stable-function-link",
+                    "output": "done",
+                },
+            },
+        ],
+    )
+
+    result = create_compatibility_view(source_path, destination_path, expected_thread_id="thread-a")
+    records = [json.loads(line) for line in destination_path.read_text(encoding="utf-8").splitlines()]
+    migrated_call = records[1]["payload"]
+    preserved_output = records[2]["payload"]
+
+    assert "id" not in migrated_call
+    assert migrated_call == {
+        "type": "function_call",
+        "call_id": "call-stable-function-link",
+        "name": "wait",
+        "arguments": "{\"cell_id\":\"cell-1\"}",
+        "namespace": "functions",
+        "internal_chat_message_metadata_passthrough": tool_metadata,
+    }
+    assert preserved_output["call_id"] == migrated_call["call_id"]
+    assert preserved_output["output"] == "done"
+    assert result.migrated_proxy_function_call_count == 1
     assert scan_rollout(destination_path).incompatible_proxy_item_id_count == 0
 
 

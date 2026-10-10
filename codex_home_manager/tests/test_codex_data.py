@@ -7,6 +7,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -56,6 +57,7 @@ from backend.codex_data import (
     read_thread_prompts,
     read_thread_logs,
     read_thread_timeline,
+    read_thread_timeline_search_page,
     rename_project,
     repair_official_thread_tools_exposure,
     restore_backup,
@@ -146,6 +148,7 @@ def test_auth_token_rejects_public_origin_even_when_target_is_loopback(tmp_path:
 def isolate_backup_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_HOME_MANAGER_BACKUP_ROOT", str(tmp_path / "backups"))
     monkeypatch.setenv("CODEX_HOME_MANAGER_STATE_ROOT", str(tmp_path / "manager-state"))
+    monkeypatch.setenv("CODEX_HOME_MANAGER_EXPORT_ROOT", str(tmp_path / "exports"))
     monkeypatch.setattr("backend.codex_data.detect_codex_processes", lambda: [])
     monkeypatch.setattr("backend.diagnostics.detect_codex_processes", lambda: [])
 
@@ -726,6 +729,44 @@ def test_current_codex_version_uses_healthy_native_host_cli_when_runtime_path_is
     assert versions["runtimeConfiguredCli"]["exists"] is False
 
 
+def test_current_codex_version_deduplicates_and_caches_identical_cli_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    cli_path = tmp_path / "runtime" / "codex.exe"
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_bytes(b"MZ")
+    (codex_home_path / "config.toml").write_text(
+        f'CODEX_CLI_PATH = "{cli_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    command_calls = 0
+
+    def fake_run_hidden_command(*_args, **_kwargs):
+        nonlocal command_calls
+        command_calls += 1
+        return {
+            "returnCode": 0,
+            "stdout": "codex-cli 0.144.2\n",
+            "stderr": "",
+            "error": "",
+        }
+
+    monkeypatch.setattr("backend.codex_data.run_hidden_command", fake_run_hidden_command)
+    monkeypatch.setattr("backend.codex_data.shutil.which", lambda _name: str(cli_path))
+    monkeypatch.setattr("backend.codex_data.find_codex_desktop_installations", lambda: [])
+    monkeypatch.setattr("backend.codex_data.read_native_host_desktop_install", lambda _paths: {})
+    codex_data_module.clear_current_codex_version_cache()
+
+    paths = resolve_codex_paths(str(codex_home_path))
+    first = detect_current_codex_versions(paths)
+    second = detect_current_codex_versions(paths)
+
+    assert first == second
+    assert command_calls == 1
+
+
 def test_scan_curated_plugin_registry_uses_configured_cli_and_selected_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1011,6 +1052,7 @@ def create_test_codex_home(root_path: Path) -> Path:
                 model_provider TEXT NOT NULL,
                 cwd TEXT NOT NULL,
                 title TEXT NOT NULL,
+                name TEXT,
                 sandbox_policy TEXT NOT NULL,
                 approval_mode TEXT NOT NULL,
                 tokens_used INTEGER NOT NULL DEFAULT 0,
@@ -1130,7 +1172,7 @@ def test_snapshot_summary_and_thread_page_are_bounded_for_thousand_thread_home(t
         params={"codex_home": str(codex_home_path), "sidebar_limit": 50},
     )
     summary_seconds = time.perf_counter() - started_at
-    assert summary_response.status_code == 200
+    assert summary_response.status_code == 200, summary_response.text
     assert summary_response.json()["summary"]["totalThreads"] == 1203
     assert len(summary_response.content) < 100_000
     assert summary_seconds < 3.0
@@ -1176,6 +1218,176 @@ def test_snapshot_summary_and_thread_page_are_bounded_for_thousand_thread_home(t
     assert {thread["id"] for thread in page["threads"]}.isdisjoint(
         {thread["id"] for thread in second_page_response.json()["threads"]}
     )
+
+
+def test_snapshot_catalog_never_reads_rollout_titles_for_initial_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    project_path = str(tmp_path / "project")
+    (codex_home_path / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "projectless-thread-ids": ["thread-1"],
+                "thread-workspace-root-hints": {"thread-1": project_path},
+                "pinned-thread-ids": ["thread-1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def reject_rollout_title_scan(*_args, **_kwargs):
+        raise AssertionError("initial thread listing must not scan rollout contents for titles")
+
+    assert not hasattr(codex_data_module, "read_rollout_thread_title_update")
+
+    snapshot = build_snapshot(str(codex_home_path), sidebar_limit=50)
+
+    thread = next(item for item in snapshot["threads"] if item["id"] == "thread-1")
+    assert thread["title"] == "Thread 1"
+
+
+def test_snapshot_catalog_coalesces_concurrent_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    codex_data_module.clear_snapshot_catalog_cache()
+    original_build_snapshot = codex_data_module.build_snapshot
+    build_count = 0
+    build_count_lock = __import__("threading").Lock()
+
+    def counted_build_snapshot(*args, **kwargs):
+        nonlocal build_count
+        with build_count_lock:
+            build_count += 1
+        time.sleep(0.1)
+        return original_build_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr("backend.codex_data.build_snapshot", counted_build_snapshot)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        snapshots = list(
+            executor.map(
+                lambda _index: codex_data_module.build_snapshot_catalog(str(codex_home_path), 50),
+                range(8),
+            )
+        )
+
+    assert build_count == 1
+    assert len({snapshot["catalogVersion"] for snapshot in snapshots}) == 1
+
+
+def test_snapshot_catalog_reuses_recent_result_when_wal_fingerprint_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    codex_data_module.clear_snapshot_catalog_cache()
+    original_build_snapshot = codex_data_module.build_snapshot
+    build_count = 0
+    fingerprint_generation = 0
+
+    def counted_build_snapshot(*args, **kwargs):
+        nonlocal build_count
+        build_count += 1
+        return original_build_snapshot(*args, **kwargs)
+
+    def changing_fingerprint(_paths):
+        nonlocal fingerprint_generation
+        fingerprint_generation += 1
+        return (("state_5.sqlite-wal", fingerprint_generation, fingerprint_generation),)
+
+    monkeypatch.setattr("backend.codex_data.build_snapshot", counted_build_snapshot)
+    monkeypatch.setattr("backend.codex_data.snapshot_catalog_fingerprint", changing_fingerprint)
+
+    first = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+    second = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+    refreshed = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50, force_refresh=True)
+
+    assert first is second
+    assert refreshed is not first
+    assert build_count == 2
+
+
+def test_snapshot_catalog_returns_stale_result_while_changed_catalog_refreshes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    codex_data_module.clear_snapshot_catalog_cache()
+    original_build_snapshot = codex_data_module.build_snapshot
+    refresh_started = threading.Event()
+    allow_refresh = threading.Event()
+    fingerprint_generation = 1
+    build_count = 0
+
+    def controlled_fingerprint(_paths):
+        return (("state_5.sqlite-wal", fingerprint_generation, fingerprint_generation),)
+
+    def blocking_refresh(*args, **kwargs):
+        nonlocal build_count
+        build_count += 1
+        if build_count == 2:
+            refresh_started.set()
+            assert allow_refresh.wait(timeout=3)
+        return original_build_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(codex_data_module, "snapshot_catalog_cache_grace_seconds", 0.0)
+    monkeypatch.setattr(codex_data_module, "snapshot_catalog_fingerprint", controlled_fingerprint)
+    monkeypatch.setattr(codex_data_module, "build_snapshot", blocking_refresh)
+
+    first = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+    fingerprint_generation = 2
+    with codex_data_module.snapshot_catalog_cache_lock:
+        cache_key = (str(codex_home_path.resolve()).casefold(), 50, False)
+        timestamp, fingerprint, snapshot = codex_data_module.snapshot_catalog_cache[cache_key]
+        codex_data_module.snapshot_catalog_cache[cache_key] = (timestamp - 1, fingerprint, snapshot)
+    started_at = time.perf_counter()
+    stale = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+    elapsed = time.perf_counter() - started_at
+
+    assert stale is first
+    assert elapsed < 0.1
+    assert refresh_started.wait(timeout=3), f"background refresh did not start; build_count={build_count}"
+
+    allow_refresh.set()
+    deadline = time.monotonic() + 3
+    refreshed = first
+    while time.monotonic() < deadline:
+        refreshed = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+        if refreshed is not first:
+            break
+        time.sleep(0.01)
+
+    assert refreshed is not first
+    assert build_count == 2
+
+
+def test_thread_page_reuses_the_catalog_version_already_shown_in_the_ui(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    codex_data_module.clear_snapshot_catalog_cache()
+    snapshot = codex_data_module.build_snapshot_catalog(str(codex_home_path), 50)
+
+    def reject_rebuild(*_args, **_kwargs):
+        raise AssertionError("filtering an existing catalog must not rebuild the snapshot")
+
+    monkeypatch.setattr("backend.codex_data.build_snapshot_catalog", reject_rebuild)
+    page = codex_data_module.query_snapshot_thread_page(
+        codex_home_text=str(codex_home_path),
+        sidebar_limit=50,
+        project_path=snapshot["threads"][0]["projectPath"],
+        catalog_version=snapshot["catalogVersion"],
+        limit=2,
+    )
+
+    assert page["matchedThreads"] >= 1
+    assert page["projectCounts"]
+    assert page["catalogVersion"] == snapshot["catalogVersion"]
 
 
 def fake_current_codex_appx_install(appx_root: Path) -> dict[str, object]:
@@ -1341,7 +1553,7 @@ def test_snapshot_thread_list_rank_alone_keeps_thread_visible_without_session_in
     assert "missing_session_index_entry" in thread["hiddenReasons"]
 
 
-def test_snapshot_does_not_mark_thread_visible_when_rollout_event_stream_is_missing(tmp_path: Path) -> None:
+def test_snapshot_accepts_modern_response_item_conversation_without_legacy_event_mirrors(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     (codex_home_path / "session_index.jsonl").write_text(
         json.dumps({"id": "thread-2", "thread_name": "Thread 2", "updated_at": "2026-06-03T00:00:00Z"}) + "\n",
@@ -1382,10 +1594,11 @@ def test_snapshot_does_not_mark_thread_visible_when_rollout_event_stream_is_miss
     thread = next(item for item in snapshot["threads"] if item["id"] == "thread-2")
 
     assert thread["threadListRank"] == 1
-    assert thread["visibility"] == "needs_user_event_repair"
-    assert thread["codexVisible"] is False
-    assert thread["rolloutDisplayStatus"] == "missing_visible_event_stream"
-    assert "missing_visible_event_stream" in thread["hiddenReasons"]
+    assert thread["visibility"] == "visible"
+    assert thread["codexVisible"] is True
+    assert thread["rolloutDisplayStatus"] == "ok"
+    assert thread["rolloutDisplayVisibleUserMessages"] == 1
+    assert thread["rolloutDisplayVisibleAgentMessages"] == 1
 
 
 def test_snapshot_stale_session_index_rank_keeps_thread_visible_with_legacy_rank_reason(tmp_path: Path) -> None:
@@ -1410,7 +1623,7 @@ def test_snapshot_stale_session_index_rank_keeps_thread_visible_with_legacy_rank
     assert "outside_session_index_repair_window" in thread["hiddenReasons"]
 
 
-def test_snapshot_uses_session_index_title_for_sidebar_match(tmp_path: Path) -> None:
+def test_snapshot_reports_missing_sqlite_name_instead_of_masking_it_with_session_index(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     (codex_home_path / "session_index.jsonl").write_text(
         json.dumps(
@@ -1428,12 +1641,17 @@ def test_snapshot_uses_session_index_title_for_sidebar_match(tmp_path: Path) -> 
     snapshot = build_snapshot(str(codex_home_path), sidebar_limit=10)
     thread = next(item for item in snapshot["threads"] if item["id"] == "thread-1")
 
-    assert thread["title"] == "Codex线程瘦身"
-    assert thread["sidebarTitle"] == "Codex线程瘦身"
+    assert thread["title"] == "Thread 1"
+    assert thread["sidebarTitle"] == ""
     assert thread["sqliteTitle"] == "Thread 1"
+    assert thread["sqliteName"] == ""
+    assert thread["sqliteNameSupported"] is True
+    assert thread["sessionIndexTitle"] == "Codex线程瘦身"
 
 
-def test_snapshot_uses_rollout_title_for_visible_conversation_sidebar(tmp_path: Path) -> None:
+def test_snapshot_uses_session_index_title_without_scanning_rollout_for_visible_conversation_sidebar(
+    tmp_path: Path,
+) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     conversation_project_path = r"C:\Users\Example\Documents\Codex\2026-05-01\hf"
     rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
@@ -1490,10 +1708,10 @@ def test_snapshot_uses_rollout_title_for_visible_conversation_sidebar(tmp_path: 
     assert thread["projectKind"] == "conversation"
     assert thread["visibility"] == "visible"
     assert thread["codexVisible"] is True
-    assert thread["title"] == "排查HF卡住原因"
-    assert thread["projectLabel"] == "排查HF卡住原因"
-    assert thread["sidebarTitle"] == "排查HF卡住原因"
-    assert thread["rolloutTitle"] == "排查HF卡住原因"
+    assert thread["title"] == "怎么一直不动啊，查一下我的HF到底怎么了"
+    assert thread["projectLabel"] == "怎么一直不动啊，查一下我的HF到底怎么了"
+    assert thread["sidebarTitle"] == ""
+    assert thread["rolloutTitle"] == ""
     assert thread["sessionIndexTitle"] == "向HF上传文件"
     assert thread["sqliteTitle"] == "怎么一直不动啊，查一下我的HF到底怎么了"
 
@@ -1520,14 +1738,18 @@ def test_sync_thread_sqlite_title_uses_latest_sidebar_title_without_reordering(t
 
     assert result["updated"] is True
     assert result["sqliteTitleBefore"] == "Thread 1"
-    assert result["sqliteTitleAfter"] == "Codex Home Manager"
+    assert result["sqliteTitleAfter"] == "Thread 1"
+    assert result["sqliteNameBefore"] == ""
+    assert result["sqliteNameAfter"] == "Codex Home Manager"
+    assert result["targetColumn"] == "name"
     assert result["sidebarTitle"] == "Codex Home Manager"
     assert result["sessionIndexLine"] == 4
     assert result["backup"]["rowBefore"]["title"] == "Thread 1"
     assert index_path.read_text(encoding="utf-8").count("thread-1") == before_index_text.count("thread-1") + 1
     with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
-        title = connection.execute("SELECT title FROM threads WHERE id = 'thread-1'").fetchone()[0]
-    assert title == "Codex Home Manager"
+        title, name = connection.execute("SELECT title, name FROM threads WHERE id = 'thread-1'").fetchone()
+    assert title == "Thread 1"
+    assert name == "Codex Home Manager"
 
 
 def test_snapshot_does_not_mark_real_user_thread_as_repair_when_has_user_event_is_stale(tmp_path: Path) -> None:
@@ -1611,6 +1833,189 @@ def test_snapshot_classifies_subagents_outside_main_sidebar_limit(tmp_path: Path
     assert main_thread["threadListRank"] == 2
     assert main_thread["mainThreadListRank"] == 1
     assert main_thread["codexVisible"] is True
+
+
+def test_snapshot_keeps_bare_subagent_marker_on_spawn_parent_as_main_thread(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
+        connection.execute(
+            "UPDATE threads SET thread_source = 'subagent', source = 'vscode' WHERE id = 'thread-1'"
+        )
+        connection.execute(
+            "UPDATE threads SET thread_source = 'subagent' WHERE id = 'thread-2'"
+        )
+        connection.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('thread-1', 'thread-2', 'closed')"
+        )
+        connection.commit()
+
+    snapshot = build_snapshot(str(codex_home_path), sidebar_limit=10)
+    threads_by_id = {thread["id"]: thread for thread in snapshot["threads"]}
+
+    assert threads_by_id["thread-1"]["threadKind"] == "main"
+    assert threads_by_id["thread-1"]["parentThreadId"] == ""
+    assert threads_by_id["thread-2"]["threadKind"] == "subagent"
+    assert threads_by_id["thread-2"]["parentThreadId"] == "thread-1"
+
+
+def test_snapshot_prefers_official_thread_project_assignment_over_sqlite_cwd(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    product_path = str(tmp_path / "Product")
+    computer_project_path = str(tmp_path / "电脑问题")
+    computer_project_id = "local-computer-project"
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
+        connection.execute("UPDATE threads SET cwd = ? WHERE id = 'thread-1'", (product_path,))
+        connection.commit()
+    (codex_home_path / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "electron-saved-workspace-roots": [product_path, computer_project_path],
+                "pinned-thread-ids": [],
+                "local-projects": {
+                    computer_project_id: {
+                        "id": computer_project_id,
+                        "name": "电脑问题",
+                        "rootPaths": [computer_project_path, product_path],
+                    }
+                },
+                "thread-project-assignments": {
+                    "thread-1": {
+                        "projectKind": "local",
+                        "projectId": computer_project_id,
+                        "path": computer_project_path,
+                        "cwd": computer_project_path,
+                        "pendingCoreUpdate": False,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_snapshot(str(codex_home_path), sidebar_limit=10)
+    thread = next(item for item in snapshot["threads"] if item["id"] == "thread-1")
+    detail = get_thread_detail(
+        str(codex_home_path),
+        "thread-1",
+        sidebar_limit=10,
+        include_daily_token_usage=False,
+    )
+
+    assert thread["projectPath"] == computer_project_path
+    assert thread["projectLabel"] == "电脑问题"
+    assert thread["projectId"] == computer_project_id
+    assert thread["workingDirectory"] == product_path
+    assert detail["thread"]["projectPath"] == computer_project_path
+    assert detail["thread"]["workingDirectory"] == product_path
+    computer_project = next(
+        project for project in snapshot["projects"] if project["path"] == computer_project_path
+    )
+    assert computer_project["mainThreads"] == 1
+
+
+def test_snapshot_uses_canonical_project_roots_and_inherits_parent_assignment(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    cloud_path = r"D:\CXProject\云计算"
+    system_cockpit_path = r"D:\CXProject\电脑问题\SystemCockpit"
+    computer_path = r"D:\CXProject\电脑问题"
+    codex_path = r"D:\CXProject\Codex"
+    vscode_path = r"D:\CXProject\VSCode"
+    stale_vscode_path = r"C:\Users\15638\Documents\ChatGPT\VSCode"
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
+        connection.execute("UPDATE threads SET cwd = ? WHERE id = 'thread-2'", (stale_vscode_path,))
+        connection.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('thread-1', 'thread-2', 'closed')"
+        )
+        connection.commit()
+    (codex_home_path / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "electron-saved-workspace-roots": [stale_vscode_path],
+                "pinned-thread-ids": [],
+                "local-projects": {
+                    "cloud": {"name": "云计算", "rootPaths": [cloud_path, system_cockpit_path]},
+                    "computer": {"name": "电脑问题", "rootPaths": [computer_path, codex_path]},
+                    "codex": {"name": "Codex", "rootPaths": [codex_path]},
+                    "vscode": {"name": "VSCode", "rootPaths": [vscode_path, computer_path, codex_path]},
+                },
+                "thread-project-assignments": {
+                    "thread-0": {"projectId": "cloud"},
+                    "thread-1": {"projectId": "vscode"},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_snapshot(str(codex_home_path), sidebar_limit=10)
+    projects_by_path = {project["path"]: project for project in snapshot["projects"]}
+    threads_by_id = {thread["id"]: thread for thread in snapshot["threads"]}
+
+    assert set(projects_by_path) == {cloud_path, computer_path, codex_path, vscode_path}
+    assert projects_by_path[cloud_path]["label"] == "云计算"
+    assert projects_by_path[computer_path]["label"] == "电脑问题"
+    assert projects_by_path[codex_path]["label"] == "Codex"
+    assert projects_by_path[vscode_path]["label"] == "VSCode"
+    assert system_cockpit_path not in projects_by_path
+    assert stale_vscode_path not in projects_by_path
+    assert threads_by_id["thread-2"]["projectPath"] == vscode_path
+    assert threads_by_id["thread-2"]["projectLabel"] == "VSCode"
+    assert threads_by_id["thread-2"]["projectId"] == "vscode"
+    assert threads_by_id["thread-2"]["workingDirectory"] == stale_vscode_path
+    assert projects_by_path[vscode_path]["mainThreads"] == 1
+    assert projects_by_path[vscode_path]["subagentThreads"] == 1
+
+
+def test_snapshot_maps_unique_legacy_workspace_root_to_current_local_project(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    legacy_project_path = r"C:\ZionCloudDrive\CodexProject\Codex"
+    current_project_path = r"D:\CXProject\Codex"
+    project_id = "local-codex-project"
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
+        connection.execute("UPDATE threads SET cwd = ?", (legacy_project_path,))
+        connection.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('thread-1', 'thread-2', 'closed')"
+        )
+        connection.commit()
+    (codex_home_path / ".codex-global-state.json").write_text(
+        json.dumps(
+            {
+                "electron-saved-workspace-roots": [legacy_project_path],
+                "electron-workspace-root-labels": {legacy_project_path: "Codex"},
+                "pinned-thread-ids": [],
+                "local-projects": {
+                    project_id: {
+                        "id": project_id,
+                        "name": "Codex",
+                        "rootPaths": [current_project_path],
+                    }
+                },
+                "thread-project-assignments": {
+                    "thread-1": {
+                        "projectKind": "local",
+                        "projectId": project_id,
+                        "path": current_project_path,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_snapshot(str(codex_home_path), sidebar_limit=10)
+
+    assert snapshot["summary"]["savedProjects"] == 1
+    assert all(thread["projectPath"] == current_project_path for thread in snapshot["threads"])
+    assert all(thread["workingDirectory"] == legacy_project_path for thread in snapshot["threads"])
+    assert not any(project["path"] == legacy_project_path for project in snapshot["projects"])
+    project = next(project for project in snapshot["projects"] if project["path"] == current_project_path)
+    assert project["label"] == "Codex"
+    assert project["projectKind"] == "workspace_project"
+    assert project["mainThreads"] == 2
+    assert project["subagentThreads"] == 1
 
 
 def test_snapshot_raw_thread_list_rank_counts_subagents_against_sidebar_limit(tmp_path: Path) -> None:
@@ -2653,10 +3058,11 @@ def test_thread_timeline_separates_progress_commentary_from_final_replies_and_to
     rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
     records = [
         {"type": "response_item", "timestamp": "2026-08-12T01:00:00Z", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "开始"}]}},
-        {"type": "event_msg", "timestamp": "2026-08-12T01:00:01Z", "payload": {"type": "agent_message", "phase": "commentary", "message": "正在验证构建顺序"}},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:01Z", "payload": {"type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "正在验证构建顺序"}]}},
+        {"type": "event_msg", "timestamp": "2026-08-12T01:00:01Z", "payload": {"type": "agent_message", "message": "正在验证构建顺序"}},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:02Z", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "call-1", "input": "npm test"}},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:03Z", "payload": {"type": "message", "role": "assistant", "phase": "final_answer", "content": [{"type": "output_text", "text": "验证完成"}]}},
+        {"type": "event_msg", "timestamp": "2026-08-12T01:00:03Z", "payload": {"type": "agent_message", "message": "验证完成"}},
     ]
     with rollout_path.open("a", encoding="utf-8") as output:
         for record in records:
@@ -2669,9 +3075,103 @@ def test_thread_timeline_separates_progress_commentary_from_final_replies_and_to
     assert [item["kind"] for item in main_page["items"]][-3:] == ["user", "commentary", "assistant"]
     assert not any(item["kind"].startswith("tool") for item in main_page["items"])
     assert [item["text"] for item in commentary_page["items"]] == ["正在验证构建顺序"]
-    assert commentary_page["items"][0]["label"] == "思考过程"
+    assert commentary_page["items"][0]["label"] == "进度说明"
     assert [item["text"] for item in final_page["items"]] == ["验证完成"]
     assert final_page["items"][-1]["label"] == "最终回复"
+
+
+def test_thread_timeline_automation_filter_includes_automation_context(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
+    with rollout_path.open("a", encoding="utf-8") as output:
+        for text in (
+            "<heartbeat>\n<current_time_iso>2026-08-17T00:00:00Z</current_time_iso>\n<instructions>巡检插件</instructions>",
+            "普通用户输入",
+        ):
+            output.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }, ensure_ascii=False) + "\n")
+
+    page = read_thread_timeline(
+        str(codex_home_path),
+        "thread-1",
+        kind_filter="conversation",
+        source_filter="automation",
+        limit=20,
+    )
+
+    assert [item["text"] for item in page["items"]] == [
+        "<heartbeat>\n<current_time_iso>2026-08-17T00:00:00Z</current_time_iso>\n<instructions>巡检插件</instructions>"
+    ]
+    assert page["items"][0]["kind"] == "context"
+    assert page["items"][0]["promptSourceType"] == "automation"
+
+
+def test_thread_timeline_does_not_mirror_against_adjacent_user_message(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
+    records = [
+        {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "相同文本"}]}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "相同文本"}},
+    ]
+    with rollout_path.open("a", encoding="utf-8") as output:
+        for record in records:
+            output.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    page = read_thread_timeline(str(codex_home_path), "thread-1", kind_filter="conversation", limit=20)
+
+    assert [(item["kind"], item["text"]) for item in page["items"]][-2:] == [
+        ("user", "相同文本"),
+        ("assistant_unclassified", "相同文本"),
+    ]
+
+
+def test_thread_timeline_normalizes_protocol_mirrors_in_one_reverse_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
+    with rollout_path.open("a", encoding="utf-8") as output:
+        for index in range(80):
+            text = f"阶段进度 {index} " + ("x" * 6_000)
+            output.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": text}],
+                },
+            }, ensure_ascii=False) + "\n")
+            output.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": text},
+            }, ensure_ascii=False) + "\n")
+
+    original_reverse_reader = codex_data_module.iter_jsonl_lines_reverse
+    reverse_reader_calls = 0
+
+    def counted_reverse_reader(*args: object, **kwargs: object):
+        nonlocal reverse_reader_calls
+        reverse_reader_calls += 1
+        yield from original_reverse_reader(*args, **kwargs)
+
+    monkeypatch.setattr(codex_data_module, "iter_jsonl_lines_reverse", counted_reverse_reader)
+    page = read_thread_timeline(
+        str(codex_home_path),
+        "thread-1",
+        kind_filter="commentary",
+        limit=200,
+    )
+
+    assert len(page["items"]) == 80
+    assert reverse_reader_calls == 1
 
 
 def test_thread_timeline_preserves_real_repeats_and_deduplicates_across_page_boundary(tmp_path: Path) -> None:
@@ -2707,6 +3207,7 @@ def test_thread_timeline_classifies_runtime_context_and_redacts_attachment_paylo
     rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
     records = [
         {"type": "user_message", "timestamp": "2026-08-12T01:00:00Z", "payload": "legacy prompt"},
+        {"type": "user_message", "timestamp": "2026-08-12T01:00:00Z", "payload": "# Files mentioned by the user:\n\n## secret-file.txt: C:/Temp/secret-file.txt\n\n## My request for Codex:\n请只显示这句正文"},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:01Z", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<recommended_plugins>runtime</recommended_plugins>"}]}},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:02Z", "payload": {"type": "custom_tool_call", "name": "empty_tool", "call_id": "empty-call", "input": ""}},
         {"type": "response_item", "timestamp": "2026-08-12T01:00:03Z", "payload": {"type": "custom_tool_call_output", "call_id": "image-call", "output": '{"image_url":"data:image/png;base64,SECRET"}'}},
@@ -2720,8 +3221,27 @@ def test_thread_timeline_classifies_runtime_context_and_redacts_attachment_paylo
 
     user_page = read_thread_timeline(str(codex_home_path), "thread-1", kind_filter="user", limit=20)
     all_page = read_thread_timeline(str(codex_home_path), "thread-1", kind_filter="all", limit=20)
+    focused_page = read_thread_timeline(
+        str(codex_home_path), "thread-1", kind_filter="user", source_filter="focused", limit=20
+    )
+    pure_page = read_thread_timeline(
+        str(codex_home_path), "thread-1", kind_filter="user", source_filter="pure", limit=20
+    )
 
     assert any(item["text"] == "legacy prompt" for item in user_page["items"])
+    assert any(item["text"] == "请只显示这句正文" for item in focused_page["items"])
+    assert any(item["text"] == "请只显示这句正文" for item in pure_page["items"])
+    assert not any("secret-file.txt" in item["text"] for item in focused_page["items"])
+    assert not any("secret-file.txt" in item["text"] for item in pure_page["items"])
+    raw_attachment = next(item for item in all_page["items"] if item["promptSourceType"] == "attachment")
+    assert "secret-file.txt" in raw_attachment["text"]
+    indexed_pure_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="user", source_filter="pure", search="只显示这句正文", limit=20
+    )
+    assert indexed_pure_page["matches"][0]["text"] == "请只显示这句正文"
+    assert read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="user", source_filter="pure", search="secret-file.txt", limit=20
+    )["matchCount"] == 0
     assert not any("recommended_plugins" in item["text"] for item in user_page["items"])
     runtime_item = next(item for item in all_page["items"] if "recommended_plugins" in item["text"])
     assert runtime_item["kind"] == "context"
@@ -3269,6 +3789,36 @@ def test_move_thread_workspace_moves_files_and_same_cwd_threads(tmp_path: Path) 
     assert str(target_project_path).replace("\\", "\\\\") in config_text
     assert str(source_project_path).replace("\\", "\\\\") not in config_text
     assert result["backup"]["backupId"]
+
+
+def test_move_thread_workspace_uses_bounded_rollout_backup_name(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    source_project_path = tmp_path / "project"
+    target_project_path = tmp_path / "target"
+    source_project_path.mkdir()
+    target_project_path.mkdir()
+    original_rollout = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
+    long_rollout = original_rollout.with_name(f"rollout-{'x' * 100}.jsonl")
+    original_rollout.rename(long_rollout)
+    rollout_bytes_before = long_rollout.read_bytes()
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection, connection:
+        connection.execute("UPDATE threads SET rollout_path = ? WHERE id = ?", (str(long_rollout), "thread-1"))
+
+    result = move_thread_workspace(
+        str(codex_home_path),
+        "thread-1",
+        str(target_project_path),
+        include_same_source_cwd_threads=False,
+        move_workspace_files=False,
+        preserve_pinned=True,
+    )
+
+    assert result["fileMove"]["status"] == "skipped"
+    assert len(result["rolloutBackups"]) == 1
+    backup_path = Path(result["rolloutBackups"][0]["backup"])
+    assert backup_path.name == "thread-1.jsonl"
+    assert backup_path.read_bytes() == rollout_bytes_before
+    assert Path(result["backup"]["rolloutBackupPath"]).name == "rollout.jsonl"
 
 
 @pytest.mark.parametrize(
@@ -5378,7 +5928,7 @@ def test_diagnostics_does_not_treat_heartbeat_permission_as_sidebar_reference(tm
     assert not any(issue["id"] == "threads.explicit_sidebar_without_session_index" for issue in report["issues"])
 
 
-def test_diagnostics_reports_main_thread_missing_event_msg_stream(tmp_path: Path) -> None:
+def test_diagnostics_accepts_modern_response_item_stream_without_legacy_event_mirrors(tmp_path: Path) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
     records = [
@@ -5399,15 +5949,17 @@ def test_diagnostics_reports_main_thread_missing_event_msg_stream(tmp_path: Path
                 "content": [{"type": "output_text", "text": "我会先核对 state_5.sqlite 和 rollout JSONL。"}],
             },
         },
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-modern"}},
+        {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "turn-modern"}},
     ]
     rollout_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
 
     report = run_codex_diagnostics(str(codex_home_path), sidebar_limit=10, language="en")
 
     event_stream_check = next(check for check in report["checks"] if check["id"] == "threads.main_event_stream")
-    assert event_stream_check["status"] == "critical"
-    assert "thread-1" in "\n".join(event_stream_check["evidence"])
-    assert any(issue["id"] == "threads.main_event_stream_missing" for issue in report["issues"])
+    assert event_stream_check["status"] == "pass"
+    assert "empty_or_metadata_only_streams=2" in "\n".join(event_stream_check["evidence"])
+    assert not any(issue["id"] == "threads.main_conversation_stream_missing" for issue in report["issues"])
 
 
 def test_event_stream_gate_never_passes_when_sampling_truncates_hidden_damage(tmp_path: Path) -> None:
@@ -5449,8 +6001,27 @@ def test_event_stream_gate_never_passes_when_sampling_truncates_hidden_damage(tm
     comprehensive_check = next(
         check for check in comprehensive_report["checks"] if check["id"] == "threads.main_event_stream"
     )
-    assert comprehensive_check["status"] == "critical"
+    assert comprehensive_check["status"] == "pass"
     assert "truncated_scans=0" in comprehensive_check["evidence"]
+
+
+def test_diagnostics_does_not_infer_corruption_from_metadata_only_rollout(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-1.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"id": "thread-1", "cwd": str(tmp_path / "project")}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-empty"}},
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-empty"}},
+    ]
+    rollout_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    report = run_codex_diagnostics(str(codex_home_path), sidebar_limit=10, language="en")
+
+    conversation_check = next(check for check in report["checks"] if check["id"] == "threads.main_event_stream")
+    assert conversation_check["status"] == "pass"
+    assert "thread-1" in "\n".join(conversation_check["evidence"])
+    assert "empty_or_metadata_only_streams=3" in "\n".join(conversation_check["evidence"])
+    assert not any(issue["id"] == "threads.main_conversation_stream_missing" for issue in report["issues"])
 
 
 def test_diagnostics_reports_invalid_main_thread_image_url(tmp_path: Path) -> None:
@@ -5592,7 +6163,7 @@ def test_diagnostics_accepts_missing_legacy_title_event_when_persisted_titles_ag
     ]
     rollout_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
     with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
-        connection.execute("UPDATE threads SET title = ? WHERE id = 'thread-1'", ("Codex Home Manager",))
+        connection.execute("UPDATE threads SET name = ? WHERE id = 'thread-1'", ("Codex Home Manager",))
         connection.commit()
     session_index_path = codex_home_path / "session_index.jsonl"
     session_index_records = [
@@ -5614,6 +6185,32 @@ def test_diagnostics_accepts_missing_legacy_title_event_when_persisted_titles_ag
     assert title_stream_check["status"] == "pass"
     assert "thread-1" in "\n".join(title_stream_check["evidence"])
     assert not any(issue["id"] == "threads.main_title_event_missing" for issue in report["issues"])
+
+
+def test_diagnostics_detects_missing_current_name_that_falls_back_to_absolute_path(tmp_path: Path) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    with sqlite3.connect(codex_home_path / "state_5.sqlite") as connection:
+        connection.execute(
+            "UPDATE threads SET title = ?, first_user_message = ?, name = NULL WHERE id = 'thread-1'",
+            (r"D:\CXProject\Inference\handoff.md is the project context", r"D:\CXProject\Inference\handoff.md is the project context"),
+        )
+        connection.commit()
+    session_index_path = codex_home_path / "session_index.jsonl"
+    records = [json.loads(line) for line in session_index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for record in records:
+        if record["id"] == "thread-1":
+            record["thread_name"] = "接手 quant-inference 项目"
+    session_index_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
+
+    report = run_codex_diagnostics(str(codex_home_path), sidebar_limit=10, language="zh")
+
+    check = next(check for check in report["checks"] if check["id"] == "threads.official_name_projection")
+    assert check["status"] == "warning"
+    assert "recoverable_from_session_index=1" in check["evidence"]
+    assert "manual_name_required=2" in check["evidence"]
+    assert "misleading_path_attachment_or_long_fallback=1" in check["evidence"]
+    issue = next(issue for issue in report["issues"] if issue["id"] == "threads.official_name_projection_mismatch")
+    assert "thread-1" in "\n".join(issue["evidence"])
 
 
 def test_diagnostics_rejects_active_legacy_notify_without_historical_os206_log(tmp_path: Path) -> None:
@@ -6624,6 +7221,48 @@ def test_chrome_native_host_scan_accepts_byte_identical_codex_cli_alias(tmp_path
     assert scan["healthyV2Entries"] == scan["v2Entries"] == 2
     assert scan["staleEntries"] == 0
     assert len(scan["equivalentCodexCliAliases"]) == 1
+
+
+def test_chrome_native_host_scan_hashes_repeated_cli_alias_once(tmp_path: Path, monkeypatch) -> None:
+    codex_home_path = tmp_path / "codex_home"
+    codex_home_path.mkdir()
+    appx_root = tmp_path / "current-appx"
+    current_paths = create_complete_native_host_paths(tmp_path / "runtime", appx_root)
+    current_paths["codexHome"] = str(codex_home_path)
+    current_paths["nodeModuleDirs"] = [str(tmp_path / "runtime" / "node_modules")]
+    (tmp_path / "runtime" / "node_modules").mkdir()
+    expected_cli_path = Path(current_paths["codexCliPath"])
+    alias_cli_path = tmp_path / "plugin-appserver" / "codex.exe"
+    alias_cli_path.parent.mkdir()
+    alias_cli_path.write_bytes(expected_cli_path.read_bytes())
+    aliased_paths = {**current_paths, "codexCliPath": str(alias_cli_path)}
+    (codex_home_path / "chrome-native-hosts.json").write_text(
+        json.dumps({"schemaVersion": 1, "chromeNativeHosts": [{key: value for key, value in current_paths.items() if key != "nodeModuleDirs"}]}),
+        encoding="utf-8",
+    )
+    (codex_home_path / "chrome-native-hosts-v2.json").write_text(
+        json.dumps({"schemaVersion": 2, "entries": [{"paths": aliased_paths} for _ in range(4)]}),
+        encoding="utf-8",
+    )
+    original_hash_comparison = diagnostics_module.files_have_same_sha256
+    hash_comparisons = 0
+
+    def count_hash_comparison(left: Path, right: Path) -> bool:
+        nonlocal hash_comparisons
+        hash_comparisons += 1
+        return original_hash_comparison(left, right)
+
+    monkeypatch.setattr(diagnostics_module, "files_have_same_sha256", count_hash_comparison)
+
+    scan = diagnostics_module.scan_chrome_native_host_paths(
+        codex_home_path,
+        current_appx_install=fake_current_codex_appx_install(appx_root),
+        expected_paths=current_paths,
+    )
+
+    assert scan["configurationComplete"] is True
+    assert scan["healthyV2Entries"] == scan["v2Entries"] == 4
+    assert hash_comparisons == 1
 
 
 def test_chrome_native_host_scan_rejects_different_codex_cli_alias(tmp_path: Path) -> None:
@@ -7955,6 +8594,18 @@ def test_capabilities_support_chinese_and_default_english() -> None:
     assert "codex_auth_token" in chinese_payload["safetyModel"]["mcp"]
 
 
+def test_every_preview_bound_rest_write_advertises_its_preview_endpoint() -> None:
+    capabilities = TestClient(server.app).get("/api/capabilities").json()["capabilities"]
+    preview_bound_writes = [
+        capability
+        for capability in capabilities
+        if "operationPreviewId" in capability.get("required", [])
+    ]
+
+    assert preview_bound_writes
+    assert all(capability.get("previewEndpoint") for capability in preview_bound_writes)
+
+
 def test_product_version_is_consistent_across_package_openapi_capabilities_and_mcp() -> None:
     package = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))
     expected_version = package["version"]
@@ -8057,16 +8708,26 @@ def test_mcp_initialize_tools_list_and_read_tool(tmp_path: Path) -> None:
     tools = tools_payload["result"]["tools"]
     tool_names = {tool["name"] for tool in tools}
     assert "codex_snapshot" in tool_names
+    assert "codex_snapshot_summary" in tool_names
+    assert "codex_thread_page" in tool_names
     assert "codex_preview_thread_action" in tool_names
     assert "codex_show_thread" in tool_names
     assert "codex_write_resource" in tool_names
-    assert "codex_preview_move_thread_workspace" in tool_names
-    assert "codex_move_thread_workspace" in tool_names
+    retired_tools = {
+        "codex_duplicate_thread",
+        "codex_preview_migrate_thread",
+        "codex_migrate_thread",
+        "codex_preview_move_thread_workspace",
+        "codex_move_thread_workspace",
+        "codex_preview_rename_project",
+        "codex_rename_project",
+    }
+    assert retired_tools.isdisjoint(tool_names)
     assert "codex_preview_portable_backup_export" in tool_names
     assert "codex_export_portable_backup" in tool_names
     assert "codex_preview_portable_backup_restore" in tool_names
     assert "codex_restore_portable_backup" in tool_names
-    assert len(tools) >= 32
+    assert len(tools) >= 25
     api_token = mcp_local_authorization(client, codex_home_path)
 
     snapshot_payload = mcp_call(
@@ -8082,25 +8743,52 @@ def test_mcp_initialize_tools_list_and_read_tool(tmp_path: Path) -> None:
     assert result["structuredContent"]["summary"]["totalThreads"] == 3
     assert result["content"][0]["type"] == "text"
 
-    move_preview_payload = mcp_call(
+    summary_payload = mcp_call(
+        client,
+        31,
+        "tools/call",
+        {
+            "name": "codex_snapshot_summary",
+            "arguments": {"codexHome": str(codex_home_path), "apiToken": api_token, "sidebarLimit": 50},
+        },
+    )
+    assert summary_payload["result"]["structuredContent"]["summary"]["totalThreads"] == 3
+    assert len(summary_payload["result"]["structuredContent"]["threadHighlights"]) <= 4
+
+    page_payload = mcp_call(
+        client,
+        32,
+        "tools/call",
+        {
+            "name": "codex_thread_page",
+            "arguments": {
+                "codexHome": str(codex_home_path),
+                "apiToken": api_token,
+                "sidebarLimit": 50,
+                "threadKind": "main",
+                "filterMode": "all",
+                "sortMode": "rank",
+                "sortDirection": "asc",
+                "limit": 2,
+            },
+        },
+    )
+    page_result = page_payload["result"]["structuredContent"]
+    assert len(page_result["threads"]) == 2
+    assert page_result["matchedThreads"] == 3
+    assert page_result["nextCursor"]
+
+    retired_tool_payload = mcp_call(
         client,
         4,
         "tools/call",
         {
             "name": "codex_preview_move_thread_workspace",
-            "arguments": {
-                "codexHome": str(codex_home_path),
-                "apiToken": api_token,
-                "threadId": "thread-1",
-                "targetProjectPath": str(tmp_path / "HF"),
-                "moveWorkspaceFiles": False,
-            },
+            "arguments": {"codexHome": str(codex_home_path)},
         },
     )
-    move_preview = move_preview_payload["result"]["structuredContent"]
-    assert move_preview["threadId"] == "thread-1"
-    assert move_preview["matchedThreads"] == 3
-    assert move_preview["operationPreviewId"]
+    assert retired_tool_payload["error"]["code"] == -32602
+    assert "unknown MCP tool" in retired_tool_payload["error"]["message"]
 
 
 def test_mcp_portable_backup_export_and_restore_complete_real_round_trip(tmp_path: Path) -> None:
@@ -8236,6 +8924,42 @@ def test_rest_and_mcp_daily_tokens_include_zero_days(tmp_path: Path) -> None:
     assert mcp_usage["summary"]["rangeDays"] == 3
 
 
+def test_daily_tokens_never_run_full_rollout_analysis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-0.jsonl"
+    append_token_count_event(rollout_path, "2026-06-03T12:00:00Z", 100, 100)
+    codex_data_module.rollout_daily_token_cache.clear()
+
+    def reject_full_rollout_analysis(*args: object, **kwargs: object) -> None:
+        raise AssertionError("daily token reads must use the token-only scanner")
+
+    monkeypatch.setattr(codex_data_module, "parse_rollout_stats", reject_full_rollout_analysis)
+
+    usage = get_thread_daily_token_usage(str(codex_home_path), "thread-0", 10)
+
+    assert usage["summary"]["totalTokens"] == 100
+    assert usage["summary"]["ownTokenEvents"] == 1
+
+
+def test_daily_tokens_reuse_persistent_cache_after_memory_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    codex_home_path = create_test_codex_home(tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    rollout_path = codex_home_path / "sessions" / "rollout-thread-0.jsonl"
+    append_token_count_event(rollout_path, "2026-06-03T12:00:00Z", 100, 100)
+    codex_data_module.rollout_daily_token_cache.clear()
+
+    first_usage = codex_data_module.parse_rollout_daily_token_usage(str(rollout_path))
+    codex_data_module.rollout_daily_token_cache.clear()
+
+    def reject_second_scan(*args: object, **kwargs: object) -> None:
+        raise AssertionError("persistent daily token cache should avoid a second rollout scan")
+
+    monkeypatch.setattr(codex_data_module, "token_count_payload", reject_second_scan)
+    second_usage = codex_data_module.parse_rollout_daily_token_usage(str(rollout_path))
+
+    assert second_usage == first_usage
+
+
 def test_thread_action_preview_uses_single_thread_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     codex_home_path = create_test_codex_home(tmp_path)
     client = TestClient(server.app)
@@ -8279,7 +9003,7 @@ def test_thread_action_preview_uses_single_thread_record(tmp_path: Path, monkeyp
     assert mcp_preview["result"]["structuredContent"]["threadId"] == "thread-0"
 
 
-def test_auth_token_rejects_public_origin_and_allows_only_loopback_same_origin() -> None:
+def test_auth_token_rejects_public_origin_and_allows_local_ui_origins() -> None:
     public_origin = "https://codex-home-manager.simplezion.com"
     intent_headers = {
         "Origin": public_origin,
@@ -8304,6 +9028,13 @@ def test_auth_token_rejects_public_origin_and_allows_only_loopback_same_origin()
     assert local_response.json()["token"] != server.api_token
     assert local_response.json()["expiresAtMs"] is not None
 
+    desktop_response = local_client.get(
+        "/api/auth/token",
+        headers={"Origin": "http://tauri.localhost"},
+    )
+    assert desktop_response.status_code == 200
+    assert desktop_response.headers["Access-Control-Allow-Origin"] == "http://tauri.localhost"
+
     public_mcp_payload = local_client.post(
         "/mcp",
         headers=intent_headers,
@@ -8316,6 +9047,20 @@ def test_auth_token_rejects_public_origin_and_allows_only_loopback_same_origin()
     ).json()
     assert public_mcp_payload["result"]["isError"] is True
     assert public_mcp_payload["result"]["structuredContent"]["status"] == 403
+
+    local_client.cookies.clear()
+    desktop_mcp_without_token = local_client.post(
+        "/mcp",
+        headers={"Origin": "http://tauri.localhost"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "codex_home_overview", "arguments": {}},
+        },
+    ).json()
+    assert desktop_mcp_without_token["result"]["isError"] is True
+    assert desktop_mcp_without_token["result"]["structuredContent"]["status"] == 401
 
 
 def test_loopback_same_origin_reads_are_frictionless_but_cross_origin_reads_stay_protected(tmp_path: Path) -> None:
@@ -8344,6 +9089,36 @@ def test_loopback_same_origin_reads_are_frictionless_but_cross_origin_reads_stay
         headers={"Origin": local_origin},
     )
     assert unauthenticated_response.status_code == 200
+
+    desktop_response = local_client.get(
+        "/api/resources/read",
+        params={"codex_home": str(codex_home_path), "relative_path": "config.toml"},
+        headers={"Origin": "http://tauri.localhost", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert desktop_response.status_code == 200
+
+    local_prompt_cancel = local_client.delete(
+        "/api/threads/test-thread/prompts/requests/not-running",
+        params={"codex_home": str(codex_home_path)},
+        headers={"Origin": local_origin},
+    )
+    assert local_prompt_cancel.status_code == 200
+    assert local_prompt_cancel.json()["cancelled"] is False
+
+    local_analysis_cancel = local_client.post(
+        "/api/threads/test-thread/analysis/cancel",
+        params={"codex_home": str(codex_home_path), "request_id": "not-running"},
+        headers={"Origin": local_origin},
+    )
+    assert local_analysis_cancel.status_code == 200
+    assert local_analysis_cancel.json()["cancelled"] is False
+
+    cross_origin_cancel = local_client.delete(
+        "/api/threads/test-thread/prompts/requests/not-running",
+        params={"codex_home": str(codex_home_path)},
+        headers={"Origin": public_origin},
+    )
+    assert cross_origin_cancel.status_code == 403
 
     cross_site_without_origin = local_client.get(
         "/api/resources/read",

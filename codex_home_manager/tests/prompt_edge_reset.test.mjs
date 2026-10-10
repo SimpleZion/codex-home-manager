@@ -1,0 +1,47 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+
+const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const start = source.indexOf("      onWheel={(event) => {", source.indexOf("function PromptVirtualList("));
+const end = source.indexOf("\n      onScroll=", start);
+assert.ok(start >= 0 && end > start);
+const handler = source.slice(start, end).replace('      onWheel={', '').trim().slice(0, -1);
+const calls = [];
+const context = { userScrolledRef: { current: false }, handleUnderfillWheel: () => {}, isLoadingMore: false,
+  loadingRef: { current: false }, restoringAnchorRef: { current: false }, hasMoreAtStart: true,
+  hasMoreAtEnd: true, loadMore: (edge) => { calls.push(edge); } };
+const wheel = runInNewContext(`(${handler})`, context);
+const event = (top, deltaY) => ({ currentTarget: { scrollHeight: 4000, clientHeight: 400, scrollTop: top }, deltaY });
+wheel(event(0, -100));
+wheel(event(0, -100));
+assert.deepEqual(calls, ['start', 'start']);
+context.loadingRef.current = true;
+wheel(event(0, -100));
+assert.equal(calls.length, 2);
+context.loadingRef.current = false;
+context.restoringAnchorRef.current = true;
+wheel(event(0, -100));
+assert.equal(calls.length, 2);
+context.restoringAnchorRef.current = false;
+wheel(event(500, -100));
+assert.equal(calls.length, 2);
+wheel(event(3600, 100));
+assert.equal(calls.at(-1), 'end');
+assert.equal(context.userScrolledRef.current, true);
+const scrollStart = source.indexOf('      onScroll={(event) => {', start);
+const scrollEnd = source.indexOf('\n    >', scrollStart);
+const scrollHandler = source.slice(scrollStart, scrollEnd).replace('      onScroll={', '').trim().slice(0, -1);
+context.lastScrollTopRef = { current: 20 };
+context.pendingPrependAnchorRef = { current: null };
+const scroll = runInNewContext(`(${scrollHandler})`, context);
+scroll(event(0, 0));
+assert.equal(calls.at(-1), 'start');
+context.lastScrollTopRef.current = 20;
+context.pendingPrependAnchorRef.current = { viewportOffset: 10 };
+context.restoringAnchorRef.current = true;
+const beforeRestore = calls.length;
+scroll(event(0, 0));
+assert.equal(context.pendingPrependAnchorRef.current.viewportOffset, 30);
+assert.equal(calls.length, beforeRestore);
+console.log('repeated boundary gestures work without a distance lock; in-flight/anchor guards remain');

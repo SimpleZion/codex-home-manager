@@ -4,6 +4,7 @@ type ThreadPageLike<T extends { id: string }> = {
   threads: T[];
   hasMore: boolean;
   nextCursor: string | null;
+  catalogVersion?: string;
 };
 
 export async function loadThreadPagesToDepth<T extends { id: string }, P extends ThreadPageLike<T>>(
@@ -14,16 +15,21 @@ export async function loadThreadPagesToDepth<T extends { id: string }, P extends
   const collectedThreads: T[] = [];
   const knownIds = new Set<string>();
   let cursor: string | null = null;
+  let catalogVersion: string | null = null;
   let page: P | null = null;
   do {
     const params = new URLSearchParams(queryString);
-    if (cursor) params.set("cursor", cursor);
+    if (cursor) {
+      params.set("cursor", cursor);
+      if (catalogVersion) params.set("catalog_version", catalogVersion);
+    }
     page = await loadPage(params.toString());
     for (const thread of page.threads) {
       if (knownIds.has(thread.id)) continue;
       knownIds.add(thread.id);
       collectedThreads.push(thread);
     }
+    catalogVersion = page.catalogVersion || catalogVersion;
     cursor = page.hasMore ? page.nextCursor : null;
   } while (cursor && collectedThreads.length < targetThreadCount);
   return { page, threads: collectedThreads };

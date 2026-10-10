@@ -1,7 +1,10 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 export default defineConfig({
+  define: { __COCKPIT_CATALOG_SHA256__: JSON.stringify(createHash("sha256").update(readFileSync(new URL("./packaging/runtime/cockpit-maintenance.json", import.meta.url))).digest("hex")) },
   plugins: [react()],
   build: {
     rollupOptions: {

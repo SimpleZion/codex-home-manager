@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "workspace": {
+    "allowedFiles": [
+      ".gitattributes",
+      ".gitignore",
+      ".source-publication.gitignore",
+      "AGENTS.md",
+      "README.md",
+      "pytest.ini",
+      "ruff.toml"
+    ],
+    "sourceDirectories": [
+      ".agents",
+      ".codex",
+      ".git",
+      "codex_extension_guard",
+      "codex_extension_host_guard_repo",
+      "codex_home_manager",
+      "codex_session_tools",
+      "codex-home-manager-public",
+      "config",
+      "docs",
+      "scripts",
+      "tests",
+      "tools"
+    ],
+    "generatedDirectories": [
+      ".artifacts",
+      ".diagnostics",
+      ".research",
+      ".runtime",
+      ".targeted-temp",
+      ".tmp",
+      ".venv",
+      "artifacts",
+      "build",
+      "logs",
+      "migration-results",
+      "node_modules",
+      "output"
+    ]
+  },
+  "cockpit": {
+    "allowedFiles": [
+      ".gitignore",
+      "CodexHomeManager.cmd",
+      "CONTRIBUTING.md",
+      "index.html",
+      "LICENSE",
+      "package-lock.json",
+      "package.json",
+      "pytest.ini",
+      "README.md",
+      "ruff.toml",
+      "run.ps1",
+      "SECURITY.md",
+      "StopCodexHomeManager.cmd",
+      "tsconfig.json",
+      "vite.config.ts"
+    ],
+    "sourceDirectories": [
+      ".git",
+      ".github",
+      "backend",
+      "data",
+      "docs",
+      "packaging",
+      "public",
+      "scripts",
+      "src",
+      "src-tauri",
+      "tests",
+      "tools"
+    ],
+    "generatedDirectories": [
+      ".artifacts",
+      ".diagnostics",
+      ".research",
+      ".runtime",
+      ".targeted-temp",
+      ".tmp",
+      ".venv",
+      "artifacts",
+      "build",
+      "dist",
+      "node_modules",
+      "output"
+    ]
+  },
+  "artifactStore": {
+    "allowedDirectories": ["b", "cache", "inventory", "retired"],
+    "allowedFiles": []
+  }
+}

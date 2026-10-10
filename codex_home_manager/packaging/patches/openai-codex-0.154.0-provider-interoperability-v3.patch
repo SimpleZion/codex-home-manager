@@ -1,0 +1,462 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a813022..ace199a 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -624,7 +624,7 @@ impl ModelClient {
+             text,
+             ..
+         } = request;
+-        self.prepare_response_items_for_request(&mut input);
++        drop(self.prepare_response_items_for_request(&mut input));
+         let payload = ApiCompactionInput {
+             model: &model,
+             input: &input,
+@@ -665,7 +665,7 @@ impl ModelClient {
+         ) {
+             extra_headers.insert(X_CODEX_ROUTING_HINT_HEADER, header_value);
+         }
+-        add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
++        add_responses_lite_header(&mut extra_headers, self.use_responses_lite(model_info));
+         let compact_request_timeout = client_setup
+             .api_provider
+             .stream_idle_timeout
+@@ -870,6 +870,7 @@ impl ModelClient {
+     fn build_reasoning(
+         &self,
+         model_info: &ModelInfo,
++        use_responses_lite: bool,
+         effort: Option<ReasoningEffortConfig>,
+         summary: ReasoningSummaryConfig,
+     ) -> Reasoning {
+@@ -882,9 +883,7 @@ impl ModelClient {
+                 .then_some(summary),
+             // When Responses Lite is disabled, omit context so Responses uses the default,
+             // which is currently `current_turn`.
+-            context: model_info
+-                .use_responses_lite
+-                .then_some(ReasoningContext::AllTurns),
++            context: use_responses_lite.then_some(ReasoningContext::AllTurns),
+         }
+     }
+ 
+@@ -897,9 +896,10 @@ impl ModelClient {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+     ) -> Result<ResponsesApiRequest> {
+-        let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
++        let use_responses_lite = self.use_responses_lite(model_info);
++        let mut input = prompt.get_formatted_input_for_request(use_responses_lite);
+         let is_openai = self.state.provider.info().is_openai();
+-        let (instructions, tools) = if model_info.use_responses_lite {
++        let (instructions, tools) = if use_responses_lite {
+             // These prompt-only items are rebuilt on every request. Hash their visible payloads
+             // within the thread so retries and resumed sessions preserve their identity.
+             let prefix_namespace = Uuid::new_v5(
+@@ -949,7 +949,7 @@ impl ModelClient {
+                 }
+             }
+         }
+-        let reasoning = self.build_reasoning(model_info, effort, summary);
++        let reasoning = self.build_reasoning(model_info, use_responses_lite, effort, summary);
+         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+             && is_openai
+             && reasoning.summary.is_some())
+@@ -981,7 +981,7 @@ impl ModelClient {
+             input,
+             tools,
+             tool_choice: "auto".to_string(),
+-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
++            parallel_tool_calls: prompt.parallel_tool_calls && !use_responses_lite,
+             reasoning: Some(reasoning),
+             store: false,
+             stream: true,
+@@ -996,15 +996,45 @@ impl ModelClient {
+         Ok(request)
+     }
+ 
+-    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
+-        for item in input {
+-            if item.id().is_some_and(|id| !id.is_prefixed()) {
++    fn prepare_response_items_for_request(
++        &self,
++        input: &mut Vec<ResponseItem>,
++    ) -> Vec<Option<codex_protocol::ResponseItemId>> {
++        let mut original_ids = Vec::with_capacity(input.len());
++        input.retain_mut(|item| {
++            let invalid_id = item.id().is_some_and(|id| {
++                item.id_prefix()
++                    .is_none_or(|expected| !id.is_prefixed_with(expected))
++            });
++            if invalid_id
++                && matches!(
++                    item,
++                    ResponseItem::Reasoning { .. }
++                        | ResponseItem::Compaction { .. }
++                        | ResponseItem::ContextCompaction { .. }
++                )
++            {
++                return false;
++            }
++            original_ids.push(item.id().cloned());
++            if invalid_id {
+                 item.set_id(/*new_id*/ None);
+             }
+             if !self.state.content_item_kinds_enabled {
+                 item.clear_content_item_kinds();
+             }
+-        }
++            true
++        });
++        original_ids
++    }
++
++    /// Responses Lite is an internal OpenAI transport contract. Explicit provider URLs use the
++    /// portable public Responses API unless they carry first-party actor authorization.
++    fn use_responses_lite(&self, model_info: &ModelInfo) -> bool {
++        model_info.use_responses_lite
++            && (self.state.provider.info().is_openai()
++                || self.state.provider.info().uses_openai_actor_authorization()
++                || self.state.provider.info().base_url.is_none())
+     }
+ 
+     /// Returns whether the Responses-over-WebSocket transport is active for this session.
+@@ -1602,7 +1632,7 @@ impl ModelClientSession {
+                 .build_responses_options(
+                     responses_metadata,
+                     compression,
+-                    model_info.use_responses_lite,
++                    self.client.use_responses_lite(model_info),
+                 )
+                 .await;
+ 
+@@ -1638,8 +1668,10 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref(),
+                 prompt.cyber_access_program,
+             );
+-            self.client
+-                .prepare_response_items_for_request(&mut request.input);
++            drop(
++                self.client
++                    .prepare_response_items_for_request(&mut request.input),
++            );
+             let request_session_telemetry =
+                 session_telemetry_for_request(session_telemetry, &request);
+             let inference_trace_attempt = inference_trace.start_attempt();
+@@ -1770,6 +1802,9 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref(),
+                 prompt.cyber_access_program,
+             );
++            let original_item_ids = self
++                .client
++                .prepare_response_items_for_request(&mut request.input);
+             let mut websocket_metadata = responses_metadata.clone();
+             websocket_metadata.routing_hint = if endpoint == ResponsesEndpoint::Responses {
+                 self.client.build_routing_hint_header(
+@@ -1786,9 +1821,10 @@ impl ModelClientSession {
+             } else {
+                 session_telemetry_for_request(session_telemetry, &request)
+             };
+-            let mut client_metadata = self
+-                .client
+-                .build_ws_client_metadata(responses_metadata, model_info.use_responses_lite);
++            let mut client_metadata = self.client.build_ws_client_metadata(
++                responses_metadata,
++                self.client.use_responses_lite(model_info),
++            );
+             if let Some(turn_state) = self.turn_state.get() {
+                 client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
+             }
+@@ -1846,24 +1882,10 @@ impl ModelClientSession {
+                 inference_trace_attempt.record_started(&request);
+             }
+ 
+-            let (previous_response_id, mut incremental_items) = match incremental_request {
++            let (previous_response_id, incremental_items) = match incremental_request {
+                 Some((response_id, items)) => (Some(response_id), Some(items)),
+                 None => (None, None),
+             };
+-            let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
+-                self.client
+-                    .prepare_response_items_for_request(incremental_items);
+-                None
+-            } else {
+-                let original_item_ids = request
+-                    .input
+-                    .iter()
+-                    .map(|item| item.id().cloned())
+-                    .collect::<Vec<_>>();
+-                self.client
+-                    .prepare_response_items_for_request(&mut request.input);
+-                Some(original_item_ids)
+-            };
+             let mut ws_payload = ResponseCreateWsRequest {
+                 previous_response_id,
+                 input: incremental_items.as_deref().unwrap_or(&request.input),
+@@ -1899,10 +1921,8 @@ impl ModelClientSession {
+                     Some(Arc::clone(&self.turn_state)),
+                 )
+                 .await;
+-            if let Some(original_item_ids) = original_item_ids {
+-                for (item, original_item_id) in request.input.iter_mut().zip(original_item_ids) {
+-                    item.set_id(original_item_id);
+-                }
++            for (item, original_item_id) in request.input.iter_mut().zip(original_item_ids) {
++                item.set_id(original_item_id);
+             }
+             self.websocket_session.last_request = Some(request);
+             self.websocket_session.last_response_from_untraced_warmup = warmup;
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index dfe4d6a..03fbda6 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -3164,6 +3164,42 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         }))
+         .expect("response item with an empty id should deserialize"),
+     );
++    prompt.input.push(
++        serde_json::from_value(json!({
++            "type": "reasoning",
++            "id": "item_foreign-reasoning",
++            "summary": [],
++            "encrypted_content": "foreign-ciphertext",
++        }))
++        .expect("foreign reasoning item should deserialize"),
++    );
++    prompt.input.push(
++        serde_json::from_value(json!({
++            "type": "message",
++            "id": "item_foreign-message",
++            "role": "assistant",
++            "content": [{"type": "output_text", "text": "foreign message"}],
++        }))
++        .expect("foreign message item should deserialize"),
++    );
++    prompt.input.push(
++        serde_json::from_value(json!({
++            "type": "function_call",
++            "id": "item_foreign-function",
++            "name": "foreign_tool",
++            "arguments": "{}",
++            "call_id": "foreign-call-id",
++        }))
++        .expect("foreign function call should deserialize"),
++    );
++    prompt.input.push(ResponseItem::FunctionCallOutput {
++        id: None,
++        call_id: Some("foreign-call-id".into()),
++        name: None,
++        namespace: None,
++        output: FunctionCallOutputPayload::from_text("foreign result".into()),
++        internal_chat_message_metadata_passthrough: None,
++    });
+ 
+     let mut stream = client_session
+         .stream(
+@@ -3191,7 +3227,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+ 
+     assert_eq!(body["store"], serde_json::Value::Bool(false));
+     assert_eq!(body["stream"], serde_json::Value::Bool(true));
+-    assert_eq!(body["input"].as_array().map(Vec::len), Some(10));
++    assert_eq!(body["input"].as_array().map(Vec::len), Some(13));
+     assert_eq!(body["input"][0]["id"].as_str(), Some("rs_reasoning-id"));
+     assert_eq!(body["input"][1]["id"].as_str(), Some("msg_message-id"));
+     assert_eq!(body["input"][2]["id"].as_str(), Some("ws_web-search-id"));
+@@ -3208,6 +3244,16 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+     );
+     assert_eq!(body["input"][8].get("id"), None);
+     assert_eq!(body["input"][9].get("id"), None);
++    assert_eq!(body["input"][10].get("id"), None);
++    assert_eq!(body["input"][10]["content"][0]["text"], "foreign message");
++    assert_eq!(body["input"][11].get("id"), None);
++    assert_eq!(body["input"][11]["call_id"], "foreign-call-id");
++    assert_eq!(body["input"][12]["call_id"], "foreign-call-id");
++    assert!(body["input"].as_array().is_some_and(|items| {
++        items
++            .iter()
++            .all(|item| item["id"] != "item_foreign-reasoning")
++    }));
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 3263b9e..37254a6 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -335,7 +335,14 @@ async fn responses_websocket_omits_unprefixed_item_ids_without_mutating_prompt()
+         "content": [{"type": "input_text", "text": "empty-id message"}],
+     }))
+     .expect("response item with an empty id should deserialize");
+-    let prompt = prompt_with_input(vec![prefixed, unprefixed, empty]);
++    let foreign_reasoning = serde_json::from_value(json!({
++        "type": "reasoning",
++        "id": "item_foreign-reasoning",
++        "summary": [],
++        "encrypted_content": "foreign-ciphertext",
++    }))
++    .expect("foreign reasoning item should deserialize");
++    let prompt = prompt_with_input(vec![prefixed, unprefixed, empty, foreign_reasoning]);
+ 
+     stream_until_complete(&mut client_session, &harness, &prompt).await;
+ 
+@@ -345,11 +352,20 @@ async fn responses_websocket_omits_unprefixed_item_ids_without_mutating_prompt()
+     assert_eq!(body["input"][0]["id"].as_str(), Some("msg_existing"));
+     assert_eq!(body["input"][1].get("id"), None);
+     assert_eq!(body["input"][2].get("id"), None);
++    assert!(body["input"].as_array().is_some_and(|items| {
++        items
++            .iter()
++            .all(|item| item["id"] != "item_foreign-reasoning")
++    }));
+     assert_eq!(
+         serde_json::to_value(&prompt.input).expect("prompt input should serialize")[1]["id"]
+             .as_str(),
+         Some("018f9e15-7a6a-7000-8000-000000000001")
+     );
++    assert_eq!(
++        serde_json::to_value(&prompt.input).expect("prompt input should serialize")[3]["id"],
++        "item_foreign-reasoning"
++    );
+ 
+     server.shutdown().await;
+ }
+@@ -420,7 +436,7 @@ async fn responses_websocket_reuses_connection_with_per_turn_trace_payloads() {
+     ]])
+     .await;
+ 
+-    let harness = websocket_harness(&server).await;
++    let harness = websocket_harness_for_codex_backend(&server).await;
+     let prompt_one = prompt_with_input(vec![message_item("hello")]);
+     let prompt_two = prompt_with_input(vec![message_item("again")]);
+ 
+diff --git a/codex-rs/core/tests/suite/responses_lite.rs b/codex-rs/core/tests/suite/responses_lite.rs
+index 734104e..fc5b90f 100644
+--- a/codex-rs/core/tests/suite/responses_lite.rs
++++ b/codex-rs/core/tests/suite/responses_lite.rs
+@@ -409,8 +409,8 @@ async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider()
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn responses_lite_exposes_standalone_web_search_for_opted_in_custom_provider() -> Result<()> {
+-    assert_responses_lite_custom_provider_web_search(
++async fn explicit_custom_provider_exposes_standalone_web_search_when_opted_in() -> Result<()> {
++    assert_explicit_custom_provider_web_search(
+         WebSearchMode::Live,
+         /*supports_standalone_web_search*/ true,
+         /*expect_web_run*/ true,
+@@ -419,9 +419,8 @@ async fn responses_lite_exposes_standalone_web_search_for_opted_in_custom_provid
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn responses_lite_does_not_expose_standalone_web_search_for_custom_provider_by_default()
+--> Result<()> {
+-    assert_responses_lite_custom_provider_web_search(
++async fn explicit_custom_provider_does_not_expose_standalone_web_search_by_default() -> Result<()> {
++    assert_explicit_custom_provider_web_search(
+         WebSearchMode::Live,
+         /*supports_standalone_web_search*/ false,
+         /*expect_web_run*/ false,
+@@ -430,9 +429,8 @@ async fn responses_lite_does_not_expose_standalone_web_search_for_custom_provide
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn responses_lite_does_not_expose_disabled_standalone_web_search_for_opted_in_provider()
+--> Result<()> {
+-    assert_responses_lite_custom_provider_web_search(
++async fn explicit_custom_provider_does_not_expose_disabled_standalone_web_search() -> Result<()> {
++    assert_explicit_custom_provider_web_search(
+         WebSearchMode::Disabled,
+         /*supports_standalone_web_search*/ true,
+         /*expect_web_run*/ false,
+@@ -441,7 +439,8 @@ async fn responses_lite_does_not_expose_disabled_standalone_web_search_for_opted
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn responses_lite_does_not_expose_standalone_web_search_for_bedrock_provider() -> Result<()> {
++async fn explicit_bedrock_provider_uses_portable_tools_without_standalone_web_search() -> Result<()>
++{
+     skip_if_no_network!(Ok(()));
+ 
+     let server = responses::start_mock_server().await;
+@@ -477,21 +476,19 @@ async fn responses_lite_does_not_expose_standalone_web_search_for_bedrock_provid
+     test.submit_turn("Use standalone web search").await?;
+ 
+     let request = response_mock.single_request();
+-    assert_eq!(
+-        request.header(RESPONSES_LITE_HEADER).as_deref(),
+-        Some("true")
+-    );
++    assert_eq!(request.header(RESPONSES_LITE_HEADER).as_deref(), None);
+     let body = request.body_json();
+-    assert!(body.get("tools").is_none());
+-    assert!(!request.has_content_kinds(&["model.base_instructions"]));
+-    let tools = additional_tools(&body)?;
+-    assert!(!has_namespaced_tool(tools, "web", "run"));
++    let tools = body["tools"]
++        .as_array()
++        .context("explicit Bedrock provider should use portable top-level tools")?;
++    assert_ne!(body["input"][0]["type"], "additional_tools");
++    assert!(request.tool_by_name("web", "run").is_none());
+     assert!(!has_hosted_tool(tools, "web_search"));
+ 
+     Ok(())
+ }
+ 
+-async fn assert_responses_lite_custom_provider_web_search(
++async fn assert_explicit_custom_provider_web_search(
+     web_search_mode: WebSearchMode,
+     supports_standalone_web_search: bool,
+     expect_web_run: bool,
+@@ -529,14 +526,13 @@ async fn assert_responses_lite_custom_provider_web_search(
+     test.submit_turn("Use standalone web search").await?;
+ 
+     let request = response_mock.single_request();
+-    assert_eq!(
+-        request.header(RESPONSES_LITE_HEADER).as_deref(),
+-        Some("true")
+-    );
++    assert_eq!(request.header(RESPONSES_LITE_HEADER).as_deref(), None);
+     let body = request.body_json();
+-    assert!(body.get("tools").is_none());
+-    let tools = additional_tools(&body)?;
+-    assert_eq!(has_namespaced_tool(tools, "web", "run"), expect_web_run);
++    let tools = body["tools"]
++        .as_array()
++        .context("explicit custom provider should use portable top-level tools")?;
++    assert_ne!(body["input"][0]["type"], "additional_tools");
++    assert_eq!(request.tool_by_name("web", "run").is_some(), expect_web_run);
+     assert!(!has_hosted_tool(tools, "web_search"));
+ 
+     Ok(())
+diff --git a/codex-rs/protocol/src/response_item_id.rs b/codex-rs/protocol/src/response_item_id.rs
+index 9aa66b7..d088e3d 100644
+--- a/codex-rs/protocol/src/response_item_id.rs
++++ b/codex-rs/protocol/src/response_item_id.rs
+@@ -37,6 +37,11 @@ impl ResponseItemId {
+         self.split_once('_')
+             .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
+     }
++
++    pub fn is_prefixed_with(&self, expected_prefix: &str) -> bool {
++        self.split_once('_')
++            .is_some_and(|(prefix, suffix)| prefix == expected_prefix && !suffix.is_empty())
++    }
+ }
+ 
+ impl Deref for ResponseItemId {
+diff --git a/codex-rs/protocol/src/response_item_id_tests.rs b/codex-rs/protocol/src/response_item_id_tests.rs
+index 40c8349..f7e752b 100644
+--- a/codex-rs/protocol/src/response_item_id_tests.rs
++++ b/codex-rs/protocol/src/response_item_id_tests.rs
+@@ -51,3 +51,12 @@ fn recognizes_non_empty_prefix_and_suffix() {
+         assert_eq!(id.is_prefixed(), expected, "{value}");
+     }
+ }
++
++#[test]
++fn requires_the_expected_item_type_prefix() {
++    let id = ResponseItemId::from_server("item_foreign".to_string());
++    assert!(id.is_prefixed());
++    assert!(!id.is_prefixed_with("rs"));
++    assert!(!id.is_prefixed_with("msg"));
++    assert!(ResponseItemId::with_suffix("rs", "reasoning").is_prefixed_with("rs"));
++}

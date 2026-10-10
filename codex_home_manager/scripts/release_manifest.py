@@ -30,7 +30,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 import psutil
 
 
-release_signing_directory = Path(r"D:\Backup\codex_home_manager\release-signing")
+release_signing_directory = Path(__file__).resolve().parents[2] / ".codex" / "release-signing"
 local_artifact_names = (
     "codex-home-manager-local-win-x64.exe",
     "codex-home-manager-local-win-x64.zip",
@@ -41,14 +41,14 @@ release_manifest_name = "release-manifest.json"
 release_signature_name = "release-manifest.json.sig"
 release_public_key_name = "release-signing-public-key.pem"
 release_fingerprint_name = "release-signing-public-key.sha256"
-embedded_release_public_key_fingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
+embedded_release_public_key_fingerprint = "sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f"
 github_metadata_names = (
     release_manifest_name,
     release_signature_name,
     release_public_key_name,
     release_fingerprint_name,
 )
-public_dist_root_names = frozenset({"favicon.svg", "index.html"})
+public_dist_root_names = frozenset({"cockpit-icon.png", "favicon.svg", "index.html", "frontend-release-manifest.json"})
 public_dist_asset_suffixes = frozenset({".css", ".js", ".wasm"})
 source_evidence_public_names = (
     "codex-home-manager-source.zip",
@@ -779,6 +779,21 @@ def generate_key_pair(
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ),
     )
+
+
+def export_existing_public_key(
+    private_key_path: Path,
+    public_key_path: Path,
+    trusted_public_key_fingerprint_path: Path,
+) -> None:
+    private_key = load_private_key(private_key_path)
+    trusted_fingerprint = load_trusted_public_key_fingerprint(trusted_public_key_fingerprint_path)
+    public_key = private_key.public_key()
+    assert_public_key_matches_trust(public_key, trusted_fingerprint)
+    write_bytes(public_key_path, public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
 
 
 def capture_build_source_state(output_path: Path, *, root_repository: Path, manager_repository: Path) -> None:
@@ -2924,10 +2939,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create and verify signed Codex Home Manager release manifests.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    keygen = subparsers.add_parser("keygen")
-    keygen.add_argument("--private-key", required=True, type=path_argument)
-    keygen.add_argument("--public-key", required=True, type=path_argument)
-    keygen.add_argument("--trusted-public-key-fingerprint", required=True, type=path_argument)
+    for command in ("keygen", "export-public-key"):
+        key_arguments = subparsers.add_parser(command)
+        key_arguments.add_argument("--private-key", required=True, type=path_argument)
+        key_arguments.add_argument("--public-key", required=True, type=path_argument)
+        key_arguments.add_argument("--trusted-public-key-fingerprint", required=True, type=path_argument)
 
     build_capture = subparsers.add_parser("capture-build-source")
     build_capture.add_argument("--output", required=True, type=path_argument)
@@ -3043,6 +3059,8 @@ def main(arguments: list[str] | None = None) -> int:
     try:
         if parsed.command == "keygen":
             generate_key_pair(parsed.private_key, parsed.public_key, parsed.trusted_public_key_fingerprint)
+        elif parsed.command == "export-public-key":
+            export_existing_public_key(parsed.private_key, parsed.public_key, parsed.trusted_public_key_fingerprint)
         elif parsed.command == "capture-build-source":
             capture_build_source_state(parsed.output, root_repository=parsed.root_repo, manager_repository=parsed.manager_repo)
         elif parsed.command == "capture-artifact-public-source":

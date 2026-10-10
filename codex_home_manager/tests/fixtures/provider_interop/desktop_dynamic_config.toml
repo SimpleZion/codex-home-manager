@@ -1,0 +1,31 @@
+model = "gpt-5.6"
+model_provider = "custom"
+notify = ["C:/runtime/codex-computer-use.exe", "turn-ended"]
+
+[model_providers.custom]
+name = "Proxy"
+base_url = "https://proxy.example.invalid/v1"
+experimental_bearer_token = "fixture-secret-token"
+
+[plugins.chrome]
+enabled = true
+
+[plugin_marketplaces.openai-bundled]
+source = "bundled"
+
+[mcp_servers.node_repl]
+command = "C:/WindowsApps/runtime/node_repl.exe"
+
+[mcp_servers.node_repl.env]
+SKY_CUA_NATIVE_PIPE = "fixture-pipe"
+
+[mcp_servers.credential_tool]
+url = "https://tool.example.invalid/mcp"
+authorization = "Bearer fixture-secret-mcp"
+
+[mcp_servers.stable_tool]
+command = "stable-tool.exe"
+args = ["serve", "--new"]
+
+[unrecognized_section]
+value = "do-not-copy"

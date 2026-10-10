@@ -1,0 +1,9 @@
+[plugins.sites]
+enabled = true
+
+[plugin_marketplaces.openai-bundled]
+source = "bundled"
+
+[mcp_servers.stable_tool]
+command = "stable-tool.exe"
+args = ["serve"]

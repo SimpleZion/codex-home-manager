@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+from PIL import Image
+import pytest
 
 from scripts import release_manifest
 
@@ -12,6 +17,11 @@ requirements_path = manager_root / "packaging" / "windows" / "requirements-conne
 package_script_path = manager_root / "scripts" / "package-local-connector.ps1"
 version_info_path = manager_root / "packaging" / "windows" / "version_info.txt"
 finalize_script_path = manager_root / "scripts" / "finalize-release-manifest.ps1"
+desktop_prepare_script_path = manager_root / "scripts" / "prepare-desktop-sidecar.ps1"
+tauri_config_path = manager_root / "src-tauri" / "tauri.conf.json"
+frontend_artifact_script_path = manager_root / "scripts" / "frontend-release-artifact.mjs"
+windows_icon_path = manager_root / "packaging" / "windows" / "assets" / "codex-home-manager.ico"
+tauri_icon_path = manager_root / "src-tauri" / "icons" / "icon.ico"
 
 
 def requirement_blocks(text: str) -> list[str]:
@@ -46,6 +56,135 @@ def test_packaging_installs_only_hashed_binary_requirements() -> None:
     assert "--require-hashes" in script
     assert "--only-binary=:all:" in script
     assert "pip install --upgrade pip" not in script
+
+
+def test_provider_interoperability_skill_is_bundled_in_every_windows_runtime() -> None:
+    connector_script = package_script_path.read_text(encoding="utf-8")
+    desktop_script = desktop_prepare_script_path.read_text(encoding="utf-8")
+    tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
+    skill_root = manager_root / "packaging" / "skills" / "codex-provider-interoperability"
+
+    assert (skill_root / "SKILL.md").is_file()
+    assert (skill_root / "agents" / "openai.yaml").is_file()
+    assert (skill_root / "references" / "compatibility-contract.md").is_file()
+    assert connector_script.count('--add-data "$skillsSourceRoot;packaging/skills"') == 2
+    assert desktop_script.count('"--add-data", "$skillsSourceRoot;packaging/skills"') == 1
+    assert "providerInteropSkillMarker" in desktop_script
+    assert tauri_config["bundle"]["resources"]["resources/skills/"] == "skills/"
+
+
+def test_desktop_and_legacy_runtime_share_one_verified_frontend_artifact() -> None:
+    desktop_script = desktop_prepare_script_path.read_text(encoding="utf-8")
+    artifact_script = frontend_artifact_script_path.read_text(encoding="utf-8")
+    tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
+
+    assert "frontend-release-artifact.mjs" in desktop_script
+    assert "build\\frontend-release" in desktop_script
+    assert tauri_config["build"]["frontendDist"] == "../build/frontend-release"
+    assert tauri_config["build"]["beforeBuildCommand"] == "node scripts/frontend-release-artifact.mjs verify"
+    assert tauri_config["bundle"]["resources"]["resources/web/"] == "web/"
+    assert "$frontendResourceRoot" in desktop_script
+    assert 'Copy-Item -Path (Join-Path $frontendDist "*")' in desktop_script
+    assert '$buildRoot = [System.IO.Path]::GetFullPath($env:CODEX_HOME_MANAGER_BUILD_ROOT)' in desktop_script
+    assert 'Join-Path $buildParent $buildIdentifier' not in desktop_script
+    assert desktop_script.index('New-Item -ItemType Directory -Force -Path $buildRoot') < desktop_script.index(
+        'Move-Item -LiteralPath $frontendResourceRoot'
+    )
+    assert 'mode === "stage"' in artifact_script
+    assert 'mode === "verify"' in artifact_script
+    assert "sourceDigest" in artifact_script
+    assert "artifactDigest" in artifact_script
+
+
+def test_prepared_resources_resume_rejects_changed_source_resource_and_run() -> None:
+    powershell = shutil.which("pwsh")
+    if not powershell:
+        pytest.skip("PowerShell is required to execute the packaging receipt check")
+    command = r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Packaging script parse failed' }
+$definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-PreparedResourceReceipt' }, $false)
+if (-not $definition) { throw 'Receipt validator is missing' }
+. ([scriptblock]::Create($definition.Extent.Text))
+$valid = @{schemaVersion=1; stage='resources-prepared'; productName='Codex Cockpit'; version='1.0.34'; runRoot='D:\fixture'; sourceFingerprint=('a'*64); resourcesFingerprint=('b'*64); preparedAt='2026-10-10T00:00:00Z'}
+Assert-PreparedResourceReceipt -Receipt ([pscustomobject]$valid) -Version '1.0.34' -RunRoot 'D:\fixture' -SourceFingerprint ('a'*64) -ResourcesFingerprint ('b'*64)
+foreach ($key in $valid.Keys) {
+    $changed = $valid.Clone(); $changed[$key] = 'invalid'
+    $rejected = $false
+    try { Assert-PreparedResourceReceipt -Receipt ([pscustomobject]$changed) -Version '1.0.34' -RunRoot 'D:\fixture' -SourceFingerprint ('a'*64) -ResourcesFingerprint ('b'*64) } catch { $rejected = $true }
+    if (-not $rejected) { throw "Receipt accepted changed $key" }
+}
+Write-Output 'prepared-resource-receipt: passed'
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-Command", "& {" + command + "} '" + str(manager_root / "scripts" / "package-desktop.ps1") + "'"],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "prepared-resource-receipt: passed" in result.stdout
+
+
+def test_windows_desktop_uses_one_antialiased_multiresolution_icon() -> None:
+    tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
+    desktop_lib = (manager_root / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    cargo_manifest = (manager_root / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+    required_sizes = {
+        (16, 16), (20, 20), (24, 24), (30, 30), (32, 32), (36, 36), (40, 40),
+        (48, 48), (60, 60), (64, 64), (72, 72), (80, 80), (96, 96), (128, 128), (256, 256),
+    }
+
+    assert tauri_config["bundle"]["icon"] == ["icons/icon.ico"]
+    assert 'tauri::include_image!("./icons/icon.ico")' in desktop_lib
+    assert "window.set_icon(APP_ICON.clone())?" in desktop_lib
+    assert 'features = ["image-ico"]' in cargo_manifest
+    assert windows_icon_path.read_bytes() == tauri_icon_path.read_bytes()
+    with Image.open(windows_icon_path) as icon:
+        assert required_sizes.issubset(icon.ico.sizes())
+        taskbar_icon = icon.ico.getimage((32, 32)).convert("RGBA")
+        foreground_pixels = [
+            (x, y)
+            for y in range(taskbar_icon.height)
+            for x in range(taskbar_icon.width)
+            if min(taskbar_icon.getpixel((x, y))[:3]) >= 150
+            and taskbar_icon.getpixel((x, y))[0] > taskbar_icon.getpixel((x, y))[1] * 0.93
+            and taskbar_icon.getpixel((x, y))[3] >= 220
+            and 3 <= x < 29 and 3 <= y < 29
+        ]
+        foreground_bounds = (
+            min(x for x, _ in foreground_pixels), min(y for _, y in foreground_pixels),
+            max(x for x, _ in foreground_pixels), max(y for _, y in foreground_pixels),
+        )
+        assert foreground_bounds[2] - foreground_bounds[0] + 1 >= 19
+        assert foreground_bounds[3] - foreground_bounds[1] + 1 >= 18
+
+
+def test_provider_interoperability_skill_keeps_external_doctors_read_only_and_non_authoritative() -> None:
+    skill_root = manager_root / "packaging" / "skills" / "codex-provider-interoperability"
+    skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    contract_text = (skill_root / "references" / "compatibility-contract.md").read_text(encoding="utf-8")
+
+    assert "source path, size, modification time, and SHA-256 are unchanged" in skill_text
+    assert "not proof of corruption" in skill_text
+    assert "Never run an external salvage" in skill_text
+    assert "not runtime compatibility authorities" in contract_text
+    assert "cannot validate the `item_...` versus `rs_...` failure" in contract_text
+    assert "cannot validate post-compaction tool availability" in contract_text
+    assert "Never run salvage" in contract_text
+
+
+def test_runtime_compatibility_catalog_is_bundled_in_every_windows_runtime() -> None:
+    connector_script = package_script_path.read_text(encoding="utf-8")
+    desktop_script = desktop_prepare_script_path.read_text(encoding="utf-8")
+    tauri_config = json.loads(tauri_config_path.read_text(encoding="utf-8"))
+    catalog = manager_root / "packaging" / "runtime" / "provider-interop-runtime-0.148.0-alpha.9-p2.json"
+
+    assert catalog.is_file()
+    assert connector_script.count('--add-data "$runtimeCatalogSourceRoot;packaging/runtime"') == 2
+    assert desktop_script.count('"--add-data", "$runtimeCatalogSourceRoot;packaging/runtime"') == 1
+    assert "runtimeCatalogMarker" in desktop_script
+    assert tauri_config["bundle"]["resources"]["resources/runtime/"] == "runtime/"
 
 
 def test_packaging_uses_content_addressed_artifacts_and_stable_latest_redirects() -> None:

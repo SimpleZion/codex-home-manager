@@ -20,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import diagnostics as diagnostics_module
+from .maintenance import router as maintenance_router
+from .api_contracts import preview_endpoints_by_capability
 from .codex_data import (
     archive_thread,
     backup_manifest_path,
@@ -55,6 +57,7 @@ from .codex_data import (
     preview_slim_thread,
     read_codex_resource,
     read_thread_prompts,
+    read_thread_prompt_context,
     read_thread_prompt_page,
     read_thread_logs,
     read_thread_timeline,
@@ -77,6 +80,7 @@ from .codex_data import (
 )
 from .diagnostics import clear_diagnostics_runtime_caches, run_codex_diagnostics
 from .mcp_server import prompt_index_mcp_tool_definitions
+from .mcp_snapshot import execute_snapshot_mcp_tool, snapshot_mcp_tool_definitions
 from .models import (
     PromptIndexClearPreviewResponse,
     PromptIndexClearRequest,
@@ -93,10 +97,21 @@ from .prompt_index import (
     prompt_index_database_path,
     prompt_index_status,
 )
+from .provider_interop import ProviderInteropError, ProviderInteropService
+from .provider_interop.api import (
+    ProviderInteropApplyRequest,
+    ProviderInteropRequest,
+    ProviderInteropRollbackRequest,
+    ProviderInteropTaskApplyRequest,
+    ProviderInteropTaskRequest,
+    repair_ticket_payload,
+    rollback_ticket_payload,
+    task_repair_ticket_payload,
+)
+from .provider_interop.mcp import provider_interop_mcp_tool_definitions
 
 
-packaged_product_version = "1.0.11"
-
+packaged_product_version = "1.0.34"
 
 def load_product_version() -> str:
     package_path = Path(__file__).resolve().parents[1] / "package.json"
@@ -106,12 +121,32 @@ def load_product_version() -> str:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         version = os.environ.get("CODEX_HOME_MANAGER_VERSION") or packaged_product_version
     if not isinstance(version, str) or not version.strip():
-        raise RuntimeError("Codex Home Manager version is unavailable from package.json")
+        raise RuntimeError("Codex Cockpit version is unavailable from package.json")
     return version.strip()
 
-
 product_version = load_product_version()
-app = FastAPI(title="Codex Home Manager", version=product_version)
+app = FastAPI(title="Codex Cockpit", version=product_version)
+app.include_router(maintenance_router)
+provider_interop_service: ProviderInteropService | None = None
+
+def get_provider_interop_service() -> ProviderInteropService:
+    global provider_interop_service
+    if provider_interop_service is None:
+        provider_interop_service = ProviderInteropService()
+    return provider_interop_service
+
+
+def provider_interop_http_error(error: ProviderInteropError) -> HTTPException:
+    conflict_codes = {
+        "state_changed_since_preview",
+        "offline_processes_running",
+        "unsupported_adapter_schema",
+        "codex_home_mismatch",
+    }
+    status_code = 409 if error.code in conflict_codes else 400
+    if error.code.startswith("native_worker_"):
+        status_code = 503
+    return HTTPException(status_code=status_code, detail=error.public_record())
 
 
 def prompt_request_scope_key(codex_home: str | None) -> str:
@@ -132,6 +167,8 @@ loopback_app_origins = {
     "http://localhost:8765",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
 }
 allowed_cors_origins = {
     *loopback_app_origins,
@@ -467,6 +504,7 @@ class HealthResponse(BaseModel):
     threadCount: int | None
     version: dict[str, Any]
     currentVersions: dict[str, Any]
+    paginationPatch: dict[str, Any]
     codexProcesses: list[dict[str, Any]]
     writeWarnings: list[str]
 
@@ -656,6 +694,7 @@ class ThreadTimelineResponse(BaseModel):
     nextBeforeByte: int | None = None
     limit: int
     kind: str
+    sourceFilter: str = "all"
     search: str
     hasMore: bool
     scannedRecords: int
@@ -743,6 +782,7 @@ class PromptRecord(BaseModel):
     text: str
     characterCount: int
     byteOffset: int | None = None
+    ordinalExact: bool | None = None
     protocol: str | None = None
     sourceType: str | None = None
     sourceLabel: str | None = None
@@ -791,12 +831,28 @@ class ThreadPromptPageResponse(BaseModel):
     index: dict[str, Any]
 
 
+class ThreadPromptContextResponse(BaseModel):
+    threadId: str
+    title: str | None = None
+    rolloutPath: str
+    scope: str
+    search: str
+    sourceType: str | None = None
+    anchorIndex: int
+    anchorOffset: int
+    hasEarlier: bool
+    hasLater: bool
+    prompts: list[PromptRecord]
+    index: dict[str, Any]
+
+
 class ThreadTimelineSearchPageResponse(BaseModel):
     threadId: str
     title: str | None = None
     rolloutPath: str
     requestId: str
     kind: str
+    sourceFilter: str = "all"
     search: str
     matchCount: int
     matchCountComplete: bool
@@ -938,7 +994,11 @@ def authorize_browser_write_origin(request: Request) -> None:
         return
     request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
     request_hostname = (request.url.hostname or "").casefold()
-    if request_hostname not in {"127.0.0.1", "localhost", "::1"} or origin.rstrip("/") != request_origin:
+    normalized_origin = origin.rstrip("/")
+    desktop_origin = normalized_origin in {"http://tauri.localhost", "https://tauri.localhost"}
+    if request_hostname not in {"127.0.0.1", "localhost", "::1"} or (
+        normalized_origin != request_origin and not desktop_origin
+    ):
         raise HTTPException(
             status_code=403,
             detail="browser write authorization is available only to the loopback same-origin local UI",
@@ -1000,27 +1060,42 @@ def authorize_local_data_request(request: Request, codex_home: str | None, token
         raise HTTPException(status_code=403, detail="authorization is not valid for the requested Codex Home")
 
 
-def is_safe_loopback_read(request: Request) -> bool:
-    if request.method not in {"GET", "HEAD"}:
-        return False
+def is_safe_loopback_origin(request: Request) -> bool:
     request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
     request_hostname = (request.url.hostname or "").casefold()
     if request_hostname not in {"127.0.0.1", "localhost", "::1"}:
         return False
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != request_origin:
+    normalized_origin = origin.rstrip("/") if origin else ""
+    if normalized_origin in {"http://tauri.localhost", "https://tauri.localhost"}:
+        return True
+    if normalized_origin and normalized_origin != request_origin:
         return False
     fetch_site = request.headers.get("sec-fetch-site", "").casefold()
     return fetch_site in {"", "none", "same-origin"}
 
 
+def is_safe_loopback_read(request: Request) -> bool:
+    return request.method in {"GET", "HEAD"} and is_safe_loopback_origin(request)
+
+def is_safe_loopback_runtime_cancellation(request: Request) -> bool:
+    if request.method not in {"DELETE", "POST"} or not is_safe_loopback_origin(request):
+        return False
+    path = request.url.path
+    if not path.startswith("/api/threads/"):
+        return False
+    if request.method == "DELETE":
+        return "/prompts/requests/" in path or "/timeline/search/requests/" in path
+    return path.endswith("/analysis/cancel")
+
 @app.middleware("http")
 async def authorize_browser_api_reads(request: Request, call_next):
     if (
         request.url.path.startswith("/api/")
-        and request.url.path not in {"/api/auth/token", "/api/capabilities"}
+        and request.url.path not in {"/api/auth/token", "/api/capabilities", "/api/desktop/shutdown"}
         and request.method != "OPTIONS"
         and not is_safe_loopback_read(request)
+        and not is_safe_loopback_runtime_cancellation(request)
     ):
         try:
             authorize_local_data_request(request, request.query_params.get("codex_home"))
@@ -1671,7 +1746,7 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
                 else None
             ),
             "riskLevel": risk_level or ("write" if is_write else "read"),
-            "previewEndpoint": preview_endpoint,
+            "previewEndpoint": preview_endpoint or preview_endpoints_by_capability.get(name),
             "writeEndpoint": write_endpoint or (path if is_write else None),
             "idempotency": localize_text(idempotency_text),
             "rollbackMode": localize_text(rollback_mode_text) if rollback_mode_text else None,
@@ -1760,6 +1835,7 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("daily_token_usage", "GET", "/api/threads/{thread_id}/daily-tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", ["thread_id"], "read-only", success_fields=["summary", "days"]),
             item("read_thread_prompts", "GET", "/api/threads/{thread_id}/prompts", "Compatibility endpoint that returns a bounded page of classified user-role records. Use /prompts/page for filtering, cancellation and continued pagination.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "title", "rolloutPath", "promptCount", "prompts", "nextCursor", "hasMore", "index"]),
             item("read_thread_prompt_page", "GET", "/api/threads/{thread_id}/prompts/page", "Incrementally index and page classified prompts with an opaque cursor, server-side search, source/scope filters, bounded cold-scan work and explicit completeness metadata.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "prompts", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
+            item("read_thread_prompt_context", "GET", "/api/threads/{thread_id}/prompts/context", "Read a bounded chronological window around one indexed prompt so search navigation can retain surrounding nonmatching content.", ["thread_id", "anchorIndex"], "read-only persistent cache", success_fields=["threadId", "anchorIndex", "anchorOffset", "prompts", "hasEarlier", "hasLater", "index"]),
             item("search_thread_timeline", "GET", "/api/threads/{thread_id}/timeline/search/page", "Incrementally index and search the complete natural-language conversation: user input, progress commentary, and final replies. Reasoning, tools, and context remain available through byte-cursor timeline search without entering the persistent full-text index.", ["thread_id"], "read-only persistent cache", success_fields=["threadId", "requestId", "matches", "nextCursor", "hasMore", "matchCount", "matchCountComplete", "index"]),
             item("cancel_thread_timeline_search", "DELETE", "/api/threads/{thread_id}/timeline/search/requests/{request_id}", "Cancel an active full-timeline indexing or search request.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
             item("cancel_thread_prompt_request", "DELETE", "/api/threads/{thread_id}/prompts/requests/{request_id}", "Cancel an active prompt indexing or streaming request at the next JSONL record or SQLite fetch boundary.", ["thread_id", "request_id"], "runtime cancellation only", success_fields=["threadId", "requestId", "cancelled"]),
@@ -1769,21 +1845,14 @@ def capabilities(lang: str = Query(default="en")) -> dict[str, Any]:
             item("clear_prompt_index", "POST", "/api/prompt-index/clear", "Clear the disposable prompt index for one Codex Home without modifying source rollouts. No cache backup is created because that would retain another copy of indexed prompt text.", ["X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "no backup; the disposable index is rebuilt from source rollouts", {"operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["cleared", "databaseExisted", "deletedFileCount", "reclaimedBytes"], risk_level="write", preview_endpoint="/api/prompt-index/clear/preview", idempotency="idempotent; clearing an absent index is a no-op", rollback_mode="not applicable; re-querying prompts rebuilds the index from source rollouts"),
             item("read_thread_timeline", "GET", "/api/threads/{thread_id}/timeline", "Read a semantic timeline from the JSONL tail without loading the complete rollout. Supports user input, assistant replies, readable reasoning, encrypted-reasoning markers, tool activity, search and byte-cursor pagination.", ["thread_id"], "read-only", success_fields=["threadId", "title", "items", "nextBeforeByte", "hasMore", "scannedRecords", "fileSize"]),
             item("read_thread_timeline_item", "GET", "/api/threads/{thread_id}/timeline/item", "Read the complete semantic content for one timeline record selected by its byteOffset.", ["thread_id", "byte_offset"], "read-only", success_fields=["id", "kind", "text", "byteOffset"]),
-            item("preview_thread_action", "GET", "/api/threads/{thread_id}/action-preview", "Preview show, hide, repair, archive or duplicate before writing. Duplicate preview requires targetProjectPath.", ["thread_id", "action"], "read-only", success_fields=["operationPreviewId", "inputHash", "threadId", "warnings"]),
+            item("preview_thread_action", "GET", "/api/threads/{thread_id}/action-preview", "Preview show, hide, repair or archive before writing.", ["thread_id", "action"], "read-only", success_fields=["operationPreviewId", "inputHash", "threadId", "warnings"]),
             item("show_thread", "POST", "/api/threads/{thread_id}/show", "Restore a hidden or archived thread to Codex Desktop's visible indexes.", ["thread_id", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before write", success_fields=["threadId", "updatedAtMs", "backup.backupId"]),
             item("hide_thread", "POST", "/api/threads/{thread_id}/hide", "Hide a visible main thread from Codex Desktop's visible indexes without archiving or deleting JSONL.", ["thread_id", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before write", success_fields=["threadId", "updatedAtMs", "sessionIndexUpdate", "globalStateUpdate", "backup.backupId"]),
             item("export_prompts", "GET", "/api/threads/{thread_id}/export-prompts", "Export prompts from a thread as markdown or json. Defaults to scope=pure, which exports only user-entered text; use scope=visible for user context too, scope=with_agents for subagent records, scope=automation for heartbeat/automation records, scope=delegation for messages sent from other Codex threads, or scope=all for complete records.", ["thread_id", "scope", "X-Codex-Manager-Token"], "writes export file in workspace data/exports", success_fields=["outputPath", "promptCount", "allPromptCount", "filterScope", "format"]),
             item("read_thread_logs", "GET", "/api/threads/{thread_id}/logs", "Read structured rollout JSONL logs and Codex app logs_2.sqlite rows with pagination, source selection, search and filters for requests, failures, errors, events, tool calls and raw lines.", ["thread_id"], "read-only", success_fields=["entries", "summary", "matchedEntries", "hasMore", "source", "rolloutPath", "appLogPath"]),
-            item("duplicate_thread", "POST", "/api/threads/{thread_id}/duplicate", "Copy one thread inside the current Codex Home with a new thread id and rollout JSONL into a selected target project path.", ["thread_id", "targetProjectPath", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before write; restore archives created copy", {"targetProjectPath": "C:\\\\Project", "acknowledgeCodexRunningRisk": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["newThreadId", "newRolloutPath", "targetProjectPath", "backup.backupId"]),
             item("archive_thread", "POST", "/api/threads/{thread_id}/archive", "Safe delete by archiving the thread without permanently deleting JSONL.", ["thread_id", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before write", success_fields=["threadId", "archivedAt", "backup.backupId"]),
-            item("preview_migrate_thread", "POST", "/api/threads/{thread_id}/migrate/preview", "Preview thread project migration before rewriting SQLite/global state/JSONL workspace metadata.", ["thread_id", "targetProjectPath"], "read-only", {"targetProjectPath": "C:\\\\Project"}, ["operationPreviewId", "inputHash", "threadId", "targetProjectPath", "warnings"]),
-            item("migrate_thread", "POST", "/api/threads/{thread_id}/migrate", "Move a thread to another project path and rewrite structured workspace metadata in JSONL.", ["thread_id", "targetProjectPath", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before write; Codex must be closed", {"targetProjectPath": "C:\\\\Project", "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["threadId", "oldProjectPath", "newProjectPath", "backup.backupId"]),
-            item("preview_move_thread_workspace", "POST", "/api/threads/{thread_id}/move-workspace/preview", "Preview moving the selected thread, optional same-source-cwd threads, actual workspace files, SQLite/global state and rollout workspace metadata.", ["thread_id", "targetProjectPath"], "read-only", {"targetProjectPath": "C:\\\\Project", "includeSameSourceCwdThreads": True, "moveWorkspaceFiles": True}, ["operationPreviewId", "inputHash", "matchedThreads", "fileMove", "blockingErrors", "warnings"]),
-            item("move_thread_workspace", "POST", "/api/threads/{thread_id}/move-workspace", "Move the selected thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.", ["thread_id", "targetProjectPath", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread/workspace move backup before write; Codex must be closed", {"targetProjectPath": "C:\\\\Project", "includeSameSourceCwdThreads": True, "moveWorkspaceFiles": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["threadId", "matchedThreads", "fileMove", "rolloutRewrites", "backup.backupId"]),
             item("slim_thread", "POST", "/api/threads/{thread_id}/slim", "Reduce JSONL size only within the explicitly selected scope: removeImages, keepLatestCompacted, or both.", ["thread_id", "removeImages or keepLatestCompacted", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "thread action backup before JSONL rewrite", {"removeImages": True, "keepLatestCompacted": False, "acknowledgeCodexRunningRisk": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["threadId", "savedBytes", "before", "after", "backup.backupId"]),
             item("preview_slim_thread", "GET", "/api/threads/{thread_id}/slim/preview", "Preview JSONL slimming impact for a selected scope without writing files.", ["thread_id"], "read-only", success_fields=["threadId", "scan", "canRemoveImages", "canReduceCompacted", "warnings"]),
-            item("rename_project", "POST", "/api/projects/rename", "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed because they can rewrite sidebar cache state while running.", ["sourceProjectPath", "targetProjectPath", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "backs up all matched thread rows, rollout JSONLs, global state, global state backup and config", {"sourceProjectPath": "C:\\\\OldProject", "targetProjectPath": "C:\\\\NewProject", "renameFolder": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["updatedThreads", "rolloutBackups", "globalStateRewrite", "backup.backupId"]),
-            item("preview_rename_project", "POST", "/api/projects/rename/preview", "Preview matched threads, rollout bytes, folder impact and whether running Codex blocks the project rename.", ["sourceProjectPath", "targetProjectPath"], "read-only", {"sourceProjectPath": "C:\\\\OldProject", "targetProjectPath": "C:\\\\NewProject", "renameFolder": True}, ["matchedThreads", "existingRollouts", "rolloutBytes", "willRenameFolder", "blockedByRunningCodex", "warnings"]),
             item("import_thread_from_home", "POST", "/api/import/thread", "Copy one thread from another Codex Home into the current Codex Home.", ["sourceCodexHome", "sourceThreadId", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "home state backup before import; restore archives imported thread", {"sourceCodexHome": "E:\\\\.codex", "sourceThreadId": "THREAD_ID", "targetProjectPath": "C:\\\\Project", "acknowledgeCodexRunningRisk": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["importedThreads", "backup.backupId"]),
             item("preview_import_thread_from_home", "POST", "/api/import/thread/preview", "Preview one source thread import without writing target home.", ["sourceCodexHome", "sourceThreadId"], "read-only", {"sourceCodexHome": "E:\\\\.codex", "sourceThreadId": "THREAD_ID", "targetProjectPath": "C:\\\\Project"}, ["sourceThreadId", "targetThreadId", "rolloutBytes", "warnings"]),
             item("import_project_from_home", "POST", "/api/import/project", "Copy all matched project threads from another Codex Home into the current Codex Home.", ["sourceCodexHome", "sourceProjectPath", "X-Codex-Manager-Token", "operationPreviewId", "inputHash"], "home state backup before import; restore archives imported threads", {"sourceCodexHome": "E:\\\\.codex", "sourceProjectPath": "C:\\\\OldProject", "targetProjectPath": "C:\\\\NewProject", "includeArchived": False, "acknowledgeCodexRunningRisk": True, "operationPreviewId": "PREVIEW_ID", "inputHash": "INPUT_HASH"}, ["importedThreads", "backup.backupId"]),
@@ -1846,6 +1915,239 @@ def repair_official_thread_tools_endpoint(
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
+@app.get("/api/provider-interoperability/status")
+def provider_interoperability_status(
+    codex_home: str | None = Query(default=None),
+    adapter_root: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        return get_provider_interop_service().status(paths.codex_home_path, adapter_root)
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/audit")
+def provider_interoperability_audit(
+    request: ProviderInteropRequest,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        return get_provider_interop_service().audit(
+            paths.codex_home_path,
+            request.adapterRoot,
+            source_bucket=request.sourceBucket,
+            target_bucket=request.targetBucket,
+        )
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.get("/api/provider-interoperability/tasks/{thread_id}/audit")
+def provider_interoperability_task_audit(
+    thread_id: str,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        return get_provider_interop_service().audit_task(paths.codex_home_path, thread_id)
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/tasks/{thread_id}/repair/preview")
+def preview_provider_interoperability_task_repair(
+    thread_id: str,
+    request: ProviderInteropTaskRequest,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        result = get_provider_interop_service().preview_task_repair(
+            paths.codex_home_path, thread_id, request.adapterRoot
+        )
+        ticket_payload = task_repair_ticket_payload(
+            codex_home,
+            thread_id,
+            request,
+            operation_id=result["operationId"],
+            worker_state_digest=result["workerStateDigest"],
+        )
+        return {
+            **result,
+            **create_preview_ticket("repair_provider_interoperability_task", ticket_payload),
+        }
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/tasks/{thread_id}/repair")
+def apply_provider_interoperability_task_repair(
+    thread_id: str,
+    request: ProviderInteropTaskApplyRequest,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        authorize_write_request(http_request)
+        paths = resolve_codex_paths(codex_home)
+        ticket_payload = task_repair_ticket_payload(
+            codex_home,
+            thread_id,
+            request,
+            operation_id=request.operationId,
+            worker_state_digest=request.workerStateDigest,
+        )
+        with preview_bound_write(
+            "repair_provider_interoperability_task",
+            ticket_payload,
+            request.operationPreviewId,
+            request.inputHash,
+        ):
+            return get_provider_interop_service().apply_task_repair(
+                paths.codex_home_path,
+                thread_id,
+                request.adapterRoot,
+                operation_id=request.operationId,
+                expected_state_digest=request.workerStateDigest,
+                backup_root=request.backupRoot,
+            )
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/repair/preview")
+def preview_provider_interoperability_repair(
+    request: ProviderInteropRequest,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        result = get_provider_interop_service().preview_repair(
+            paths.codex_home_path,
+            request.adapterRoot,
+            source_bucket=request.sourceBucket,
+            target_bucket=request.targetBucket,
+            history=request.history,
+            continuation_compatibility=request.continuationCompatibility,
+            common_config=request.commonConfig,
+            interoperability_settings=request.interoperabilitySettings,
+        )
+        ticket_payload = repair_ticket_payload(
+            codex_home,
+            request,
+            operation_id=result["operationId"],
+            worker_state_digest=result["workerStateDigest"],
+        )
+        return {**result, **create_preview_ticket("repair_provider_interoperability", ticket_payload)}
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/repair")
+def apply_provider_interoperability_repair(
+    request: ProviderInteropApplyRequest,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        authorize_write_request(http_request)
+        paths = resolve_codex_paths(codex_home)
+        ticket_payload = repair_ticket_payload(
+            codex_home,
+            request,
+            operation_id=request.operationId,
+            worker_state_digest=request.workerStateDigest,
+        )
+        with preview_bound_write(
+            "repair_provider_interoperability",
+            ticket_payload,
+            request.operationPreviewId,
+            request.inputHash,
+        ):
+            return get_provider_interop_service().apply_repair(
+                paths.codex_home_path,
+                request.adapterRoot,
+                operation_id=request.operationId,
+                expected_state_digest=request.workerStateDigest,
+                source_bucket=request.sourceBucket,
+                target_bucket=request.targetBucket,
+                backup_root=request.backupRoot,
+                history=request.history,
+                continuation_compatibility=request.continuationCompatibility,
+                common_config=request.commonConfig,
+                interoperability_settings=request.interoperabilitySettings,
+            )
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/verify")
+def verify_provider_interoperability(
+    request: ProviderInteropRequest,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        paths = resolve_codex_paths(codex_home)
+        return get_provider_interop_service().verify(
+            paths.codex_home_path,
+            request.adapterRoot,
+            source_bucket=request.sourceBucket,
+            target_bucket=request.targetBucket,
+            history=request.history,
+            continuation_compatibility=request.continuationCompatibility,
+            common_config=request.commonConfig,
+            interoperability_settings=request.interoperabilitySettings,
+        )
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
+@app.post("/api/provider-interoperability/rollback/preview")
+def preview_provider_interoperability_rollback(
+    request: ProviderInteropRollbackRequest,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    payload = rollback_ticket_payload(codex_home, request)
+    manifest = Path(request.manifestPath).expanduser().resolve(strict=False)
+    if not manifest.is_file():
+        raise HTTPException(status_code=404, detail="provider interoperability manifest not found")
+    return {
+        **create_preview_ticket("rollback_provider_interoperability", payload),
+        "manifestPath": str(manifest),
+        "operationId": request.operationId,
+        "workerStateDigest": request.workerStateDigest,
+        "requiresOffline": True,
+    }
+
+
+@app.post("/api/provider-interoperability/rollback")
+def rollback_provider_interoperability(
+    request: ProviderInteropRollbackRequest,
+    http_request: Request,
+    codex_home: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        authorize_write_request(http_request)
+        payload = rollback_ticket_payload(codex_home, request)
+        paths = resolve_codex_paths(codex_home)
+        with preview_bound_write(
+            "rollback_provider_interoperability",
+            payload,
+            request.operationPreviewId,
+            request.inputHash,
+        ):
+            return get_provider_interop_service().rollback(
+                paths.codex_home_path,
+                request.manifestPath,
+                operation_id=request.operationId,
+                state_digest=request.workerStateDigest,
+            )
+    except ProviderInteropError as error:
+        raise provider_interop_http_error(error) from error
+
+
 @app.get("/api/home/overview", response_model=HomeOverviewResponse)
 def home_overview(codex_home: str | None = Query(default=None)) -> dict[str, Any]:
     try:
@@ -1898,6 +2200,7 @@ def thread_page(
     sort_direction: Literal["asc", "desc"] = Query(default="asc"),
     limit: int = Query(default=100, ge=1, le=200),
     cursor: str | None = Query(default=None, max_length=2000),
+    catalog_version: str | None = Query(default=None, max_length=128),
     refresh: bool = Query(default=False),
 ) -> dict[str, Any]:
     try:
@@ -1912,6 +2215,7 @@ def thread_page(
             sort_direction=sort_direction,
             limit=limit,
             cursor=cursor,
+            catalog_version=catalog_version,
             force_refresh=refresh,
         )
     except FileNotFoundError as error:
@@ -2200,6 +2504,7 @@ def thread_timeline(
     limit: int = Query(default=80, ge=1, le=200),
     kind: str = Query(default="conversation"),
     search: str = Query(default=""),
+    source_filter: str = Query(default="all", alias="sourceFilter", pattern="^(all|pure|focused|with_agents|automation|delegation)$"),
     content_limit: int = Query(default=120_000, ge=2_000, le=500_000),
 ) -> dict[str, Any]:
     try:
@@ -2210,6 +2515,7 @@ def thread_timeline(
             limit=limit,
             kind_filter=kind,
             search_text=search,
+            source_filter=source_filter,
             content_limit=content_limit,
         )
     except KeyError as error:
@@ -2248,8 +2554,9 @@ async def thread_timeline_search_page_endpoint(
     codex_home: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=80, ge=1, le=200),
-    kind: str = Query(default="conversation", pattern="^(conversation|user|commentary|assistant)$"),
+    kind: str = Query(default="conversation", pattern="^(conversation|user|commentary|assistant|assistant_unclassified)$"),
     search: str = Query(default="", max_length=20_000),
+    source_filter: str = Query(default="all", alias="sourceFilter", pattern="^(all|pure|focused|with_agents|automation|delegation)$"),
     scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
     request_id: str | None = Query(default=None, alias="requestId", max_length=128),
 ) -> dict[str, Any]:
@@ -2268,6 +2575,7 @@ async def thread_timeline_search_page_endpoint(
             limit=limit,
             kind=kind,
             search=search,
+            source_filter=source_filter,
             scan_budget_ms=scan_budget_ms,
             cancel_check=cancel_event.is_set,
         ))
@@ -2341,6 +2649,7 @@ async def thread_prompt_page_endpoint(
     scope: str = Query(default="visible", pattern="^(pure|visible|all|with_agents|automation|heartbeat|delegation)$"),
     source_type: str | None = Query(default=None, alias="sourceType", max_length=80),
     order: Literal["asc", "desc"] = Query(default="asc"),
+    strategy: Literal["index", "recent"] = Query(default="index"),
     scan_budget_ms: int = Query(default=250, alias="scanBudgetMs", ge=1, le=5_000),
     request_id: str | None = Query(default=None, alias="requestId", max_length=128),
 ) -> dict[str, Any]:
@@ -2362,7 +2671,9 @@ async def thread_prompt_page_endpoint(
                 scope=scope,
                 source_type=source_type,
                 order=order,
+                strategy=strategy,
                 scan_budget_ms=scan_budget_ms,
+                defer_index=strategy == "index",
                 cancel_check=cancel_event.is_set,
             )
         )
@@ -3443,10 +3754,19 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
             preview_properties=mcp_preview_properties,
             write_properties=mcp_write_properties,
         ),
+        *provider_interop_mcp_tool_definitions(
+            build_tool=mcp_tool,
+            preview_properties=mcp_preview_properties,
+            write_properties=mcp_write_properties,
+        ),
         mcp_tool("codex_diagnostics", "Run the read-only Codex Home health check and return a repairPrompt handoff for another Codex agent.", {**mcp_base_properties(), "sidebarLimit": sidebar_limit_schema, "language": {"type": "string", "enum": ["zh", "en"], "default": "zh"}, "refresh": {"type": "boolean", "default": False, "description": "Bypass the short-lived report cache and run a fresh full scan."}}),
         mcp_tool("codex_preview_official_thread_tools_repair", "Preview fallback shadowing, registry position drift, and incomplete initial rollout metadata that can hide official codex_app tools.", mcp_preview_properties()),
         mcp_tool("codex_repair_official_thread_tools", "Repair initial rollout tool metadata with prompt-preservation verification, disable the legacy fallback, and normalize registry positions. SQLite normalization requires Codex Desktop to be fully closed.", mcp_write_properties(), ["apiToken", "operationPreviewId", "inputHash"]),
-        mcp_tool("codex_snapshot", "List and classify local Codex threads and projects.", {**mcp_base_properties(), "sidebarLimit": sidebar_limit_schema}),
+        *snapshot_mcp_tool_definitions(
+            build_tool=mcp_tool,
+            base_properties=mcp_base_properties,
+            sidebar_limit_schema=sidebar_limit_schema,
+        ),
         mcp_tool("codex_home_overview", "Inventory CODEX_HOME resources, memories, skills, config and logs.", mcp_base_properties()),
         mcp_tool("codex_read_resource", "Read a text resource or list a directory inside CODEX_HOME.", mcp_preview_properties(resource_path), ["relativePath"]),
         mcp_tool("codex_thread_detail", "Read SQLite row, JSONL stats, file locations and backups for one thread. Set includeDailyTokens=false when an agent wants a faster detail shell.", mcp_preview_properties({**thread_id, "sidebarLimit": sidebar_limit_schema, "includeDailyTokens": {"type": "boolean", "default": True}}), ["threadId"]),
@@ -3454,18 +3774,15 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_cancel_thread_read", "Cancel an active detail analysis, full-timeline search, or prompt-page scan in the same Codex Home by threadId and requestId.", mcp_preview_properties({**thread_id, **request_id}), ["threadId", "requestId"]),
         mcp_tool("codex_thread_daily_tokens", "Read the per-day token timeline for one thread tree. Audited totals and peaks are derived from token_count events only. Threads with SQLite tokens_used but no token_count are marked as unknownTokenThreads; no token value is returned for them.", mcp_preview_properties({**thread_id, "sidebarLimit": sidebar_limit_schema}), ["threadId"]),
         mcp_tool("codex_thread_logs", "Read structured JSONL/app logs for one thread with pagination and filters.", mcp_preview_properties({**thread_id, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}, "kind": {"type": "string", "default": "all"}, "search": {"type": "string", "default": ""}, "source": {"type": "string", "enum": ["all", "rollout", "app"], "default": "all"}}), ["threadId"]),
-        mcp_tool("codex_thread_timeline", "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.", mcp_preview_properties({**thread_id, "beforeByte": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 500000, "default": 120000}}), ["threadId"]),
-        mcp_tool("codex_search_thread_timeline", "Incrementally search the complete natural-language conversation, not only loaded DOM or the JSONL tail. Covers user input, progress commentary, and final replies; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
+        mcp_tool("codex_thread_timeline", "Read a semantic thread timeline from the JSONL tail without loading the complete rollout. Returns user input, progress commentary, final replies, persisted reasoning records, and tool activity with a byte cursor for older pages.", mcp_preview_properties({**thread_id, "beforeByte": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "assistant_unclassified", "reasoning", "tool", "all"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 500000, "default": 120000}}), ["threadId"]),
+        mcp_tool("codex_search_thread_timeline", "Incrementally search the complete natural-language conversation, not only loaded DOM or the JSONL tail. Covers user input, progress commentary, and final replies; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "kind": {"type": "string", "enum": ["conversation", "user", "commentary", "assistant", "assistant_unclassified"], "default": "conversation"}, "search": {"type": "string", "default": ""}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_thread_timeline_item", "Read the complete semantic content for one timeline record by the byteOffset returned from codex_thread_timeline.", mcp_preview_properties({**thread_id, "byteOffset": {"type": "integer", "minimum": 0}, "contentLimit": {"type": "integer", "minimum": 2000, "maximum": 5000000, "default": 2000000}}), ["threadId", "byteOffset"]),
         mcp_tool("codex_thread_prompt_page", "Incrementally page and search all classified user inputs with source filters, chronological or newest-first ordering, explicit index completeness and an opaque cursor; requestId enables cancellation.", mcp_preview_properties({**thread_id, **request_id, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}, "sourceType": {"type": "string"}, "search": {"type": "string", "default": ""}, "order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"}, "scanBudgetMs": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1200}}), ["threadId"]),
         mcp_tool("codex_list_backups", "List rollback backups, optionally filtered by thread id.", {"threadId": {"type": "string"}}),
-        mcp_tool("codex_preview_thread_action", "Preview show, hide, repair, archive or duplicate before writing.", mcp_preview_properties({**thread_id, "action": {"type": "string", "enum": ["show", "hide", "repair_user_event", "archive", "duplicate"]}, **target_project, "sidebarLimit": sidebar_limit_schema}), ["threadId", "action"]),
+        mcp_tool("codex_preview_thread_action", "Preview show, hide, repair or archive before writing.", mcp_preview_properties({**thread_id, "action": {"type": "string", "enum": ["show", "hide", "repair_user_event", "archive"]}, "sidebarLimit": sidebar_limit_schema}), ["threadId", "action"]),
         mcp_tool("codex_preview_slim_thread", "Preview JSONL slimming impact for selected scopes.", mcp_preview_properties({**thread_id, "removeImages": {"type": "boolean", "default": True}, "keepLatestCompacted": {"type": "boolean", "default": True}}), ["threadId"]),
-        mcp_tool("codex_preview_migrate_thread", "Preview moving a thread to another project path.", mcp_preview_properties({**thread_id, **target_project, "sidebarLimit": sidebar_limit_schema}), ["threadId", "targetProjectPath"]),
-        mcp_tool("codex_preview_move_thread_workspace", "Preview moving a thread, same-source-cwd threads, actual workspace files, SQLite/global state and rollout metadata.", mcp_preview_properties({**thread_id, **target_project, **workspace_move_options}), ["threadId", "targetProjectPath"]),
         mcp_tool("codex_preview_import_thread", "Preview copying one thread from another Codex Home.", mcp_preview_properties({**source_home, "sourceThreadId": {"type": "string"}, **target_project, "preserveThreadId": {"type": "boolean", "default": False}}), ["sourceCodexHome", "sourceThreadId"]),
         mcp_tool("codex_preview_import_project", "Preview copying matched project threads from another Codex Home.", mcp_preview_properties({**source_home, "sourceProjectPath": {"type": "string"}, **target_project, "includeArchived": {"type": "boolean", "default": False}, "preserveThreadIds": {"type": "boolean", "default": False}}), ["sourceCodexHome", "sourceProjectPath"]),
-        mcp_tool("codex_preview_rename_project", "Preview project path rename impact and whether running Codex blocks the write.", mcp_preview_properties({"sourceProjectPath": {"type": "string"}, "targetProjectPath": {"type": "string"}, "renameFolder": {"type": "boolean", "default": True}}), ["sourceProjectPath", "targetProjectPath"]),
         mcp_tool("codex_preview_write_resource", "Preview UTF-8 text resource write and protected-path validation.", mcp_preview_properties({**resource_path, "content": {"type": "string"}, "createParentDirectories": {"type": "boolean", "default": True}}), ["relativePath", "content"]),
         mcp_tool("codex_preview_copy_resource", "Preview copying a safe resource from another Codex Home.", mcp_preview_properties({**source_home, **resource_path, "targetRelativePath": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}), ["sourceCodexHome", "relativePath"]),
         mcp_tool("codex_preview_portable_backup_export", "Preview creating or replacing the passphrase-protected signed portable manifest for an existing backup.", mcp_preview_properties({"backupId": {"type": "string"}, "passphrase": {"type": "string", "minLength": 12, "maxLength": 1024}}), ["backupId", "passphrase"]),
@@ -3475,9 +3792,6 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_hide_thread", "Hide a visible main thread from Codex Desktop's visible indexes without deleting JSONL.", mcp_write_properties(thread_id), ["threadId", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_repair_thread_user_event", "Repair user-event metadata and restore the thread to Codex Desktop's visible indexes.", mcp_write_properties(thread_id), ["threadId", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_archive_thread", "Archive a thread as the safe delete operation without permanent JSONL deletion.", mcp_write_properties(thread_id), ["threadId", "apiToken", "operationPreviewId", "inputHash"]),
-        mcp_tool("codex_duplicate_thread", "Duplicate a thread to a target project path.", mcp_write_properties({**thread_id, **target_project}), ["threadId", "targetProjectPath", "apiToken", "operationPreviewId", "inputHash"]),
-        mcp_tool("codex_migrate_thread", "Move a thread to another project path.", mcp_write_properties({**thread_id, **target_project}), ["threadId", "targetProjectPath", "apiToken", "operationPreviewId", "inputHash"]),
-        mcp_tool("codex_move_thread_workspace", "Move a thread plus same-source-cwd threads and top-level workspace files to a target workspace. Codex Desktop and Codex CLI must be closed first.", mcp_write_properties({**thread_id, **target_project, **workspace_move_options}), ["threadId", "targetProjectPath", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_slim_thread", "Slim a thread JSONL using the selected safe scopes.", mcp_write_properties({**thread_id, "removeImages": {"type": "boolean", "default": True}, "keepLatestCompacted": {"type": "boolean", "default": True}}), ["threadId", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_export_prompts", "Export prompts from a thread as markdown or json. scope=pure exports only user-entered text; scope=automation exports heartbeat/automation records; scope=delegation exports messages sent from other Codex threads; scope=all exports every prompt-like record.", mcp_manual_write_properties({**thread_id, "format": {"type": "string", "enum": ["markdown", "json"], "default": "markdown"}, "scope": {"type": "string", "enum": ["pure", "visible", "with_agents", "automation", "delegation", "all"], "default": "pure"}}), ["threadId", "apiToken"]),
         mcp_tool("codex_backup_thread", "Create an explicit rollback backup for one thread.", mcp_manual_write_properties(thread_id), ["threadId", "apiToken"]),
@@ -3486,7 +3800,6 @@ def mcp_tool_definitions() -> list[dict[str, Any]]:
         mcp_tool("codex_copy_resource", "Copy a safe resource from another Codex Home.", mcp_write_properties({**source_home, **resource_path, "targetRelativePath": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}), ["sourceCodexHome", "relativePath", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_import_thread", "Copy one thread from another Codex Home into this Codex Home.", mcp_write_properties({**source_home, "sourceThreadId": {"type": "string"}, **target_project, "preserveThreadId": {"type": "boolean", "default": False}}), ["sourceCodexHome", "sourceThreadId", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_import_project", "Copy matched project threads from another Codex Home into this Codex Home.", mcp_write_properties({**source_home, "sourceProjectPath": {"type": "string"}, **target_project, "includeArchived": {"type": "boolean", "default": False}, "preserveThreadIds": {"type": "boolean", "default": False}}), ["sourceCodexHome", "sourceProjectPath", "apiToken", "operationPreviewId", "inputHash"]),
-        mcp_tool("codex_rename_project", "Rename project path metadata and optionally the local project folder. Codex Desktop and Codex CLI must be closed first.", mcp_write_properties({"sourceProjectPath": {"type": "string"}, "targetProjectPath": {"type": "string"}, "renameFolder": {"type": "boolean", "default": True}}), ["sourceProjectPath", "targetProjectPath", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_export_portable_backup", "Create the signed portable manifest and encrypted signing-key envelope for an existing backup.", mcp_write_properties({"backupId": {"type": "string"}, "passphrase": {"type": "string", "minLength": 12, "maxLength": 1024}}), ["backupId", "passphrase", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_restore_portable_backup", "Restore a verified portable backup after explicit source-to-current-Codex-Home mapping.", mcp_write_properties({"backupId": {"type": "string"}, "sourceCodexHome": {"type": "string"}, "passphrase": {"type": "string", "minLength": 12, "maxLength": 1024}}), ["backupId", "sourceCodexHome", "passphrase", "apiToken", "operationPreviewId", "inputHash"]),
         mcp_tool("codex_restore_backup", "Restore a backup after validating the matching preview ticket.", {**mcp_write_properties(), "backupId": {"type": "string"}}, ["backupId", "apiToken", "operationPreviewId", "inputHash"]),
@@ -3596,6 +3909,43 @@ def mcp_cancellable_thread_request(
         finish_prompt_index_request(active_request_id)
 
 
+@app.get("/api/threads/{thread_id}/prompts/context", response_model=ThreadPromptContextResponse)
+async def thread_prompt_context_endpoint(
+    thread_id: str,
+    codex_home: str | None = Query(default=None),
+    anchor_index: int = Query(alias="anchorIndex", ge=1),
+    anchor_byte_offset: int | None = Query(default=None, alias="anchorByteOffset", ge=0),
+    generation: str | None = Query(default=None, max_length=128),
+    scope: str = Query(default="visible", pattern="^(pure|visible|all|with_agents|automation|heartbeat|delegation)$"),
+    search: str = Query(default="", max_length=20_000),
+    source_type: str | None = Query(default=None, alias="sourceType", max_length=80),
+    before: int = Query(default=10, ge=0, le=50),
+    after: int = Query(default=10, ge=0, le=50),
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            read_thread_prompt_context,
+            codex_home,
+            thread_id,
+            anchor_index=anchor_index,
+            anchor_byte_offset=anchor_byte_offset,
+            generation=generation,
+            scope=scope,
+            search=search,
+            source_type=source_type,
+            before=before,
+            after=after,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"thread not found: {thread_id}") from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
 def mcp_thread_action_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     codex_home = mcp_str(arguments, "codexHome")
     thread_id = mcp_required_str(arguments, "threadId")
@@ -3656,6 +4006,221 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                 mcp_str(arguments, "inputHash"),
             ):
                 return mcp_result(clear_prompt_index(paths.codex_home_path))
+        if name == "codex_provider_interoperability_status":
+            paths = resolve_codex_paths(codex_home)
+            return mcp_result(
+                get_provider_interop_service().status(
+                    paths.codex_home_path,
+                    mcp_str(arguments, "adapterRoot"),
+                )
+            )
+        if name in {
+            "codex_provider_interoperability_audit",
+            "codex_verify_provider_interoperability",
+        }:
+            paths = resolve_codex_paths(codex_home)
+            service = get_provider_interop_service()
+            source_bucket = mcp_str(arguments, "sourceBucket", "openai") or "openai"
+            target_bucket = mcp_str(arguments, "targetBucket", "custom") or "custom"
+            history = mcp_bool(arguments, "history", True)
+            continuation_compatibility = mcp_bool(arguments, "continuationCompatibility", True)
+            common_config = mcp_bool(arguments, "commonConfig", True)
+            interoperability_settings = mcp_bool(arguments, "interoperabilitySettings", True)
+            if name == "codex_verify_provider_interoperability":
+                return mcp_result(service.verify(
+                    paths.codex_home_path,
+                    mcp_str(arguments, "adapterRoot"),
+                    source_bucket=source_bucket,
+                    target_bucket=target_bucket,
+                    history=history,
+                    continuation_compatibility=continuation_compatibility,
+                    common_config=common_config,
+                    interoperability_settings=interoperability_settings,
+                ))
+            audit = service.audit(
+                paths.codex_home_path,
+                mcp_str(arguments, "adapterRoot"),
+                source_bucket=source_bucket,
+                target_bucket=target_bucket,
+            )
+            return mcp_result(audit)
+        if name == "codex_audit_provider_interoperability_task":
+            paths = resolve_codex_paths(codex_home)
+            return mcp_result(
+                get_provider_interop_service().audit_task(
+                    paths.codex_home_path,
+                    mcp_required_str(arguments, "threadId"),
+                )
+            )
+        if name == "codex_preview_provider_interoperability_task_repair":
+            paths = resolve_codex_paths(codex_home)
+            thread_id = mcp_required_str(arguments, "threadId")
+            request_model = ProviderInteropTaskRequest(
+                adapterRoot=mcp_str(arguments, "adapterRoot")
+            )
+            result = get_provider_interop_service().preview_task_repair(
+                paths.codex_home_path,
+                thread_id,
+                request_model.adapterRoot,
+            )
+            payload = task_repair_ticket_payload(
+                codex_home,
+                thread_id,
+                request_model,
+                operation_id=result["operationId"],
+                worker_state_digest=result["workerStateDigest"],
+            )
+            return mcp_result({
+                **result,
+                **create_preview_ticket("repair_provider_interoperability_task", payload),
+            })
+        if name == "codex_repair_provider_interoperability_task":
+            mcp_require_write(arguments)
+            paths = resolve_codex_paths(codex_home)
+            thread_id = mcp_required_str(arguments, "threadId")
+            request_model = ProviderInteropTaskApplyRequest(
+                adapterRoot=mcp_str(arguments, "adapterRoot"),
+                operationPreviewId=mcp_required_str(arguments, "operationPreviewId"),
+                inputHash=mcp_required_str(arguments, "inputHash"),
+                operationId=mcp_required_str(arguments, "operationId"),
+                workerStateDigest=mcp_required_str(arguments, "workerStateDigest"),
+                backupRoot=mcp_str(arguments, "backupRoot"),
+            )
+            payload = task_repair_ticket_payload(
+                codex_home,
+                thread_id,
+                request_model,
+                operation_id=request_model.operationId,
+                worker_state_digest=request_model.workerStateDigest,
+            )
+            with preview_bound_write(
+                "repair_provider_interoperability_task",
+                payload,
+                request_model.operationPreviewId,
+                request_model.inputHash,
+            ):
+                return mcp_result(get_provider_interop_service().apply_task_repair(
+                    paths.codex_home_path,
+                    thread_id,
+                    request_model.adapterRoot,
+                    operation_id=request_model.operationId,
+                    expected_state_digest=request_model.workerStateDigest,
+                    backup_root=request_model.backupRoot,
+                ))
+        if name == "codex_preview_provider_interoperability_repair":
+            paths = resolve_codex_paths(codex_home)
+            request_model = ProviderInteropRequest(
+                adapterRoot=mcp_str(arguments, "adapterRoot"),
+                sourceBucket=mcp_str(arguments, "sourceBucket", "openai") or "openai",
+                targetBucket=mcp_str(arguments, "targetBucket", "custom") or "custom",
+                history=mcp_bool(arguments, "history", True),
+                continuationCompatibility=mcp_bool(arguments, "continuationCompatibility", True),
+                commonConfig=mcp_bool(arguments, "commonConfig", True),
+                interoperabilitySettings=mcp_bool(arguments, "interoperabilitySettings", True),
+            )
+            result = get_provider_interop_service().preview_repair(
+                paths.codex_home_path,
+                request_model.adapterRoot,
+                source_bucket=request_model.sourceBucket,
+                target_bucket=request_model.targetBucket,
+                history=request_model.history,
+                continuation_compatibility=request_model.continuationCompatibility,
+                common_config=request_model.commonConfig,
+                interoperability_settings=request_model.interoperabilitySettings,
+            )
+            payload = repair_ticket_payload(
+                codex_home,
+                request_model,
+                operation_id=result["operationId"],
+                worker_state_digest=result["workerStateDigest"],
+            )
+            return mcp_result({**result, **create_preview_ticket("repair_provider_interoperability", payload)})
+        if name == "codex_repair_provider_interoperability":
+            mcp_require_write(arguments)
+            paths = resolve_codex_paths(codex_home)
+            request_model = ProviderInteropApplyRequest(
+                adapterRoot=mcp_str(arguments, "adapterRoot"),
+                sourceBucket=mcp_str(arguments, "sourceBucket", "openai") or "openai",
+                targetBucket=mcp_str(arguments, "targetBucket", "custom") or "custom",
+                operationPreviewId=mcp_required_str(arguments, "operationPreviewId"),
+                inputHash=mcp_required_str(arguments, "inputHash"),
+                operationId=mcp_required_str(arguments, "operationId"),
+                workerStateDigest=mcp_required_str(arguments, "workerStateDigest"),
+                backupRoot=mcp_str(arguments, "backupRoot"),
+                history=mcp_bool(arguments, "history", True),
+                continuationCompatibility=mcp_bool(arguments, "continuationCompatibility", True),
+                commonConfig=mcp_bool(arguments, "commonConfig", True),
+                interoperabilitySettings=mcp_bool(arguments, "interoperabilitySettings", True),
+            )
+            payload = repair_ticket_payload(
+                codex_home,
+                request_model,
+                operation_id=request_model.operationId,
+                worker_state_digest=request_model.workerStateDigest,
+            )
+            with preview_bound_write(
+                "repair_provider_interoperability",
+                payload,
+                request_model.operationPreviewId,
+                request_model.inputHash,
+            ):
+                return mcp_result(
+                    get_provider_interop_service().apply_repair(
+                        paths.codex_home_path,
+                        request_model.adapterRoot,
+                        operation_id=request_model.operationId,
+                        expected_state_digest=request_model.workerStateDigest,
+                        source_bucket=request_model.sourceBucket,
+                        target_bucket=request_model.targetBucket,
+                        backup_root=request_model.backupRoot,
+                        history=request_model.history,
+                        continuation_compatibility=request_model.continuationCompatibility,
+                        common_config=request_model.commonConfig,
+                        interoperability_settings=request_model.interoperabilitySettings,
+                    )
+                )
+        if name == "codex_preview_provider_interoperability_rollback":
+            request_model = ProviderInteropRollbackRequest(
+                manifestPath=mcp_required_str(arguments, "manifestPath"),
+                operationId=mcp_required_str(arguments, "operationId"),
+                workerStateDigest=mcp_required_str(arguments, "workerStateDigest"),
+            )
+            payload = rollback_ticket_payload(codex_home, request_model)
+            manifest = Path(request_model.manifestPath).expanduser().resolve(strict=False)
+            if not manifest.is_file():
+                raise HTTPException(status_code=404, detail="provider interoperability manifest not found")
+            return mcp_result({
+                **create_preview_ticket("rollback_provider_interoperability", payload),
+                "manifestPath": str(manifest),
+                "operationId": request_model.operationId,
+                "workerStateDigest": request_model.workerStateDigest,
+                "requiresOffline": True,
+            })
+        if name == "codex_rollback_provider_interoperability":
+            mcp_require_write(arguments)
+            request_model = ProviderInteropRollbackRequest(
+                manifestPath=mcp_required_str(arguments, "manifestPath"),
+                operationId=mcp_required_str(arguments, "operationId"),
+                workerStateDigest=mcp_required_str(arguments, "workerStateDigest"),
+                operationPreviewId=mcp_required_str(arguments, "operationPreviewId"),
+                inputHash=mcp_required_str(arguments, "inputHash"),
+            )
+            payload = rollback_ticket_payload(codex_home, request_model)
+            paths = resolve_codex_paths(codex_home)
+            with preview_bound_write(
+                "rollback_provider_interoperability",
+                payload,
+                request_model.operationPreviewId,
+                request_model.inputHash,
+            ):
+                return mcp_result(
+                    get_provider_interop_service().rollback(
+                        paths.codex_home_path,
+                        request_model.manifestPath,
+                        operation_id=request_model.operationId,
+                        state_digest=request_model.workerStateDigest,
+                    )
+                )
         if name == "codex_health":
             return mcp_result(validate_environment(codex_home))
         if name == "codex_diagnostics":
@@ -3684,12 +4249,12 @@ def mcp_execute_tool(name: str, arguments: dict[str, Any], request: Request) -> 
                         create_backup=mcp_bool(arguments, "createBackup", True),
                     )
                 )
-        if name == "codex_snapshot":
-            return mcp_result(build_snapshot(
-                codex_home_text=codex_home,
-                sidebar_limit=mcp_int(arguments, "sidebarLimit", 50, 1, 1000),
-                validate_rollout_display=bool(arguments.get("validateRolloutDisplay") or False),
-            ))
+        snapshot_result = execute_snapshot_mcp_tool(
+            name, arguments, codex_home=codex_home,
+            read_int=mcp_int, read_str=mcp_str, read_bool=mcp_bool,
+        )
+        if snapshot_result is not None:
+            return mcp_result(snapshot_result)
         if name == "codex_home_overview":
             return mcp_result(codex_home_overview(codex_home))
         if name == "codex_read_resource":

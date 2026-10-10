@@ -11,6 +11,8 @@ const sourceText = fs.readFileSync(mainPath, "utf8");
 const sourceFile = ts.createSourceFile(mainPath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const promptClassificationPath = path.join(projectRoot, "src", "promptClassification.ts");
 const promptClassificationSource = fs.readFileSync(promptClassificationPath, "utf8");
+const globalSearchPath = path.join(projectRoot, "src", "GlobalThreadSearchModal.tsx");
+const globalSearchSource = fs.readFileSync(globalSearchPath, "utf8");
 const promptClassificationModule = { exports: {} };
 const promptClassificationJavaScript = ts.transpileModule(promptClassificationSource, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
@@ -20,6 +22,19 @@ new Function("exports", "module", promptClassificationJavaScript)(
   promptClassificationModule
 );
 const { classifyPromptText } = promptClassificationModule.exports;
+
+assert.match(globalSearchSource, /new IntersectionObserver/, "global search must automatically fetch the next page near the scroll boundary");
+assert.match(globalSearchSource, /rootMargin:\s*"320px 0px"/, "global search must prefetch before the exact bottom boundary");
+assert.match(globalSearchSource, /scrollHeight\s*-\s*target\.scrollTop\s*-\s*target\.clientHeight\s*<=\s*320/, "global search must retain a direct scroll-boundary fallback for embedded webviews");
+assert.match(globalSearchSource, /onScroll=\{handleResultsScroll\}/, "global search results must bind the scroll-boundary loader");
+assert.match(globalSearchSource, /loadingMoreRef\.current/, "global search infinite scrolling must suppress duplicate page requests");
+assert.match(globalSearchSource, /sequenceRef\.current !== sequence/, "global search must reject stale pagination responses after filter changes");
+assert.match(globalSearchSource, /catalogVersion:\s*page\.catalogVersion\s*\|\|\s*snapshot\.catalogVersion/, "global search continuations must use the catalog version returned with the cursor");
+assert.doesNotMatch(globalSearchSource, /!page\?\.index\.complete\s*\|\|\s*!page\.nextCursor/, "an append-only indexing tail must not block an existing global-search continuation cursor");
+assert.match(globalSearchSource, /resultsScrollOffsetRef\.current\s*=\s*target\.scrollTop/, "global search must retain its result-list scroll position before opening a thread");
+assert.match(globalSearchSource, /scrollToOffset\(resultsScrollOffsetRef\.current/, "global search must restore its virtual-list position after returning from a thread");
+assert.match(globalSearchSource, /!queryChanged\s*&&\s*page\?\.index\.complete/, "returning to a completed global search must not repeat the full index query");
+assert.match(globalSearchSource, /data-result-index=\{virtualRow\.index\}/, "global search must retain a stable result focus target across detail navigation");
 
 const recommendedPluginsClassification = classifyPromptText(
   "<recommended_plugins>\n- Sentry\n</recommended_plugins>\n# AGENTS.md instructions\n<environment_context>...</environment_context>"
@@ -35,6 +50,16 @@ assert.equal(
   "user",
   "runtime wrappers mentioned inside real user prose must not be hidden"
 );
+for (const marker of ["## My request:", "## My request for Codex:"]) {
+  const attachmentClassification = classifyPromptText([
+    "# Files mentioned by the user:",
+    "![attachment](data:image/png;base64,hidden)",
+    marker,
+    "current user request"
+  ].join("\n"));
+  assert.equal(attachmentClassification.sourceType, "attachment");
+  assert.equal(attachmentClassification.pureText, "current user request");
+}
 
 function visit(node, callback) {
   callback(node);
@@ -125,6 +150,11 @@ assert.deepEqual(
 );
 
 const appText = nodeText(findFunction("App"));
+const threadsModuleText = nodeText(findFunction("ThreadsModule"));
+const threadPromptModalText = nodeText(findFunction("ThreadPromptModal"));
+assert.match(threadsModuleText, /onViewPrompts\(thread,\s*query,\s*true\)/, "global search results must mark the thread detail as search-origin navigation");
+assert.match(appText, /setGlobalSearchOpen\(true\)/, "the app must provide a route back to the preserved global search modal");
+assert.match(threadPromptModalText, /onBackToSearch[\s\S]*返回搜索结果/, "thread content opened from global search must expose an explicit back action");
 const diagnosticsHookText = nodeText(findFunction("useDiagnostics"));
 const initialThreadPageDiagnosticsRequestBudget = 0;
 const diagnosticsEnabledOnInitialThreadPage = /useDiagnostics\([^;]+isLocalApiConnected\s*&&\s*!isBrowserMode\s*\)/s.test(appText);
@@ -261,7 +291,18 @@ async function runDiagnosticsBehaviorTest() {
         return;
       }
       if (pathname === "/api/health") {
-        await route.fulfill({ json: { writeWarnings: [], currentVersions: {} } });
+        await route.fulfill({
+          json: {
+            writeWarnings: [],
+            currentVersions: { desktopInstall: { version: "26.831.1445.0" } },
+            paginationPatch: {
+              state: "stale",
+              reason: "Codex was updated after the pagination patch was prepared or installed.",
+              checkedAtMs: Date.now(),
+              policy: { initialTurns: 1, userPageTurns: 3, oneRequestPerTopGesture: true }
+            }
+          }
+        });
         return;
       }
       if (pathname === "/api/snapshot/summary") {
@@ -307,6 +348,8 @@ async function runDiagnosticsBehaviorTest() {
 
     await page.goto("http://127.0.0.1:8876", { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "体检" }).waitFor();
+    await page.getByRole("button", { name: /旧VFS分页包.*已失效/ }).waitFor();
+    assert.match(await page.getByRole("button", { name: /旧VFS分页包.*已失效/ }).getAttribute("title"), /策略：初次 1 turn，到顶每次 3 turns/, "compact notice must retain the active pagination policy in its tooltip");
     assert.equal(await page.evaluate(() => window.location.hostname), "127.0.0.1");
     assert.equal(diagnosticsRequests, 0, "local thread landing page must not start diagnostics");
 
@@ -355,7 +398,7 @@ async function runDiagnosticsBehaviorTest() {
       `language switching may reuse or fetch localized reports, received ${requestsAfterLanguageCheck} requests`
     );
 
-    await page.getByRole("button", { name: "线程" }).click();
+    await page.getByRole("button", { name: "线程", exact: true }).click();
     await page.getByRole("button", { name: "体检" }).click();
     await page.getByText("Codex Home 体检").waitFor();
     assert.equal(diagnosticsRequests, requestsAfterLanguageCheck, "reopening diagnostics inside the cache TTL must reuse the localized report");

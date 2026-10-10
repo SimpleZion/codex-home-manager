@@ -6,6 +6,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_DIR%scripts\start-ui-s
 
 if errorlevel 1 (
   echo.
-  echo Failed to start Codex Home Manager. See server.err.log for details.
+  echo Failed to start Codex Home Manager. See .runtime\logs\server.err.log for details.
   pause
 )

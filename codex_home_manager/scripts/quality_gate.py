@@ -622,15 +622,15 @@ def main() -> int:
         try:
             run_static_security_gate()
             run_static_browser_mode_gate()
+            run_command(["npm", "audit", "--audit-level=moderate", "--omit=optional"])
             run_command(["npm", "run", "build"])
             run_command([sys.executable, "scripts/maintainability_gate.py"])
-            run_command([sys.executable, "-m", "pytest", "tests"])
-            run_command(["npm", "run", "test:browser-contracts"])
-            run_command(["npm", "audit", "--audit-level=moderate", "--omit=optional"])
             fixture_codex_home = create_quality_gate_codex_home(Path(temporary_directory))
             service_process = ensure_service(fixture_codex_home)
             run_command(["node", "scripts/ui_overflow_check.mjs", ui_service_url])
             run_api_gate()
+            run_command([sys.executable, "-m", "pytest", "tests"])
+            run_command(["npm", "run", "test:browser-contracts"])
         finally:
             if service_process is not None:
                 service_process.terminate()

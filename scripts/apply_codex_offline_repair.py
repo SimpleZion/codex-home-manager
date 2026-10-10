@@ -237,6 +237,8 @@ def build_sqlite_title_sync_plan(database: sqlite3.Connection, session_index_pat
         return {
             "source": str(session_index_path),
             "title_column_present": False,
+            "name_column_present": False,
+            "target_column": None,
             "sqlite_updates": [],
             "index_records": [],
             "added_index_records": [],
@@ -245,33 +247,103 @@ def build_sqlite_title_sync_plan(database: sqlite3.Connection, session_index_pat
         }
     title_index = read_session_index_titles(session_index_path)
     titles = title_index["titles"]
-    sqlite_columns = ["id", "title"] + (["updated_at"] if "updated_at" in columns else [])
+    name_column_present = "name" in columns
+    sqlite_columns = ["id", "title"] + (["name"] if name_column_present else [])
+    sqlite_columns += [column for column in ("updated_at", "archived", "thread_source", "source") if column in columns]
+    column_indexes = {column: index for index, column in enumerate(sqlite_columns)}
+    table_names = {str(row[0]) for row in database.execute("select name from sqlite_master where type = 'table'").fetchall()}
+    spawn_child_thread_ids = (
+        {str(row[0]) for row in database.execute("select child_thread_id from thread_spawn_edges").fetchall() if row[0]}
+        if "thread_spawn_edges" in table_names
+        else set()
+    )
     sqlite_rows = database.execute(f"select {', '.join(sqlite_columns)} from threads order by id").fetchall()
     sqlite_updates: list[dict[str, str]] = []
-    effective_rows: list[tuple[Any, ...]] = []
+    effective_rows: list[dict[str, Any]] = []
     for row in sqlite_rows:
         thread_id = str(row[0] or "")
         current_title = str(row[1] or "")
-        intended_title = str(titles.get(thread_id, current_title))
-        if thread_id in titles and current_title != intended_title:
-            sqlite_updates.append(
-                {
-                    "thread_id": thread_id,
-                    "before": current_title,
-                    "after": intended_title,
-                }
-            )
-        effective_rows.append((thread_id, intended_title, *row[2:]))
+        current_name = str(row[2] or "") if name_column_present else ""
+        updated_at = row[column_indexes["updated_at"]] if "updated_at" in column_indexes else None
+        archived = bool(row[column_indexes["archived"]]) if "archived" in column_indexes else False
+        thread_source = str(row[column_indexes["thread_source"]] or "") if "thread_source" in column_indexes else ""
+        source_text = str(row[column_indexes["source"]] or "") if "source" in column_indexes else ""
+        try:
+            source_metadata = json.loads(source_text) if source_text else {}
+        except json.JSONDecodeError:
+            source_metadata = {}
+        has_subagent_metadata = isinstance(source_metadata, dict) and bool(source_metadata.get("subagent"))
+        in_scope = (
+            not archived
+            and thread_source != "subagent"
+            and thread_id not in spawn_child_thread_ids
+            and not has_subagent_metadata
+        )
+        index_title = str(titles.get(thread_id, ""))
+        if name_column_present:
+            # Current Codex exposes threads.name as the official task title.
+            # Keep threads.title as the immutable first-prompt fallback and only
+            # backfill a missing name from the legacy session index.
+            recoverable_index_title = index_title if index_title.strip() != current_title.strip() else ""
+            intended_name = current_name or (recoverable_index_title if in_scope else "")
+            if in_scope and recoverable_index_title and not current_name:
+                sqlite_updates.append(
+                    {
+                        "thread_id": thread_id,
+                        "before": current_name,
+                        "after": recoverable_index_title,
+                        "target_column": "name",
+                    }
+                )
+            effective_title = intended_name or current_title
+            index_expected_title = recoverable_index_title if in_scope and not current_name else ""
+        else:
+            intended_title = index_title or current_title
+            if index_title and current_title != intended_title:
+                sqlite_updates.append(
+                    {
+                        "thread_id": thread_id,
+                        "before": current_title,
+                        "after": intended_title,
+                    }
+                )
+            effective_title = intended_title
+            index_expected_title = effective_title
+        effective_rows.append(
+            {
+                "thread_id": thread_id,
+                "effective_title": effective_title,
+                "index_expected_title": index_expected_title,
+                "updated_at": updated_at,
+                "in_scope": in_scope,
+            }
+        )
+
+    index_expected_title_by_id = {
+        str(row["thread_id"]): str(row["index_expected_title"] or "")
+        for row in effective_rows
+    }
+    index_records: list[dict[str, Any]] = []
+    index_name_updates: list[dict[str, str]] = []
+    for record in title_index["records"]:
+        updated_record = dict(record)
+        thread_id = str(updated_record.get("id") or "")
+        desired_title = index_expected_title_by_id.get(thread_id, "")
+        current_index_title = str(updated_record.get("thread_name") or "")
+        if not name_column_present and desired_title and current_index_title and desired_title != current_index_title:
+            updated_record["thread_name"] = desired_title
+            index_name_updates.append({"thread_id": thread_id, "before": current_index_title, "after": desired_title})
+        index_records.append(updated_record)
 
     added_index_records: list[dict[str, Any]] = []
     for row in effective_rows:
-        thread_id = str(row[0] or "")
-        effective_title = str(row[1] or "")
-        if not thread_id or not effective_title or thread_id in titles:
+        thread_id = str(row["thread_id"] or "")
+        index_expected_title = str(row["index_expected_title"] or "")
+        if name_column_present or not thread_id or not index_expected_title or thread_id in titles:
             continue
-        record: dict[str, Any] = {"id": thread_id, "thread_name": effective_title}
-        if "updated_at" in columns and row[2] not in (None, ""):
-            updated_at = row[2]
+        record: dict[str, Any] = {"id": thread_id, "thread_name": index_expected_title}
+        if "updated_at" in columns and row["updated_at"] not in (None, ""):
+            updated_at = row["updated_at"]
             if isinstance(updated_at, (int, float)):
                 record["updated_at"] = datetime.fromtimestamp(float(updated_at), timezone.utc).isoformat().replace("+00:00", "Z")
             else:
@@ -282,12 +354,17 @@ def build_sqlite_title_sync_plan(database: sqlite3.Connection, session_index_pat
     return {
         "source": str(session_index_path),
         "title_column_present": True,
+        "name_column_present": name_column_present,
+        "target_column": "name" if name_column_present else "title",
         "sqlite_updates": sqlite_updates,
         "effective_title_rows": effective_rows,
-        "index_records": title_index["records"],
+        "index_records": index_records,
+        "index_name_updates": index_name_updates,
         "added_index_records": added_index_records,
         "duplicate_thread_ids": duplicate_thread_ids,
-        "index_rewrite_required": bool(duplicate_thread_ids or added_index_records),
+        "index_rewrite_required": bool(
+            not name_column_present and (duplicate_thread_ids or added_index_records or index_name_updates)
+        ),
     }
 
 
@@ -305,11 +382,14 @@ def preview_sqlite_title_sync(
         "mutation": mutation_title_sync,
         "source": str(session_index_path),
         "title_column_present": bool(plan["title_column_present"]),
+        "name_column_present": bool(plan.get("name_column_present")),
+        "target_column": plan.get("target_column"),
         "mutation_required": bool(sqlite_updates or plan["index_rewrite_required"]),
         "sqlite_update_count": len(sqlite_updates),
         "sqlite_updates": sqlite_updates,
         "index_rewrite_required": bool(plan["index_rewrite_required"]),
         "duplicate_thread_ids": duplicate_thread_ids,
+        "index_name_updates": list(plan.get("index_name_updates") or []),
         "added_index_thread_ids": [str(record["id"]) for record in added_index_records],
     }
 
@@ -330,10 +410,19 @@ def synchronize_sqlite_titles(
         }
     sqlite_updates = list(plan["sqlite_updates"])
     for update in sqlite_updates:
+        target_column = str(update.get("target_column") or plan.get("target_column") or "title")
+        if target_column not in {"name", "title"}:
+            raise RuntimeError(f"unsupported title synchronization target column: {target_column}")
         database.execute(
-            "update threads set title = ? where id = ?",
+            f"update threads set {target_column} = ? where id = ?",
             (update["after"], update["thread_id"]),
         )
+        actual_value = database.execute(
+            f"select {target_column} from threads where id = ?",
+            (update["thread_id"],),
+        ).fetchone()
+        if not actual_value or str(actual_value[0] or "") != str(update["after"]):
+            raise RuntimeError(f"title synchronization verification failed: {update['thread_id']}")
     added_index_records = list(plan["added_index_records"])
     duplicate_thread_ids = list(plan["duplicate_thread_ids"])
     if plan["index_rewrite_required"]:
@@ -349,11 +438,11 @@ def synchronize_sqlite_titles(
         os.replace(temporary_path, session_index_path)
     final_titles = read_session_index_titles(session_index_path)["titles"]
     for row in plan["effective_title_rows"]:
-        thread_id = str(row[0] or "")
-        sqlite_title = str(row[1] or "")
-        if not sqlite_title:
+        thread_id = str(row["thread_id"] or "")
+        index_expected_title = str(row["index_expected_title"] or "")
+        if not index_expected_title:
             continue
-        if final_titles.get(thread_id) != sqlite_title:
+        if final_titles.get(thread_id) != index_expected_title:
             raise RuntimeError(f"title synchronization verification failed: {thread_id}")
     return {
         "status": "prepared",

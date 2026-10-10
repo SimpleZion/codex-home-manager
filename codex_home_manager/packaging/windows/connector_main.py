@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import json
+import ipaddress
 import signal
 import sys
 import threading
@@ -13,10 +14,25 @@ import os
 import logging
 import tempfile
 from pathlib import Path
+from collections.abc import Callable, Sequence
+
+from fastapi import HTTPException, Request
 
 
-local_console_url = "http://127.0.0.1:8765/"
-connector_probe_url = "http://127.0.0.1:8765/api/capabilities"
+def configured_connector_port() -> int:
+    raw_value = os.environ.get("CODEX_HOME_MANAGER_PORT", "8765").strip()
+    try:
+        port = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError("CODEX_HOME_MANAGER_PORT must be an integer") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError("CODEX_HOME_MANAGER_PORT must be between 1 and 65535")
+    return port
+
+
+connector_port = configured_connector_port()
+local_console_url = f"http://127.0.0.1:{connector_port}/"
+connector_probe_url = f"http://127.0.0.1:{connector_port}/api/capabilities"
 data_root: Path
 log_path: Path
 instance_path: Path
@@ -85,6 +101,61 @@ from backend.server import app
 from backend.pending_repair_validation import pending_repair_lock_path, start_pending_restart_validation
 
 
+desktop_sidecar_argument = "--desktop-sidecar"
+desktop_shutdown_token_environment = "CODEX_HOME_MANAGER_DESKTOP_SHUTDOWN_TOKEN"
+desktop_shutdown_header = "X-Codex-Home-Manager-Shutdown"
+desktop_shutdown_path = "/api/desktop/shutdown"
+
+
+def connector_mode(arguments: Sequence[str]) -> str:
+    return "desktop" if desktop_sidecar_argument in arguments else "browser"
+
+
+def schedule_desktop_shutdown() -> None:
+    def stop_process() -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    timer = threading.Timer(0.15, stop_process)
+    timer.daemon = True
+    timer.start()
+
+
+def install_desktop_shutdown_route(
+    target_app,
+    expected_token: str,
+    shutdown_callback: Callable[[], None] = schedule_desktop_shutdown,
+) -> None:
+    if not expected_token:
+        raise RuntimeError(f"{desktop_shutdown_token_environment} is required in desktop sidecar mode")
+    if any(getattr(route, "path", None) == desktop_shutdown_path for route in target_app.routes):
+        return
+
+    async def shutdown_desktop_sidecar(request: Request) -> dict[str, str]:
+        remote_host = request.client.host if request.client else ""
+        try:
+            is_loopback = ipaddress.ip_address(remote_host).is_loopback
+        except ValueError:
+            is_loopback = remote_host.casefold() == "localhost"
+        supplied_token = request.headers.get(desktop_shutdown_header, "")
+        if not is_loopback or not secrets_compare(expected_token, supplied_token):
+            raise HTTPException(status_code=403, detail="desktop sidecar shutdown authorization failed")
+        shutdown_callback()
+        return {"status": "stopping"}
+
+    target_app.add_api_route(
+        desktop_shutdown_path,
+        shutdown_desktop_sidecar,
+        methods=["POST"],
+        include_in_schema=False,
+    )
+
+
+def secrets_compare(expected: str, supplied: str) -> bool:
+    import secrets
+
+    return bool(supplied) and secrets.compare_digest(expected, supplied)
+
+
 def notify_user(title: str, message: str) -> None:
     if sys.platform == "win32":
         try:
@@ -108,7 +179,7 @@ def register_browser_protocol() -> None:
         executable_path = sys.executable
         command = f'"{executable_path}" "%1"'
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\codex-home-manager") as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:Codex Home Manager")
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:Codex Cockpit")
             winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\codex-home-manager\DefaultIcon") as icon_key:
             winreg.SetValueEx(icon_key, "", 0, winreg.REG_SZ, f'"{executable_path}",0')
@@ -265,7 +336,7 @@ def stop_verified_connector() -> bool:
 def port_is_available() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(1.0)
-        return probe.connect_ex(("127.0.0.1", 8765)) != 0
+        return probe.connect_ex(("127.0.0.1", connector_port)) != 0
 
 
 def open_local_console_after_start() -> None:
@@ -275,59 +346,74 @@ def open_local_console_after_start() -> None:
 
 def main() -> None:
     logging.info("connector process starting argv=%s executable=%s", sys.argv, sys.executable)
+    mode = connector_mode(sys.argv)
+    desktop_mode = mode == "desktop"
     if "--unregister-protocol" in sys.argv:
         unregister_browser_protocol()
-        notify_user("Codex Home Manager", "Browser launch protocol removed for this Windows user.")
+        notify_user("Codex Cockpit", "Browser launch protocol removed for this Windows user.")
         return
 
     if "--status" in sys.argv:
         payload = probe_connector()
         if payload is None:
-            notify_user("Codex Home Manager", "The verified local connector is not running.")
+            notify_user("Codex Cockpit", "The verified local connector is not running.")
         else:
-            notify_user("Codex Home Manager", f"Local connector {payload.get('version')} is running on 127.0.0.1:8765.")
+            notify_user(
+                "Codex Cockpit",
+                f"Local connector {payload.get('version')} is running on 127.0.0.1:{connector_port}.",
+            )
         return
 
     if "--stop" in sys.argv:
         stopped = stop_verified_connector()
-        notify_user("Codex Home Manager", "Local connector stopped." if stopped else "The verified local connector is not running.")
+        notify_user("Codex Cockpit", "Local connector stopped." if stopped else "The verified local connector is not running.")
         return
 
     if "--uninstall" in sys.argv:
         stopped = stop_verified_connector()
         unregister_browser_protocol()
         notify_user(
-            "Codex Home Manager",
+            "Codex Cockpit",
             "Local connector stopped and browser protocol removed. Your Codex data and Home Manager backups were preserved."
             if stopped
             else "Browser protocol removed. Your Codex data and Home Manager backups were preserved.",
         )
         return
 
-    register_browser_protocol()
+    if not desktop_mode:
+        register_browser_protocol()
     if "--register-protocol" in sys.argv:
-        notify_user("Codex Home Manager", "Browser launch protocol installed for this Windows user.")
+        notify_user("Codex Cockpit", "Browser launch protocol installed for this Windows user.")
         return
 
     if existing_connector_is_running():
-        logging.info("existing connector detected; opening local console")
-        webbrowser.open(local_console_url)
+        logging.info("existing connector detected mode=%s", mode)
+        if not desktop_mode:
+            webbrowser.open(local_console_url)
         return
 
     if not port_is_available():
+        if desktop_mode:
+            raise RuntimeError(f"port {connector_port} is occupied by an incompatible local service")
         notify_user(
-            "Codex Home Manager",
-            "Port 8765 is already in use. The local console will open; if it does not load, close the other process using port 8765 first.",
+            "Codex Cockpit",
+            f"Port {connector_port} is already in use. The local console will open; if it does not load, close the other process using that port first.",
         )
         webbrowser.open(local_console_url)
         return
 
     start_pending_restart_validation(pending_repair_lock_path())
-    threading.Thread(target=open_local_console_after_start, daemon=True).start()
-    logging.info("starting uvicorn on 127.0.0.1:8765")
+    if desktop_mode:
+        install_desktop_shutdown_route(
+            app,
+            os.environ.get(desktop_shutdown_token_environment, ""),
+        )
+    else:
+        threading.Thread(target=open_local_console_after_start, daemon=True).start()
+    logging.info("starting uvicorn on 127.0.0.1:%s", connector_port)
     write_instance_record()
     try:
-        uvicorn.run(app, host="127.0.0.1", port=8765, reload=False, log_config=None, access_log=False)
+        uvicorn.run(app, host="127.0.0.1", port=connector_port, reload=False, log_config=None, access_log=False)
     finally:
         current_record = read_instance_record()
         if current_record and current_record.get("pid") == os.getpid():

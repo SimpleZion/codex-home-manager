@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Codex Cockpit",
+  "version": "1.0.34",
+  "identifier": "com.simplezion.codex-home-manager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "node scripts/frontend-release-artifact.mjs verify",
+    "frontendDist": "../build/frontend-release"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8765 ws://127.0.0.1:8765"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Codex Cockpit",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1080,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "category": "DeveloperTool",
+    "shortDescription": "Inspect and manage a local Codex Home.",
+    "longDescription": "A local Windows desktop application for inspecting, diagnosing, and managing Codex Home data.",
+    "resources": {
+      "resources/service/": "service/",
+      "resources/legacy/": "legacy/",
+      "resources/skills/": "skills/",
+      "resources/runtime/": "runtime/",
+      "resources/web/": "web/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese", "English"]
+      }
+    }
+  }
+}

@@ -297,6 +297,9 @@ async function measureViewport(page, viewport, label) {
   await page.setViewportSize(viewport);
   await page.goto(serviceUrl, { waitUntil: "domcontentloaded" });
   await waitForThreadIndex(page);
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
 
   const metrics = await page.evaluate(() => {
     const wrap = document.querySelector(".table-wrap");
@@ -308,6 +311,9 @@ async function measureViewport(page, viewport, label) {
     const visualCards = Array.from(document.querySelectorAll(".visual-card"));
     const mainPanel = document.querySelector(".main-panel");
     const detailPanel = document.querySelector(".detail-panel");
+    const commandBar = document.querySelector(".command-bar");
+    const sidebar = document.querySelector(".app-sidebar");
+    const navigationButtons = Array.from(document.querySelectorAll(".side-nav button"));
     const actionHeader = document.querySelector(".thread-table th:last-child");
     const firstActionCell = document.querySelector(".thread-table tbody tr:first-child td:last-child");
     const actionButtons = Array.from(document.querySelectorAll(".thread-table .row-action-button"));
@@ -348,8 +354,16 @@ async function measureViewport(page, viewport, label) {
       mainPanelHeight: mainPanel?.getBoundingClientRect().height ?? null,
       detailPanelWidth: detailPanel?.getBoundingClientRect().width ?? null,
       detailPanelPosition: detailStyle?.position ?? null,
+      commandBarHeight: commandBar?.getBoundingClientRect().height ?? null,
+      sidebarHeight: sidebar?.getBoundingClientRect().height ?? null,
+      navigationOverlap: navigationButtons.some((button, index) => navigationButtons.slice(index + 1).some((other) => {
+        const first = button.getBoundingClientRect();
+        const second = other.getBoundingClientRect();
+        return first.left < second.right - 1 && first.right > second.left + 1 && first.top < second.bottom - 1 && first.bottom > second.top + 1;
+      })),
       tableWrapClientWidth: wrap?.clientWidth ?? null,
       tableWrapScrollWidth: wrap?.scrollWidth ?? null,
+      tableWrapOverflowX: wrap ? getComputedStyle(wrap).overflowX : null,
       tableWrapClientHeight: wrap?.clientHeight ?? null,
       tableWrapScrollHeight: wrap?.scrollHeight ?? null,
       tableWidth: table?.getBoundingClientRect().width ?? null,
@@ -367,6 +381,8 @@ async function measureViewport(page, viewport, label) {
     };
   });
 
+  console.log(`ui-overflow metrics ${label}: ${JSON.stringify(metrics)}`);
+
   assertCondition(metrics.pageScrollWidth <= metrics.pageClientWidth + 1, `${label} page has no horizontal overflow`);
   assertCondition(
     metrics.toolbarScrollWidth === null || metrics.toolbarScrollWidth <= metrics.toolbarClientWidth + 1,
@@ -378,8 +394,10 @@ async function measureViewport(page, viewport, label) {
     );
     if (metrics.visualDisplay !== "none" && metrics.visualHeight !== null) {
       assertCondition(
-        metrics.visualScrollWidth === null || metrics.visualScrollWidth <= metrics.visualClientWidth + 1,
-        `${label} visual summary has no internal horizontal overflow`
+        label === "mobile"
+          ? metrics.visualScrollWidth > metrics.visualClientWidth + 1
+          : metrics.visualScrollWidth === null || metrics.visualScrollWidth <= metrics.visualClientWidth + 1,
+        `${label} visual summary uses the expected compact layout`
       );
       assertCondition(!metrics.visualCardHorizontalOverflow, `${label} visual summary cards contain text horizontally`);
       if (label.startsWith("desktop")) {
@@ -413,18 +431,36 @@ async function measureViewport(page, viewport, label) {
     );
   }
   assertCondition(metrics.tableWrapScrollWidth !== null, `${label} thread table wrapper exists`);
-  assertCondition(
-    metrics.tableWrapScrollWidth <= metrics.tableWrapClientWidth + 1,
-    `${label} thread table has no internal horizontal overflow`
-  );
-  assertCondition(metrics.headerVisibleInsideWrap, `${label} action header is visible inside table viewport`);
-  assertCondition(metrics.actionVisibleInsideWrap, `${label} first action cell is visible inside table viewport`);
+  if (label === "mobile") {
+    assertCondition(metrics.commandBarHeight !== null && metrics.commandBarHeight <= 175, "mobile global controls stay within a compact three-row toolbar");
+    assertCondition(metrics.sidebarHeight !== null && metrics.sidebarHeight <= 190, "mobile brand and navigation remain compact");
+    assertCondition(!metrics.navigationOverlap, "mobile navigation buttons do not overlap");
+    assertCondition(metrics.tableWrapScrollWidth > metrics.tableWrapClientWidth + 1, "mobile thread table exposes intentional horizontal scrolling");
+    assertCondition(metrics.tableWrapOverflowX === "auto", "mobile thread table declares horizontal scrolling");
+    await page.locator(".table-wrap").evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+    const rightEdgeVisible = await page.evaluate(() => {
+      const wrap = document.querySelector(".table-wrap")?.getBoundingClientRect();
+      const header = document.querySelector(".thread-table th:last-child")?.getBoundingClientRect();
+      const cell = document.querySelector(".thread-table tbody tr:first-child td:last-child")?.getBoundingClientRect();
+      return Boolean(wrap && header && cell && header.left >= wrap.left - 1 && header.right <= wrap.right + 1 && cell.left >= wrap.left - 1 && cell.right <= wrap.right + 1);
+    });
+    assertCondition(rightEdgeVisible, "mobile table operation column is reachable by horizontal scrolling");
+    await page.evaluate(() => window.scrollTo(0, 420));
+    await page.getByRole("button", { name: "维护中心", exact: true }).click();
+    await page.waitForFunction(() => window.scrollY === 0);
+    assertCondition(await page.evaluate(() => window.scrollY === 0), "switching mobile sections resets stale page scroll");
+    await page.getByRole("button", { name: "线程", exact: true }).click();
+    await waitForThreadIndex(page);
+  } else {
+    assertCondition(metrics.tableWrapScrollWidth <= metrics.tableWrapClientWidth + 1, `${label} thread table has no internal horizontal overflow`);
+    assertCondition(metrics.headerVisibleInsideWrap, `${label} action header is visible inside table viewport`);
+    assertCondition(metrics.actionVisibleInsideWrap, `${label} first action cell is visible inside table viewport`);
+    assertCondition(metrics.actionButtonsInsideWrap, `${label} thread action buttons stay inside table viewport`);
+    assertCondition(metrics.actionButtonsInsidePage, `${label} thread action buttons stay inside page viewport`);
+  }
   assertCondition(metrics.rowActionButtonCount > 0, `${label} thread action buttons exist`);
   assertCondition(metrics.rowActionButtonMinWidth >= 60, `${label} thread action buttons keep a practical width`);
   assertCondition(metrics.actionButtonsInsideCells, `${label} thread action buttons stay inside operation cells`);
-  assertCondition(metrics.actionButtonsInsideWrap, `${label} thread action buttons stay inside table viewport`);
-  assertCondition(metrics.actionButtonsInsidePage, `${label} thread action buttons stay inside page viewport`);
-  console.log(`ui-overflow metrics ${label}: ${JSON.stringify(metrics)}`);
 }
 
 async function verifyProjectGroupCollapse(page) {
@@ -557,7 +593,12 @@ async function verifySubagentVisibleScope(page) {
   if (await makeMoneyButton.count()) {
     await makeMoneyButton.click();
   }
-  await page.waitForTimeout(300);
+  await page.waitForFunction(() => {
+    const activeSegments = Array.from(document.querySelectorAll(".segmented button.active"))
+      .map((button) => button.textContent?.trim() || "");
+    return activeSegments.includes("子agent")
+      && document.querySelectorAll(".thread-table tbody tr").length > 0;
+  }, { timeout: 15000 });
   const metrics = await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll(".thread-table tbody tr")).map((row) => row.textContent || "");
     const detailTitle = document.querySelector(".detail-heading h2")?.textContent || "";
@@ -660,7 +701,8 @@ async function verifyRowActionClickability(page) {
   await page.setViewportSize({ width: 2048, height: 1152 });
   await page.goto(serviceUrl, { waitUntil: "domcontentloaded" });
   await waitForThreadIndex(page);
-  await page.getByRole("button", { name: "可见" }).click();
+  const statusFilter = page.locator(".toolbar .segmented").nth(1);
+  await statusFilter.getByRole("button", { name: "全部", exact: true }).click();
   await page.waitForSelector(".row-action-button", { timeout: 15000 });
   const buttonMetrics = await page.evaluate(() => {
     const legacyActionButton = Array.from(document.querySelectorAll(".row-action-button"))
@@ -691,7 +733,6 @@ async function verifyRowActionClickability(page) {
   assertCondition(buttonMetrics.buttonWidth >= 60 && buttonMetrics.buttonHeight >= 30, "visible row hide action has a practical click target");
   assertCondition(buttonMetrics.insideCell, "visible row hide action stays inside operation cell");
 
-  const statusFilter = page.locator(".toolbar .segmented").nth(1);
   const allStatusButton = statusFilter.getByRole("button", { name: "全部", exact: true });
   await allStatusButton.click();
   await page.waitForFunction(() => {

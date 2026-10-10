@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -105,6 +106,24 @@ class CompatibilityViewResult:
     removed_unreplayable_reasoning_item_count: int
     migrated_proxy_assistant_message_count: int
     migrated_proxy_custom_tool_call_count: int
+    migrated_proxy_function_call_count: int
+    session_meta_id: str
+    latest_compacted_line: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class OrphanCustomToolCallViewResult:
+    source_path: str
+    destination_path: str
+    source_line_count: int
+    view_line_count: int
+    source_bytes: int
+    view_bytes: int
+    removed_custom_tool_call_count: int
+    removed_call_ids: tuple[str, ...]
     session_meta_id: str
     latest_compacted_line: int
 
@@ -206,6 +225,47 @@ def _is_proxy_custom_tool_call(item: Any) -> bool:
         _is_incompatible_proxy_item_id(item)
         and item["payload"].get("type") == "custom_tool_call"
     )
+
+
+def _is_proxy_function_call(item: Any) -> bool:
+    return (
+        _is_incompatible_proxy_item_id(item)
+        and item["payload"].get("type") == "function_call"
+        and isinstance(item["payload"].get("call_id"), str)
+        and bool(item["payload"]["call_id"])
+    )
+
+
+def _top_level_custom_tool_call_id(item: Any, payload_type: str) -> str:
+    if not isinstance(item, dict) or item.get("type") != "response_item":
+        return ""
+    payload = item.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != payload_type:
+        return ""
+    call_id = payload.get("call_id")
+    return call_id if isinstance(call_id, str) and call_id else ""
+
+
+def unpaired_custom_tool_call_counts(path: Path) -> dict[str, int]:
+    call_counts: Counter[str] = Counter()
+    output_counts: Counter[str] = Counter()
+    with path.open("rb") as source:
+        for line_number, raw_line in enumerate(source, 1):
+            try:
+                item = json.loads(raw_line)
+            except Exception as error:
+                raise RuntimeError(f"source rollout has invalid JSON at line {line_number}") from error
+            call_id = _top_level_custom_tool_call_id(item, "custom_tool_call")
+            if call_id:
+                call_counts[call_id] += 1
+            output_call_id = _top_level_custom_tool_call_id(item, "custom_tool_call_output")
+            if output_call_id:
+                output_counts[output_call_id] += 1
+    return {
+        call_id: call_count - output_counts[call_id]
+        for call_id, call_count in call_counts.items()
+        if call_count > output_counts[call_id]
+    }
 
 
 _drop_invalid_image_object = object()
@@ -534,6 +594,9 @@ def _migrate_compatibility_item(item: Any) -> tuple[Any, bool, int]:
     if _is_proxy_custom_tool_call(item):
         item["payload"].pop("id")
         changed = True
+    if _is_proxy_function_call(item):
+        item["payload"].pop("id")
+        changed = True
     if _is_incompatible_proxy_item_id(item):
         payload = item["payload"]
         raise RuntimeError(
@@ -728,6 +791,66 @@ def create_slim_view(source_path: Path, destination_path: Path, expected_thread_
     )
 
 
+def create_orphan_custom_tool_call_view(
+    source_path: Path,
+    destination_path: Path,
+    expected_thread_id: str,
+) -> OrphanCustomToolCallViewResult:
+    scan = scan_rollout(source_path)
+    if scan.parse_errors:
+        raise RuntimeError(f"source rollout has {scan.parse_errors} JSON parse errors")
+    if scan.session_meta_id != expected_thread_id:
+        raise RuntimeError(
+            f"session_meta id {scan.session_meta_id} does not match expected thread id {expected_thread_id}"
+        )
+    unpaired_counts = unpaired_custom_tool_call_counts(source_path)
+    if not unpaired_counts:
+        raise RuntimeError("source rollout has no unpaired custom tool calls")
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    call_counts_seen: Counter[str] = Counter()
+    calls_to_keep: dict[str, int] = {}
+    total_call_counts: Counter[str] = Counter()
+    with source_path.open("rb") as source:
+        for raw_line in source:
+            item = json.loads(raw_line)
+            call_id = _top_level_custom_tool_call_id(item, "custom_tool_call")
+            if call_id:
+                total_call_counts[call_id] += 1
+    for call_id, call_count in total_call_counts.items():
+        calls_to_keep[call_id] = call_count - unpaired_counts.get(call_id, 0)
+
+    view_line_count = 0
+    removed_call_ids: list[str] = []
+    with source_path.open("rb") as source, destination_path.open("wb") as destination:
+        for raw_line in source:
+            item = json.loads(raw_line)
+            call_id = _top_level_custom_tool_call_id(item, "custom_tool_call")
+            if call_id:
+                call_counts_seen[call_id] += 1
+                if call_counts_seen[call_id] > calls_to_keep[call_id]:
+                    removed_call_ids.append(call_id)
+                    continue
+            destination.write(raw_line if raw_line.endswith(b"\n") else raw_line + b"\n")
+            view_line_count += 1
+
+    remaining_unpaired = unpaired_custom_tool_call_counts(destination_path)
+    if remaining_unpaired:
+        raise RuntimeError(f"generated view still has unpaired custom tool calls: {remaining_unpaired}")
+    return OrphanCustomToolCallViewResult(
+        source_path=str(source_path),
+        destination_path=str(destination_path),
+        source_line_count=scan.line_count,
+        view_line_count=view_line_count,
+        source_bytes=scan.total_bytes,
+        view_bytes=destination_path.stat().st_size,
+        removed_custom_tool_call_count=len(removed_call_ids),
+        removed_call_ids=tuple(removed_call_ids),
+        session_meta_id=scan.session_meta_id,
+        latest_compacted_line=scan.latest_compacted_line,
+    )
+
+
 def create_compatibility_view(
     source_path: Path,
     destination_path: Path,
@@ -767,6 +890,7 @@ def _write_compatibility_view(
     removed_unreplayable_reasoning_item_count = 0
     migrated_proxy_assistant_message_count = 0
     migrated_proxy_custom_tool_call_count = 0
+    migrated_proxy_function_call_count = 0
     with destination_path.open("wb") as destination:
         for raw_line, item in records:
             if _is_thread_name_updated(item):
@@ -778,6 +902,7 @@ def _write_compatibility_view(
             was_tools_summary = _is_tools_summary_output(item)
             was_proxy_assistant_message = _is_proxy_assistant_output_message(item)
             was_proxy_custom_tool_call = _is_proxy_custom_tool_call(item)
+            was_proxy_function_call = _is_proxy_function_call(item)
             migrated_item, changed, removed_images = _migrate_compatibility_item(item)
             removed_invalid_image_url_count += removed_images
             if changed:
@@ -789,6 +914,8 @@ def _write_compatibility_view(
                     migrated_proxy_assistant_message_count += 1
                 if was_proxy_custom_tool_call:
                     migrated_proxy_custom_tool_call_count += 1
+                if was_proxy_function_call:
+                    migrated_proxy_function_call_count += 1
             else:
                 destination.write(raw_line if raw_line.endswith(b"\n") else raw_line + b"\n")
             view_line_count += 1
@@ -806,6 +933,7 @@ def _write_compatibility_view(
         removed_unreplayable_reasoning_item_count=removed_unreplayable_reasoning_item_count,
         migrated_proxy_assistant_message_count=migrated_proxy_assistant_message_count,
         migrated_proxy_custom_tool_call_count=migrated_proxy_custom_tool_call_count,
+        migrated_proxy_function_call_count=migrated_proxy_function_call_count,
         session_meta_id=scan.session_meta_id,
         latest_compacted_line=scan.latest_compacted_line,
     )
@@ -877,11 +1005,15 @@ def _repair_with_view_builder(
     audited_size: int,
     audited_mtime_ns: int,
     audited_sha256: str,
-    view_builder: Callable[[Path, Path, str], SlimViewResult | CompatibilityViewResult],
+    view_builder: Callable[
+        [Path, Path, str],
+        SlimViewResult | CompatibilityViewResult | OrphanCustomToolCallViewResult,
+    ],
     precommit_guard: Callable[[], None] | None = None,
     before_replace: Callable[[dict[str, Any]], None] | None = None,
     post_replace_hook: Callable[[], None] | None = None,
     allow_in_place_overwrite_when_replace_locked: bool = False,
+    require_no_current_parser_errors: bool = True,
 ) -> InPlaceRepairResult:
     source_path = source_path.resolve()
     backup_root = backup_root.resolve()
@@ -904,7 +1036,7 @@ def _repair_with_view_builder(
         active_scan = scan_rollout(temporary_view)
         if active_scan.parse_errors:
             raise RuntimeError(f"generated active view has {active_scan.parse_errors} JSON parse errors")
-        if active_scan.estimated_current_parser_errors:
+        if require_no_current_parser_errors and active_scan.estimated_current_parser_errors:
             raise RuntimeError(
                 f"generated active view has {active_scan.estimated_current_parser_errors} current-parser errors"
             )
@@ -1146,6 +1278,34 @@ def repair_rollout_compatibility_from_reference_in_place(
         before_replace=before_replace,
         post_replace_hook=post_replace_hook,
         allow_in_place_overwrite_when_replace_locked=allow_in_place_overwrite_when_replace_locked,
+    )
+
+
+def repair_orphan_custom_tool_calls_in_place(
+    source_path: Path,
+    backup_root: Path,
+    expected_thread_id: str,
+    audited_size: int,
+    audited_mtime_ns: int,
+    audited_sha256: str,
+    precommit_guard: Callable[[], None] | None = None,
+    before_replace: Callable[[dict[str, Any]], None] | None = None,
+    post_replace_hook: Callable[[], None] | None = None,
+    allow_in_place_overwrite_when_replace_locked: bool = False,
+) -> InPlaceRepairResult:
+    return _repair_with_view_builder(
+        source_path=source_path,
+        backup_root=backup_root,
+        expected_thread_id=expected_thread_id,
+        audited_size=audited_size,
+        audited_mtime_ns=audited_mtime_ns,
+        audited_sha256=audited_sha256,
+        view_builder=create_orphan_custom_tool_call_view,
+        precommit_guard=precommit_guard,
+        before_replace=before_replace,
+        post_replace_hook=post_replace_hook,
+        allow_in_place_overwrite_when_replace_locked=allow_in_place_overwrite_when_replace_locked,
+        require_no_current_parser_errors=False,
     )
 
 

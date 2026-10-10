@@ -42,7 +42,19 @@ $manifestPath = Join-Path $releaseRoot "release-manifest.json"
 $signaturePath = Join-Path $releaseRoot "release-manifest.json.sig"
 $publicKeyPath = Join-Path $releaseRoot "release-signing-public-key.pem"
 $publicFingerprintPath = Join-Path $publicSiteDirectory "release-signing-public-key.sha256"
-$trustedPublicKeyFingerprintPath = "D:\Backup\codex_home_manager\release-signing\release-signing-public-key.sha256"
+$releaseSigningDirectory = Join-Path $rootRepository ".codex\release-signing"
+$privateKeyPath = Join-Path $releaseSigningDirectory "release-signing-key.pem"
+$trustedPublicKeyFingerprintPath = Join-Path $releaseSigningDirectory "release-signing-public-key.sha256"
+if (-not (Test-Path -LiteralPath $trustedPublicKeyFingerprintPath -PathType Leaf)) {
+    throw "The independently retained publisher trust record is missing: $trustedPublicKeyFingerprintPath"
+}
+$embeddedReleasePublicKeyFingerprint = "sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f"
+if ((Get-Content -LiteralPath $trustedPublicKeyFingerprintPath -Raw).Trim() -cne $embeddedReleasePublicKeyFingerprint) {
+    throw "Publisher trust record differs from the independently pinned release verifier"
+}
+if ($Phase -eq "PrepareMetadata" -and -not (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)) {
+    throw "The original release signing key is missing: $privateKeyPath. Signed publication cannot continue."
+}
 $releaseManifestScript = Join-Path $PSScriptRoot "release_manifest.py"
 
 function Get-GitOutput {
@@ -327,7 +339,7 @@ if ($Phase -eq "PrepareMetadata") {
         --artifact-deployment-evidence $artifactDeploymentEvidencePath `
         --github-release-evidence $githubReleaseEvidencePath `
         --source-evidence-proof $sourceEvidenceProofPath `
-        --private-key "D:\Backup\codex_home_manager\release-signing\release-signing-key.pem" `
+        --private-key $privateKeyPath `
         --trusted-public-key-fingerprint $trustedPublicKeyFingerprintPath `
         --manifest $manifestPath `
         --signature $signaturePath

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-15T04:39:39.267086+00:00",
+  "generatedAt": "2026-10-10T08:31:49.400547+00:00",
   "layout": {
     "readme": "README.md",
     "sharedScripts": "scripts",
@@ -9,13 +9,14 @@
   },
   "sources": {
     "rootRepository": {
-      "branch": "master",
-      "commit": "89d882338fd6e45c0f753d4468e97ea47244de6f",
+      "branch": "",
+      "commit": "54f52d883ef87300f208305581e2ec2b097257e3",
       "selection": [
         ".gitattributes",
         ".source-publication.gitignore -> .gitignore",
         "README.md -> docs/SOURCE_EXPORT.md",
-        "scripts/**"
+        "scripts/**",
+        "config/storage-layout.json"
       ],
       "files": [
         {
@@ -30,9 +31,17 @@
           "path": ".gitignore",
           "sourcePath": ".source-publication.gitignore",
           "gitMode": "100644",
-          "gitObject": "f291f030e5d5a7ba227cb07025534e7c2937933f",
-          "bytes": 233,
-          "sha256": "a8fdeb821d8fb4cc5731c5517acdeeeec2cdae843dcf36e40ec320eaa6925345"
+          "gitObject": "4dff7a884f0a53b2bb64312b3278193e66221dff",
+          "bytes": 248,
+          "sha256": "770c907580bb88bf1bd9a9cb6944fe21658f00ba664858096a1c9d59dd8c166f"
+        },
+        {
+          "path": "config/storage-layout.json",
+          "sourcePath": "config/storage-layout.json",
+          "gitMode": "100644",
+          "gitObject": "e3739d7189c91105537356f228d27d933655030d",
+          "bytes": 1813,
+          "sha256": "25a0084038c26a0ee6516afe3afd6e35f2150d68c20cda1b9720e46c4e6799dd"
         },
         {
           "path": "docs/SOURCE_EXPORT.md",
@@ -46,9 +55,9 @@
           "path": "scripts/apply_codex_offline_repair.py",
           "sourcePath": "scripts/apply_codex_offline_repair.py",
           "gitMode": "100644",
-          "gitObject": "b82e331b13c64db14e61f5911b442d09611908bc",
-          "bytes": 76984,
-          "sha256": "bd7a9f4d6af04ab6422a614d61bfefc375f3363206ef7cab56e8666b1b634791"
+          "gitObject": "50c1a0dbd6601857b3f744e8ae44bc87e4fbce21",
+          "bytes": 82055,
+          "sha256": "9acde340c19f18ae9eba82bb9f6b390ece4c2f88cea76ee5a170d9969a434b52"
         },
         {
           "path": "scripts/audit_codex_thread_histories.py",
@@ -57,6 +66,30 @@
           "gitObject": "510879e9540faa6d2c4b41c916c3fe792a44de7c",
           "bytes": 11253,
           "sha256": "37ff569ed4b4b1b1da8ac9891507da91c8fcffa8c7ae29ae175a218026aba437"
+        },
+        {
+          "path": "scripts/build_home_manager_guarded.py",
+          "sourcePath": "scripts/build_home_manager_guarded.py",
+          "gitMode": "100644",
+          "gitObject": "84769e88d1002b9b73b72935ff719df8b92f51a8",
+          "bytes": 14943,
+          "sha256": "9c5ed9d3ee9948f8eeed794ef77e238ecfb5f41fa17f12d342d9f02a99e83ce0"
+        },
+        {
+          "path": "scripts/codex_artifact_lifecycle.py",
+          "sourcePath": "scripts/codex_artifact_lifecycle.py",
+          "gitMode": "100644",
+          "gitObject": "3d8ed8b6e91ca2e657ab88ec5d99de45c57d116b",
+          "bytes": 39839,
+          "sha256": "019e50e45a9d37b5afe61023c2dc9d78c2d2ee2ed5bd170519165c49b42b1223"
+        },
+        {
+          "path": "scripts/codex_directory_layout.py",
+          "sourcePath": "scripts/codex_directory_layout.py",
+          "gitMode": "100644",
+          "gitObject": "00a0d5496ca4bb60786b0bcda7e62e376c92d6ec",
+          "bytes": 3007,
+          "sha256": "6f7b59c79157f5ab8f2f174277e761d276614362c571b7005cf14816f1024a11"
         },
         {
           "path": "scripts/codex_plugin_state_snapshot.py",
@@ -75,12 +108,20 @@
           "sha256": "9fb88eb3ee9831a3d878852b965e42e6028abbd38726e4e5fb8f050593c48709"
         },
         {
+          "path": "scripts/desktop_memory_diagnostics.py",
+          "sourcePath": "scripts/desktop_memory_diagnostics.py",
+          "gitMode": "100644",
+          "gitObject": "fc16427d5c37dbb094e7b5bdaad3d55f160fe3c9",
+          "bytes": 289,
+          "sha256": "9f25e0ffdfa00a006b6a2443ce11947d6ced7009f7e4a1a115c5c93768afd209"
+        },
+        {
           "path": "scripts/export_codex_home_manager_source.py",
           "sourcePath": "scripts/export_codex_home_manager_source.py",
           "gitMode": "100644",
-          "gitObject": "18e614150afc6e5b1c0a1547e3a82476180cb204",
-          "bytes": 27206,
-          "sha256": "6dacc44065140f339983c1aa8d4aca5eb42d8d580064b0e31c87b5803ca9966c"
+          "gitObject": "7b56858e0aa6db49ca3d43cd4ced5a4212350d15",
+          "bytes": 28043,
+          "sha256": "7d412a9b7d615a94009770210ee1c55b73178df0313498e2e44748f9f2a15b9c"
         },
         {
           "path": "scripts/live_validation_contract.py",
@@ -105,6 +146,22 @@
           "gitObject": "c8945eb1d94335f1a26b50565d808880b14614bb",
           "bytes": 11049,
           "sha256": "4a5f5939a58bf35cff6c3dd70b740ad0c7169b6288250ed95d9e7d95d3e1abcb"
+        },
+        {
+          "path": "scripts/migrate_codex_thread_offline.py",
+          "sourcePath": "scripts/migrate_codex_thread_offline.py",
+          "gitMode": "100644",
+          "gitObject": "37cb05db46ef30335de6dfee20a0450cd1fcd614",
+          "bytes": 35902,
+          "sha256": "b4dc738a38bf25bc8d28a0748d36c6be3c2281f9be928b868674422d56a87ae4"
+        },
+        {
+          "path": "scripts/prepare_cockpit_source_publication.py",
+          "sourcePath": "scripts/prepare_cockpit_source_publication.py",
+          "gitMode": "100644",
+          "gitObject": "b17fa35e02aad498272912e9a0e28681de38f8bb",
+          "bytes": 10272,
+          "sha256": "165c965b57f0e85dc911ab1fa31c9af887ea56324860d4b0b2fa59c849c78b62"
         },
         {
           "path": "scripts/prepare_codex_live_validation.py",
@@ -163,6 +220,14 @@
           "sha256": "3e0560649826a903cd6f28889254cdf231e9beb9baa0755c5ac0310d96840ece"
         },
         {
+          "path": "scripts/slim_thread_tree_safe.py",
+          "sourcePath": "scripts/slim_thread_tree_safe.py",
+          "gitMode": "100644",
+          "gitObject": "774f849d363ebaab8409792dc5bebec3748a8aea",
+          "bytes": 43782,
+          "sha256": "9e3b560bf53ee80fe90f7b6946893dbde055efe86b64743b12ae6915a2827cdd"
+        },
+        {
           "path": "scripts/supersede_pending_repair_validation.py",
           "sourcePath": "scripts/supersede_pending_repair_validation.py",
           "gitMode": "100644",
@@ -181,8 +246,8 @@
       ]
     },
     "managerRepository": {
-      "branch": "main",
-      "commit": "43ab2a8d7ec347a8a96f6c4210c6790654c97f53",
+      "branch": "",
+      "commit": "456a327b38725e97a251e54dbd019a23ee34e8dd",
       "selection": [
         "**"
       ],
@@ -207,9 +272,9 @@
           "path": ".github/workflows/requirements-ci.txt",
           "sourcePath": ".github/workflows/requirements-ci.txt",
           "gitMode": "100644",
-          "gitObject": "fcf3ddafa25c34428210752b29ba42bae07026d5",
-          "bytes": 14630,
-          "sha256": "99b35c9a118fd5e71decde5cf5f93abc8750dbbd95eba21b523c1e3bd6453347"
+          "gitObject": "9c0c0ce8393249bb1629f7944a69e809bcbff764",
+          "bytes": 14820,
+          "sha256": "2a569b2a434889860a8168c1dc29cf95ff9d94f7cb1151523d969f33d329b587"
         },
         {
           "path": ".github/workflows/source-ci.yml",
@@ -239,33 +304,33 @@
           "path": "README.md",
           "sourcePath": "README.md",
           "gitMode": "100644",
-          "gitObject": "04f2fafb5edad092ba822ca873050956939ab554",
-          "bytes": 3934,
-          "sha256": "0008e48e6c4f3008a4f1824741b8f5f438fe186028f8058c46527ddc8677cede"
+          "gitObject": "42ed7b36d8b700bb32f3fe4a01c56f22b64dc9f4",
+          "bytes": 5058,
+          "sha256": "553438a65ed7534ddff9a32344ea4cf5df7b70c397d1ae20503ee799597986e2"
         },
         {
           "path": "SECURITY.md",
           "sourcePath": "SECURITY.md",
           "gitMode": "100644",
-          "gitObject": "31bce1e39fe08f8568d48189a02de163be6a6cac",
-          "bytes": 2078,
-          "sha256": "ae71aa6e8d3aa79307d3b71d6d8d7ebe2ecc66f3f1b98a9d5b7c77eb5de713d9"
+          "gitObject": "1fe4d7c822b83ee3349ec4953e3dd24e9171913e",
+          "bytes": 3789,
+          "sha256": "0c3ae963ffe2cd6094d401d6160cf36717f5617fb283f37fcb85adab59253a00"
         },
         {
           "path": "codex_home_manager/.gitignore",
           "sourcePath": ".gitignore",
           "gitMode": "100644",
-          "gitObject": "07d79bb14ef2a92f0c2a7ef7a0a2d2686095c5d2",
-          "bytes": 300,
-          "sha256": "b3b69c6fd3a7dd5c621d97ee6785d956b7e4d172fae813f73d583d2f973ce128"
+          "gitObject": "2961b0ae448eac023598c13b7f3c531bd79ed044",
+          "bytes": 531,
+          "sha256": "81adb91bccf5b80757494f5c27609feaca8519ca82148c47820b0cb24e9327b7"
         },
         {
           "path": "codex_home_manager/CodexHomeManager.cmd",
           "sourcePath": "CodexHomeManager.cmd",
           "gitMode": "100644",
-          "gitObject": "d5f1f26daa66820d9f04846f116c405ae6520ba6",
-          "bytes": 244,
-          "sha256": "c27d4ddcb9ce51688e5d5591d08ec22128a67f1f5f9df1ab4281a19d1a081634"
+          "gitObject": "af0964c07c0430f2b444382df834972b48726f08",
+          "bytes": 258,
+          "sha256": "b5e5e4813df394f32fea409a42da2cdbefbc18b5cd0c3c779ceda07db65f8bd7"
         },
         {
           "path": "codex_home_manager/StopCodexHomeManager.cmd",
@@ -284,20 +349,44 @@
           "sha256": "eacf5361f4d93814767c72170eb6d8f6fe76060910c7f46821eba15bf546e8f3"
         },
         {
+          "path": "codex_home_manager/backend/api_contracts.py",
+          "sourcePath": "backend/api_contracts.py",
+          "gitMode": "100644",
+          "gitObject": "4423e920bb9d01582ded6f18cdc9e3cbcf271530",
+          "bytes": 1503,
+          "sha256": "4d112651dc83edf511fd012972d5dc071c594459caadd418b270a98927e6e1b7"
+        },
+        {
+          "path": "codex_home_manager/backend/browser_rollout_patch_status.py",
+          "sourcePath": "backend/browser_rollout_patch_status.py",
+          "gitMode": "100644",
+          "gitObject": "22a01f87121d4655c317bf13c515f4280c5e0cf4",
+          "bytes": 20148,
+          "sha256": "3918668ad9ff5cf7362914a74b50fae456b6d93581067e9d3f48629351710be7"
+        },
+        {
           "path": "codex_home_manager/backend/codex_data.py",
           "sourcePath": "backend/codex_data.py",
           "gitMode": "100644",
-          "gitObject": "63a092dc07a60d0ede807896f69a8ce819887f52",
-          "bytes": 418219,
-          "sha256": "997eb70129f533b88436bc651e8c9d03a81a604f00a47f9b61ce12ab521e4dd9"
+          "gitObject": "afad483966601f18cf041cd89d7085a159fd9aa8",
+          "bytes": 465629,
+          "sha256": "bf09585a386f637cc9876cfcfd33226f0500eaa6ff476e529790b7463d4ff580"
+        },
+        {
+          "path": "codex_home_manager/backend/desktop_memory_diagnostics.py",
+          "sourcePath": "backend/desktop_memory_diagnostics.py",
+          "gitMode": "100644",
+          "gitObject": "3687a0ee4c804719f3cfe01e0b97056caf43e62b",
+          "bytes": 21170,
+          "sha256": "57383eea2a1d0d1194c30d827004c5c5a55ebc23176b76adf7ea9f535ff7f3ec"
         },
         {
           "path": "codex_home_manager/backend/diagnostics.py",
           "sourcePath": "backend/diagnostics.py",
           "gitMode": "100644",
-          "gitObject": "77f3b97f1bdece38139d8a60a379ec62e682b6b6",
-          "bytes": 345129,
-          "sha256": "9a879880b926dc45282d98e5f89a0fb498c74cfffef8dc8ff78184066687e2d5"
+          "gitObject": "31c98ba5ea6b31607149e9ccaaa748459c3e7d2a",
+          "bytes": 352956,
+          "sha256": "2f2dec14d28870cdb08f3f068bd0462d3a05f85a84485d58e0a24fe53562e0b3"
         },
         {
           "path": "codex_home_manager/backend/hidden_process.py",
@@ -308,12 +397,28 @@
           "sha256": "9eae9d1d62186978a02067ee885c7c025a5ab64ce35d752190b51062fb7de626"
         },
         {
+          "path": "codex_home_manager/backend/maintenance.py",
+          "sourcePath": "backend/maintenance.py",
+          "gitMode": "100644",
+          "gitObject": "aae51af112d1a6b42178993897e9381cc6f37780",
+          "bytes": 17800,
+          "sha256": "be0ac830afda7a1cae00f0ead6ef5abcca806b0ccb6b2d2a4a42500b11de2f24"
+        },
+        {
           "path": "codex_home_manager/backend/mcp_server.py",
           "sourcePath": "backend/mcp_server.py",
           "gitMode": "100644",
           "gitObject": "b88ad39d24465a65501b844382ac4f5d316196bf",
           "bytes": 1349,
           "sha256": "535acc4747a18b9edad3ae121d27f7481aaa75412d74c047c0c4c391fa55e4a8"
+        },
+        {
+          "path": "codex_home_manager/backend/mcp_snapshot.py",
+          "sourcePath": "backend/mcp_snapshot.py",
+          "gitMode": "100644",
+          "gitObject": "c842a81fe896187f244c0d04589846be111e98af",
+          "bytes": 3860,
+          "sha256": "e6bb9253a140e98c0b4422e9567d4151476a8dd8c35e84a5e1c2d76f4547bc21"
         },
         {
           "path": "codex_home_manager/backend/models.py",
@@ -327,9 +432,9 @@
           "path": "codex_home_manager/backend/official_thread_tools_session_meta.py",
           "sourcePath": "backend/official_thread_tools_session_meta.py",
           "gitMode": "100644",
-          "gitObject": "af260511239e6febc6645107f85ce60e96cb0335",
-          "bytes": 40839,
-          "sha256": "eb714774359ace8a36cd082df845419963aa8a50fda8fb40f2bb70e3ba120d7f"
+          "gitObject": "51bf23ff2b9369931522a4392712ea76271e2a96",
+          "bytes": 42288,
+          "sha256": "a0672ebe2ae27c10cf2a3dccfb9b1efba072895ee9849443a7bb81dbc471562b"
         },
         {
           "path": "codex_home_manager/backend/offline_repair_policy.py",
@@ -340,12 +445,28 @@
           "sha256": "60e038941764df5e3c3a3424248881b02e609c834d042a6773830bf23f156b1f"
         },
         {
+          "path": "codex_home_manager/backend/pagination_patch_status.py",
+          "sourcePath": "backend/pagination_patch_status.py",
+          "gitMode": "100644",
+          "gitObject": "b1caaa8b516bcacdf8b97acc60b642ff88edc3ec",
+          "bytes": 12895,
+          "sha256": "bba8b2bbcd35fa69ef80fde718b2021e467d0223940b66d4060e7656b098e826"
+        },
+        {
           "path": "codex_home_manager/backend/pending_repair_validation.py",
           "sourcePath": "backend/pending_repair_validation.py",
           "gitMode": "100644",
           "gitObject": "f154adcdf32b920ae54e70a68829864ddd65d2b5",
           "bytes": 8700,
           "sha256": "fc071f6067ec63bc34fa88f957802a106454f754786e035a186f9fc9e3925ddf"
+        },
+        {
+          "path": "codex_home_manager/backend/probe_budget.py",
+          "sourcePath": "backend/probe_budget.py",
+          "gitMode": "100644",
+          "gitObject": "635de3ee47cd58e85adc0f0d9aedc36d2c7d592c",
+          "bytes": 2806,
+          "sha256": "442236ffa49fd2aed05307eb934e14cf2a4c2bda5f6108b6d0579a9f6c07f76c"
         },
         {
           "path": "codex_home_manager/backend/process_utils.py",
@@ -359,9 +480,81 @@
           "path": "codex_home_manager/backend/prompt_index.py",
           "sourcePath": "backend/prompt_index.py",
           "gitMode": "100644",
-          "gitObject": "35b516998fe8ecbf91373f844bcb8f62b1b17b4f",
-          "bytes": 90022,
-          "sha256": "d5639f62d6eb9be20aff0bbf1f00fc8f996cd061d2be03b9a01e1eccfbdca23a"
+          "gitObject": "b71e43bc10969cf973e1f92491c3ff538277ff89",
+          "bytes": 107130,
+          "sha256": "8fa3d6b9a88f07c91e74fa7da16ee133fc0459eda14f3a245e48bed8d78d0c70"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/__init__.py",
+          "sourcePath": "backend/provider_interop/__init__.py",
+          "gitMode": "100644",
+          "gitObject": "9980be712aacfebe34d71f473c99754e60f7c3de",
+          "bytes": 208,
+          "sha256": "82bb93729452fa3b1c2b9d66bd8ace7e3c2c5c01b0e12379f22e3fe13d3fa315"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/api.py",
+          "sourcePath": "backend/provider_interop/api.py",
+          "gitMode": "100644",
+          "gitObject": "c102e72d03181119b034cc4e9676375ca2a0c5ff",
+          "bytes": 3162,
+          "sha256": "92a90d9c8207b1f79f306d5301cb57e2bc76c25520951667ef6c54c5f7b727b0"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/mcp.py",
+          "sourcePath": "backend/provider_interop/mcp.py",
+          "gitMode": "100644",
+          "gitObject": "0d4fc681f7a432faff767f8c5038cbb43bd99ae1",
+          "bytes": 4446,
+          "sha256": "f52ec9c31af7e467435abb5bedb7d5fcdab06073177a70d1f16145abc0dcffb9"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/models.py",
+          "sourcePath": "backend/provider_interop/models.py",
+          "gitMode": "100644",
+          "gitObject": "3c0bfc1285ae9b27bcd5c68591fa734be0661451",
+          "bytes": 1536,
+          "sha256": "655041d6d6e87469d2c9502577414683952ca32931a2f4b060e4bee38042692f"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/routing.py",
+          "sourcePath": "backend/provider_interop/routing.py",
+          "gitMode": "100644",
+          "gitObject": "274de3d2db681ddbfa524de0be9bd616b1a2bf9d",
+          "bytes": 290,
+          "sha256": "395ccfc1cc0b3b0547b6412fe6112aaefdb63704c529916ba99d0f80252674f5"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/runtime.py",
+          "sourcePath": "backend/provider_interop/runtime.py",
+          "gitMode": "100644",
+          "gitObject": "b3bba0f118a03347f39d96cd92f0f8d18e27a958",
+          "bytes": 15277,
+          "sha256": "a61e5edb5184c9a42c5fa1b160de8516ee5befa9f169f80c1525132bb103b277"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/service.py",
+          "sourcePath": "backend/provider_interop/service.py",
+          "gitMode": "100644",
+          "gitObject": "81d6163848064da364efa6867ef61069f6065992",
+          "bytes": 16228,
+          "sha256": "43fc4023a822cb0ed866f42fdf521e15d93b474df13de57002fe7809f3f0e9dd"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/transaction.py",
+          "sourcePath": "backend/provider_interop/transaction.py",
+          "gitMode": "100644",
+          "gitObject": "e48e50aa914097a3e384038af3843ccc90546cba",
+          "bytes": 1625,
+          "sha256": "00074327aa84626f52d7744f3406a24a4be44e6ee485a4c635a5b318242ea3ef"
+        },
+        {
+          "path": "codex_home_manager/backend/provider_interop/worker.py",
+          "sourcePath": "backend/provider_interop/worker.py",
+          "gitMode": "100644",
+          "gitObject": "e69b60de6438f5e22de9b92f2cb677a4a8130730",
+          "bytes": 5267,
+          "sha256": "1ab23ca2677031924a07ed7e9b652da6a558e07cbb3af9c3141807dc1b5eb864"
         },
         {
           "path": "codex_home_manager/backend/search_normalization.py",
@@ -375,9 +568,9 @@
           "path": "codex_home_manager/backend/server.py",
           "sourcePath": "backend/server.py",
           "gitMode": "100644",
-          "gitObject": "a060438806624dc9363f956079addd5d375705f6",
-          "bytes": 210883,
-          "sha256": "ee5202f2ee293b6e77826851c39c2ce4a79e02b97faa92e0a6f9ca4634f172ca"
+          "gitObject": "f03b901358e3ef024866805ddd6b82e1df3067d8",
+          "bytes": 231035,
+          "sha256": "529a0e610f061e732685bef00aefa7e20d57c1fef1cabac5c6bb48ad2e3e8727"
         },
         {
           "path": "codex_home_manager/backend/stale_subagent_edges.py",
@@ -399,9 +592,9 @@
           "path": "codex_home_manager/backend/thread_history_repair.py",
           "sourcePath": "backend/thread_history_repair.py",
           "gitMode": "100644",
-          "gitObject": "207d4a26a3d2ffb9a966b0698025c2f07a074791",
-          "bytes": 50280,
-          "sha256": "23c6c935de52511310126648d88a70d0eb37c5d15c8850453e908c1b04e55b20"
+          "gitObject": "e6c738b4d48a8fee580f7c4e8ba58eafd890ed40",
+          "bytes": 56663,
+          "sha256": "32365fc492fb4f65c06e535c53ccd45a9006eeb4028795856ec2deae0aeb9508"
         },
         {
           "path": "codex_home_manager/backend/windows_paths.py",
@@ -412,52 +605,180 @@
           "sha256": "cf8f36534d195120bc80a074cea0159032375fe4117210c00bf0bd97cdd43446"
         },
         {
+          "path": "codex_home_manager/docs/maintenance-api.md",
+          "sourcePath": "docs/maintenance-api.md",
+          "gitMode": "100644",
+          "gitObject": "d0703429b5bf760598e1886084e7e6590d48ba51",
+          "bytes": 7845,
+          "sha256": "a26db583f9ff00ccd85b9a2f4bb40f231fb6211d8667745a7fc9640c3669360d"
+        },
+        {
+          "path": "codex_home_manager/docs/superpowers/plans/2026-08-16-codex-home-manager-desktop.md",
+          "sourcePath": "docs/superpowers/plans/2026-08-16-codex-home-manager-desktop.md",
+          "gitMode": "100644",
+          "gitObject": "b84665d797ce2aa12d605aaa147bc5fbbdbb07fb",
+          "bytes": 11683,
+          "sha256": "5d7aa5c7928682ae0ead3a4490ce648c2684ee4de4c69e401b7ae4f9bc342d76"
+        },
+        {
+          "path": "codex_home_manager/docs/superpowers/plans/2026-08-16-codex-provider-interoperability.md",
+          "sourcePath": "docs/superpowers/plans/2026-08-16-codex-provider-interoperability.md",
+          "gitMode": "100644",
+          "gitObject": "9cb0e898525d039cc6b02bbb502fe21a715ffd08",
+          "bytes": 28322,
+          "sha256": "2aa3ed9c4b7c8145fbe307ed044fa5d94fa56099f9aca1238d3620d2668b62e2"
+        },
+        {
+          "path": "codex_home_manager/docs/superpowers/specs/2026-08-16-codex-home-manager-desktop-design.md",
+          "sourcePath": "docs/superpowers/specs/2026-08-16-codex-home-manager-desktop-design.md",
+          "gitMode": "100644",
+          "gitObject": "270537a5f34e15167655c9b9cf88369be30bdc00",
+          "bytes": 10580,
+          "sha256": "c026e556e971d8da2aeece7ba32651f8ebc337ab99db690f31eaa73144b5ec00"
+        },
+        {
+          "path": "codex_home_manager/docs/superpowers/specs/2026-08-16-codex-provider-interoperability-design.md",
+          "sourcePath": "docs/superpowers/specs/2026-08-16-codex-provider-interoperability-design.md",
+          "gitMode": "100644",
+          "gitObject": "8f4f6a08e56d9515de258ab6ed783ab77eb4c73c",
+          "bytes": 37701,
+          "sha256": "9d9251531d150dcb11385d43a1d11f4e0507a0cabb84e3a9e19de94775424e76"
+        },
+        {
           "path": "codex_home_manager/index.html",
           "sourcePath": "index.html",
           "gitMode": "100644",
-          "gitObject": "47dcd7de9226d6994fc3cc1e84490231502b2a6b",
-          "bytes": 373,
-          "sha256": "0fdc9bdb3f655a13005fb871621963c0612123c906d575c9c36f638df9458110"
+          "gitObject": "e1c9a3951596a72b7a2e4c3aab440c86585d38a7",
+          "bytes": 369,
+          "sha256": "44be18dc53390232f1a782b312d0f190be120bc0efd89e0965c27271e6800116"
         },
         {
           "path": "codex_home_manager/package-lock.json",
           "sourcePath": "package-lock.json",
           "gitMode": "100644",
-          "gitObject": "52cba90a7a9b863aa7d8303db7e84bff67193728",
-          "bytes": 63523,
-          "sha256": "764725faeabcf40d648c79fbc59415e8e8ea291c387fb6b9c4c62bf177a38c38"
+          "gitObject": "232d7fc662a0274c42fdf38c2afd096f94ea76e1",
+          "bytes": 128174,
+          "sha256": "7e27f5b1f4c4d1b47fd53ca5be6dea394a8dd00f9803c29d0bc80f1a6d591ef6"
         },
         {
           "path": "codex_home_manager/package.json",
           "sourcePath": "package.json",
           "gitMode": "100644",
-          "gitObject": "b958ac9056d514ffa4bcd0b608a7f36022b83a9c",
-          "bytes": 1899,
-          "sha256": "54fdd8e0dd64fa8d7f9f2fee22c7d5f90e852c23e30495404e97b9486aa0c596"
+          "gitObject": "8ca528eadf584b3f279718f9457de98181597389",
+          "bytes": 3152,
+          "sha256": "f8e850c52bb74c92f023d31fe89e6101298d1175571a9ed229bee5954109e9f8"
+        },
+        {
+          "path": "codex_home_manager/packaging/patches/openai-codex-0.154.0-provider-interoperability-v3.patch",
+          "sourcePath": "packaging/patches/openai-codex-0.154.0-provider-interoperability-v3.patch",
+          "gitMode": "100644",
+          "gitObject": "316d799799f8817a93e9e78f8f6013485daa8125",
+          "bytes": 20644,
+          "sha256": "d4e362a995462fc43b069b905c3ae7e56584dd10e0da47cab33ef030a578fbc5"
+        },
+        {
+          "path": "codex_home_manager/packaging/patches/openai-codex-provider-interoperability-v2.patch",
+          "sourcePath": "packaging/patches/openai-codex-provider-interoperability-v2.patch",
+          "gitMode": "100644",
+          "gitObject": "5020049f2afdc1876e85e43d13f19889763d4e8f",
+          "bytes": 51441,
+          "sha256": "c22eb59bbd77399a807781ef5b26af0a4e2e1c30d66142851fe991def7028fed"
+        },
+        {
+          "path": "codex_home_manager/packaging/patches/openai-codex-type-specific-response-item-ids.patch",
+          "sourcePath": "packaging/patches/openai-codex-type-specific-response-item-ids.patch",
+          "gitMode": "100644",
+          "gitObject": "59b0a172e792c1776ce2c9c7565aa2717c206388",
+          "bytes": 10154,
+          "sha256": "df5259ffa767743dcf38f353852736b5a2ecdc738bfb6869edf4f023b6a88db0"
+        },
+        {
+          "path": "codex_home_manager/packaging/runtime/cockpit-maintenance.json",
+          "sourcePath": "packaging/runtime/cockpit-maintenance.json",
+          "gitMode": "100644",
+          "gitObject": "d495271fd77a775ebdb8c85478f60df89d19afda",
+          "bytes": 44518,
+          "sha256": "db1e325b1eba7fbf18343c25f884ff17f5fece075cd9452b981dd650780cc2e7"
+        },
+        {
+          "path": "codex_home_manager/packaging/runtime/provider-interop-runtime-0.148.0-alpha.9-p1.json",
+          "sourcePath": "packaging/runtime/provider-interop-runtime-0.148.0-alpha.9-p1.json",
+          "gitMode": "100644",
+          "gitObject": "160fb54180e71310568cab0b5ee5c10899bdad0d",
+          "bytes": 894,
+          "sha256": "f67c7f4ac80fe5de364836336fed81b5de8fcdc8b6f79b6e90225cbb6552c087"
+        },
+        {
+          "path": "codex_home_manager/packaging/runtime/provider-interop-runtime-0.148.0-alpha.9-p2.json",
+          "sourcePath": "packaging/runtime/provider-interop-runtime-0.148.0-alpha.9-p2.json",
+          "gitMode": "100644",
+          "gitObject": "3b34113a69dff98b618ecb3c6bc39c91b04143c6",
+          "bytes": 1074,
+          "sha256": "fdfa5439ef473f1d4e418b4e454283b1b66c7e9fc42666b2d3a2847eb97120d4"
+        },
+        {
+          "path": "codex_home_manager/packaging/runtime/provider-interop-runtime-0.154.0-p1.json",
+          "sourcePath": "packaging/runtime/provider-interop-runtime-0.154.0-p1.json",
+          "gitMode": "100644",
+          "gitObject": "5a8d56e1c4250c5676cebe67076b2174c2ea0e6a",
+          "bytes": 1068,
+          "sha256": "5093de1400de3a93ca45ee7de0daff01f961145d72ff3117e9dd3adbf2fbf1ff"
+        },
+        {
+          "path": "codex_home_manager/packaging/skills/codex-provider-interoperability/SKILL.md",
+          "sourcePath": "packaging/skills/codex-provider-interoperability/SKILL.md",
+          "gitMode": "100644",
+          "gitObject": "a69219e3306ad161326b2ebf252e82bb523b966d",
+          "bytes": 4123,
+          "sha256": "332aab48aea51dfa6de889c024e1efa567a617611d214e295dc62da85f4d88c4"
+        },
+        {
+          "path": "codex_home_manager/packaging/skills/codex-provider-interoperability/agents/openai.yaml",
+          "sourcePath": "packaging/skills/codex-provider-interoperability/agents/openai.yaml",
+          "gitMode": "100644",
+          "gitObject": "1c8436251ac004802c56df6a9869ffa4eaa889e6",
+          "bytes": 258,
+          "sha256": "ffca4a9141313fedac97914bfb621b44553dfe7d76dabd33b6848de178b4bd74"
+        },
+        {
+          "path": "codex_home_manager/packaging/skills/codex-provider-interoperability/references/compatibility-contract.md",
+          "sourcePath": "packaging/skills/codex-provider-interoperability/references/compatibility-contract.md",
+          "gitMode": "100644",
+          "gitObject": "49a7af00afb7ac27346cbd4073546de887003eec",
+          "bytes": 4164,
+          "sha256": "19283c324f9f5cd3dc4eb7c2052a523253343e7fa7d109efb9d4ba91a48929d4"
+        },
+        {
+          "path": "codex_home_manager/packaging/windows/assets/cockpit-master.png",
+          "sourcePath": "packaging/windows/assets/cockpit-master.png",
+          "gitMode": "100644",
+          "gitObject": "d1d4a3bf146ed5c001958479d45e2b34b21f38ad",
+          "bytes": 2870044,
+          "sha256": "0152760a0e40a936de1b9329e0d982e3fe834c33b296af328a3c8fa82815e95f"
         },
         {
           "path": "codex_home_manager/packaging/windows/assets/codex-home-manager.ico",
           "sourcePath": "packaging/windows/assets/codex-home-manager.ico",
           "gitMode": "100644",
-          "gitObject": "0cf773ca985284462b4ce32303b4e12fe15e14ee",
-          "bytes": 14303,
-          "sha256": "aaae8942e13f33be47df9f0758dabd9ed61ee9053c0c7e266787869a99b3126b"
+          "gitObject": "8da91e2b1c8ebd4fc83a774fb527bca6d5ef944f",
+          "bytes": 154700,
+          "sha256": "511555eba2bbf405752e74d2fcd26ca93028b0e214982ca51ef7f13e914902fc"
         },
         {
           "path": "codex_home_manager/packaging/windows/connector_main.py",
           "sourcePath": "packaging/windows/connector_main.py",
           "gitMode": "100644",
-          "gitObject": "0e4f9a1080e553f166891c5df5c33e12e1682846",
-          "bytes": 12526,
-          "sha256": "824bbaac30552e907ac27328084ac1f30e4f3334111d3289cebff56259950a2d"
+          "gitObject": "ba354261f8151b6dff82fd3ef8864f5ace0f0701",
+          "bytes": 15542,
+          "sha256": "a371d602aec174ba5483c8390a2d7efb6983a1ec9f32c80ea57e2b793c29463e"
         },
         {
           "path": "codex_home_manager/packaging/windows/release_verifier.py",
           "sourcePath": "packaging/windows/release_verifier.py",
           "gitMode": "100644",
-          "gitObject": "3cbb005106e812fa3cb50a55ccb01135d125ae91",
-          "bytes": 5429,
-          "sha256": "6e1d226f45732fc4906e3bd64b97c4b11bde215d46a66db59f87c99054ac0324"
+          "gitObject": "797ee58fa425b2a990663349d6ef127908be0808",
+          "bytes": 5424,
+          "sha256": "1afc1c9672518a7ee4adb45007b18456788f567277df78dffc14c1f3abe3fa65"
         },
         {
           "path": "codex_home_manager/packaging/windows/requirements-connector.txt",
@@ -471,41 +792,89 @@
           "path": "codex_home_manager/packaging/windows/version_info.txt",
           "sourcePath": "packaging/windows/version_info.txt",
           "gitMode": "100644",
-          "gitObject": "90d7e76fa3397779e6696817ba5bf8200f08730b",
+          "gitObject": "bf5cbe8ac78c0d6f86a1ef661f6ec4ef2d2a317b",
           "bytes": 1017,
-          "sha256": "52fee86302d85203b105c2ce6a62dc1a27ca2c2a3e00a9f3cc6510813bf753ff"
+          "sha256": "a32d9ceb026633088578c27f8d9e49d9204729e9656289071e990ef2eded3c5d"
+        },
+        {
+          "path": "codex_home_manager/public/cockpit-icon.png",
+          "sourcePath": "public/cockpit-icon.png",
+          "gitMode": "100644",
+          "gitObject": "2a6b1abd4442805ec23f735ea198beaf1eb64566",
+          "bytes": 72225,
+          "sha256": "291468ff62a66bbf1a78563be593302ccce8fb2acb8ebc2fe3530af4202dc8ff"
         },
         {
           "path": "codex_home_manager/public/favicon.svg",
           "sourcePath": "public/favicon.svg",
           "gitMode": "100644",
-          "gitObject": "1c4575b702501f2d74aa5e6a61f993841aaacd49",
-          "bytes": 893,
-          "sha256": "37adf5e2239386f96f5f94cc986910fbd352eb3da3153ac11cb2b1644ccb9065"
+          "gitObject": "a64d9cbd0b0f32e0d963acefd4abdcae036d67bc",
+          "bytes": 96470,
+          "sha256": "a5d8283b1830f6cbd78a85214d289f329b2a0c0f1bcc8164f28af6c8f06c167a"
         },
         {
           "path": "codex_home_manager/pytest.ini",
           "sourcePath": "pytest.ini",
           "gitMode": "100644",
-          "gitObject": "8e928ce912c4a52f15502441c71228382333b47d",
-          "bytes": 48,
-          "sha256": "5b6420890fe15947bc16b612d089f69d994b8d0a0d436f1ec7c96ad777b2c34b"
+          "gitObject": "c6a08c8a3ce32102f5ff79eca13a71c9ea546d87",
+          "bytes": 87,
+          "sha256": "b1189763ca4228fa3732dec4d2490b63f7a0ac671afc4daf01a7ab0aa870b6b2"
+        },
+        {
+          "path": "codex_home_manager/ruff.toml",
+          "sourcePath": "ruff.toml",
+          "gitMode": "100644",
+          "gitObject": "189877573f81530bc288970e0606c92630145cae",
+          "bytes": 30,
+          "sha256": "b3a1db6c43e6ff1f910ea034b1dc32ac5dae4b18e663a804475fce9ae90afce9"
         },
         {
           "path": "codex_home_manager/run.ps1",
           "sourcePath": "run.ps1",
           "gitMode": "100644",
-          "gitObject": "935f44673f7ab8d3faa6e58f8208f6849a1ef1ca",
-          "bytes": 215,
-          "sha256": "1a78b1f52f0649618e8ae1159cb4a7a548b44316358757b966bc2d5749bc6770"
+          "gitObject": "3aa3f60e6af89077243981474f09b3d650f85aca",
+          "bytes": 296,
+          "sha256": "f34591af6af7b68f8a26d71658aed4e72a21e4d29f353e3797dd81a19f8943c6"
+        },
+        {
+          "path": "codex_home_manager/scripts/activate-appserver-shield.ps1",
+          "sourcePath": "scripts/activate-appserver-shield.ps1",
+          "gitMode": "100644",
+          "gitObject": "c6d080eb439108c1f788ebef1f8e7b933a3b72a2",
+          "bytes": 7509,
+          "sha256": "8615e19a4a62389618de3b31eaea7bb990bf0242c92e92e864704994432fc096"
+        },
+        {
+          "path": "codex_home_manager/scripts/apply-appserver-shield-and-repair.ps1",
+          "sourcePath": "scripts/apply-appserver-shield-and-repair.ps1",
+          "gitMode": "100644",
+          "gitObject": "b86ba6eb783034c55fdf2a793c590bba3c088a5f",
+          "bytes": 8364,
+          "sha256": "672564a95f6e7b70c91a7efa7138f54e0a843ffac015f4d9299808c1dc29cc35"
         },
         {
           "path": "codex_home_manager/scripts/artifact_verifier_core.py",
           "sourcePath": "scripts/artifact_verifier_core.py",
           "gitMode": "100644",
-          "gitObject": "0e19032c87d1ed00e61731471f198110e308229f",
-          "bytes": 6763,
-          "sha256": "5c66e9ff78a62bc48ddcbdb9a2c1d53a2fc6f91a8cb3d09a6b73e4a9f1d6423e"
+          "gitObject": "8d6c1749f3735eabd9f9bc509da5e77dc52336ff",
+          "bytes": 6953,
+          "sha256": "b4245696315b161c3e93f4c3488f0a5e260ad389c1801adbb397f94a6fdfdce5"
+        },
+        {
+          "path": "codex_home_manager/scripts/audit-timeline-classification.mjs",
+          "sourcePath": "scripts/audit-timeline-classification.mjs",
+          "gitMode": "100644",
+          "gitObject": "2f3acc99811f7ada1b8bced36eb2d5185aedd80d",
+          "bytes": 1752,
+          "sha256": "c109492ffdbe8aa75ff192b0fafc19dbbb29f2b8720b97532bd97195b3efdcd8"
+        },
+        {
+          "path": "codex_home_manager/scripts/desktop_release.py",
+          "sourcePath": "scripts/desktop_release.py",
+          "gitMode": "100644",
+          "gitObject": "8d4e44e48484900df6cb04988127b220ae83ed75",
+          "bytes": 13279,
+          "sha256": "ec0b91b3a5c4b3fac8e4a44bc3ad243262270806c7450be085ce8aa59c21ed24"
         },
         {
           "path": "codex_home_manager/scripts/export_public_api_contract.py",
@@ -519,25 +888,57 @@
           "path": "codex_home_manager/scripts/finalize-release-manifest.ps1",
           "sourcePath": "scripts/finalize-release-manifest.ps1",
           "gitMode": "100644",
-          "gitObject": "5fa4e5925cb38f0a8d4798e0d6fbfb1a8e550fc6",
-          "bytes": 20227,
-          "sha256": "b9d23869702b2ba85ffb5adffbdfbd44ae4b1f7d9a721f7581184eb3d1d5f549"
+          "gitObject": "dbce5b3c788f70d7457c588ac70c179da0cd9b15",
+          "bytes": 21053,
+          "sha256": "8fd7b19cbf306c826472fdb8b35d11ed7f2cf0e58d5c270a34f4d66f833972e4"
+        },
+        {
+          "path": "codex_home_manager/scripts/frontend-release-artifact.mjs",
+          "sourcePath": "scripts/frontend-release-artifact.mjs",
+          "gitMode": "100644",
+          "gitObject": "47f06b81a5adcdc8d5746fa70219c7ed9724f5e9",
+          "bytes": 12566,
+          "sha256": "70120cccca2666cbf2bf9ddd81e5cb8a0d92df52fd62f483de554414bd60f23a"
         },
         {
           "path": "codex_home_manager/scripts/generate_windows_icon.py",
           "sourcePath": "scripts/generate_windows_icon.py",
           "gitMode": "100644",
-          "gitObject": "75409e4db9f6d8393da422094db76b572336d52d",
-          "bytes": 2832,
-          "sha256": "e9c2f2fcd53dfad097062f91fbb755ac8b21dff66e5134fac15c4597db8cac35"
+          "gitObject": "b382e5f03615f06bfb32c29ae24d9fe47a5669d9",
+          "bytes": 2825,
+          "sha256": "6c79e2ade7bfc143674a53a2150b422a63a46db91ca4a2ce8ae2080befd23ca0"
+        },
+        {
+          "path": "codex_home_manager/scripts/install-codex-appserver-shield.ps1",
+          "sourcePath": "scripts/install-codex-appserver-shield.ps1",
+          "gitMode": "100644",
+          "gitObject": "6282baf14b1771a5b463c1e4418f7a66e0ec751f",
+          "bytes": 9060,
+          "sha256": "1e772e33e3c58e4d7932b15fa29b739c40c710fedca4abbf771150a1818b2a61"
         },
         {
           "path": "codex_home_manager/scripts/maintainability_gate.py",
           "sourcePath": "scripts/maintainability_gate.py",
           "gitMode": "100644",
-          "gitObject": "1c40b13ab66c535b0b723bfee27f6c205135ee79",
-          "bytes": 2321,
-          "sha256": "6051411ad8195ceb963a61a308adb993ddb6d2cecc1794b8690b3bafdfe5f61d"
+          "gitObject": "ee5bfb589458317d465c1863d47b0825280f33c5",
+          "bytes": 2551,
+          "sha256": "b1b660ff0d10de887be1aebe34bc41ea875b1af4ef07687e445a84ac1a55dfa5"
+        },
+        {
+          "path": "codex_home_manager/scripts/measure-desktop-startup.ps1",
+          "sourcePath": "scripts/measure-desktop-startup.ps1",
+          "gitMode": "100644",
+          "gitObject": "5f2a7721424610ee68ba97d11deb63ebd957434a",
+          "bytes": 1592,
+          "sha256": "d03621081708b1a812f7766f7dedf9251196b274e75c9040ab3a8a0c00bd1ed5"
+        },
+        {
+          "path": "codex_home_manager/scripts/measure-native-service.ps1",
+          "sourcePath": "scripts/measure-native-service.ps1",
+          "gitMode": "100644",
+          "gitObject": "10dbbfed6ed75b5bd37bbddec44ca0bf601fa29e",
+          "bytes": 2483,
+          "sha256": "34cee9ce705f076807b6efc828fc4fe55c59045156408ddfd0a3a20948b9eed8"
         },
         {
           "path": "codex_home_manager/scripts/node_websocket_compat.mjs",
@@ -548,12 +949,36 @@
           "sha256": "ee9fbaa377baeafbb8e0c52084da823d0347fbce48ce097f86ed83a66293e7e4"
         },
         {
+          "path": "codex_home_manager/scripts/package-desktop.ps1",
+          "sourcePath": "scripts/package-desktop.ps1",
+          "gitMode": "100644",
+          "gitObject": "ae75fc0f52865fb0d07bebae56c240c554988e43",
+          "bytes": 9308,
+          "sha256": "777ba6d0ba72e4023aac5ff33781e4c46f2011df0c6920e0874233f7b8619ca7"
+        },
+        {
           "path": "codex_home_manager/scripts/package-local-connector.ps1",
           "sourcePath": "scripts/package-local-connector.ps1",
           "gitMode": "100644",
-          "gitObject": "6ddf7cec2e8cc577bbc2305d8ac1a1f0b5ec3479",
-          "bytes": 59608,
-          "sha256": "a3b61b4618017f6fb060448879523cf829b6d979af58df78daee2b22f8206691"
+          "gitObject": "cc79b9ae064f314a4c4ae25d914b934ab1fc1e31",
+          "bytes": 61106,
+          "sha256": "8ca2bf67772a2bf4e9c55c26f6d38fcbcee2c3e750a6c82ef2f446c21e44665c"
+        },
+        {
+          "path": "codex_home_manager/scripts/prepare-desktop-sidecar.ps1",
+          "sourcePath": "scripts/prepare-desktop-sidecar.ps1",
+          "gitMode": "100644",
+          "gitObject": "04ef1f87675972939a92cfce84055f3fddc718cb",
+          "bytes": 10835,
+          "sha256": "78a7a11ada4b4bcb2b6f65d75ad89c6f2290350fa05f3828dd3e5c2f9bea5381"
+        },
+        {
+          "path": "codex_home_manager/scripts/probe-prompt-results.py",
+          "sourcePath": "scripts/probe-prompt-results.py",
+          "gitMode": "100644",
+          "gitObject": "e7350e1ef1335c889222319269b7d3f69526be20",
+          "bytes": 7632,
+          "sha256": "11fec9cdf27b9269b4469761feb15d3bb6341292387b5fe7294c8dedbeb5615c"
         },
         {
           "path": "codex_home_manager/scripts/prompt_order_check.mjs",
@@ -567,17 +992,17 @@
           "path": "codex_home_manager/scripts/quality_gate.py",
           "sourcePath": "scripts/quality_gate.py",
           "gitMode": "100644",
-          "gitObject": "32572417ee9b4aab1851ab46e6ab27c483fa0b94",
+          "gitObject": "b34845ad9aeca17bc878384a7ce26d918ff7bae3",
           "bytes": 30298,
-          "sha256": "17919929990087112e4f200ed58be293aaaa78ec96d620dae093a8d6f1c57154"
+          "sha256": "cab954cc1f8947db90ec9da7c93843c3049d664a90cd042bfaa675c5c97b8a92"
         },
         {
           "path": "codex_home_manager/scripts/release_manifest.py",
           "sourcePath": "scripts/release_manifest.py",
           "gitMode": "100644",
-          "gitObject": "ed26a4d8223a7befeb4fe06cbfa9e6fe6488fecc",
-          "bytes": 153918,
-          "sha256": "4492d7de0cfc13bdbdab5fda0f67820cf31011ff4bdc3a0df4346135cc7463e0"
+          "gitObject": "a04f474433fe89a990e173df78430aca3418cb9d",
+          "bytes": 154833,
+          "sha256": "9d6d68ab24d26012bd8d4513fe8f30a3b4e09920261f5252d7ff6a60189ee5e8"
         },
         {
           "path": "codex_home_manager/scripts/repair-official-thread-tool-session-meta.py",
@@ -588,12 +1013,44 @@
           "sha256": "6c58f24cf210c2e2b5a8b7d095090fb378b65b5e7cb6e3dc0225ef7d45725ec5"
         },
         {
+          "path": "codex_home_manager/scripts/repair-orphan-custom-tool-calls-once.py",
+          "sourcePath": "scripts/repair-orphan-custom-tool-calls-once.py",
+          "gitMode": "100644",
+          "gitObject": "dc71d4cd310757e616be39fd709c6fb178ed4f9e",
+          "bytes": 2319,
+          "sha256": "1c79d49dd517906e039331f9c9e6a257e1b9880fc2e9c6cf630ae9e2b3cec96f"
+        },
+        {
+          "path": "codex_home_manager/scripts/repair-rollout-ordinals-and-history-projection.py",
+          "sourcePath": "scripts/repair-rollout-ordinals-and-history-projection.py",
+          "gitMode": "100644",
+          "gitObject": "70924edf0e4b200e8d640daeb000effea18047cc",
+          "bytes": 19167,
+          "sha256": "cafe9d945fdb8599f0e16939110fca05c2c06f0ffc546596262b549434b47a54"
+        },
+        {
+          "path": "codex_home_manager/scripts/repair-thread-history-projection.py",
+          "sourcePath": "scripts/repair-thread-history-projection.py",
+          "gitMode": "100644",
+          "gitObject": "5fbeaa923339532029fdd4caf41d0345657e3b92",
+          "bytes": 15166,
+          "sha256": "135a6ce58f17ac217dfcb8a971b1360eedc38cca693aac917fb4a1197c4682be"
+        },
+        {
           "path": "codex_home_manager/scripts/repair-unreplayable-reasoning-thread.py",
           "sourcePath": "scripts/repair-unreplayable-reasoning-thread.py",
           "gitMode": "100644",
           "gitObject": "14a5fc3ddf39218489efef889ed94746cc5d2d4e",
           "bytes": 6610,
           "sha256": "99dc810c307401106759661fbf123b592b063568d402311f23f47608e89bc24f"
+        },
+        {
+          "path": "codex_home_manager/scripts/run-maintenance-ui-tests.mjs",
+          "sourcePath": "scripts/run-maintenance-ui-tests.mjs",
+          "gitMode": "100644",
+          "gitObject": "12c5b29ea9dc856dbaa1b997ff219d4c78c1a5bb",
+          "bytes": 2369,
+          "sha256": "320cc735cae131a214ce3a46e3e521d0f97519864a0403782a92d393008fdd94"
         },
         {
           "path": "codex_home_manager/scripts/run-official-thread-tool-session-meta-repair.ps1",
@@ -612,12 +1069,20 @@
           "sha256": "6ccefe77d66bf5e3d26a160beb9f31cb9af60bc0fc064ac8618777d3027154c9"
         },
         {
+          "path": "codex_home_manager/scripts/run-thread-history-projection-repair.ps1",
+          "sourcePath": "scripts/run-thread-history-projection-repair.ps1",
+          "gitMode": "100644",
+          "gitObject": "2b63184f3924bc284431eee1b7b173b465fe5f32",
+          "bytes": 5452,
+          "sha256": "cf0281ceb240276be5b6de49daa3bac0308cd7aa96a3c47f9faf5298dcfb0e37"
+        },
+        {
           "path": "codex_home_manager/scripts/start-ui-service.ps1",
           "sourcePath": "scripts/start-ui-service.ps1",
           "gitMode": "100644",
-          "gitObject": "3d36cff92fe728387d26455f734875c233ae8485",
-          "bytes": 1592,
-          "sha256": "4ac0cb8afa2507a02b6c6735ae01650d2b816b2edb97978a35ada018f7be5cbc"
+          "gitObject": "1ea9259aeae4d67986f5c893c9b4902063c12abc",
+          "bytes": 1829,
+          "sha256": "b2a2ff3b8994a839564719e29721369d6a0b982774aa27234fc6b2fe11494333"
         },
         {
           "path": "codex_home_manager/scripts/stop-ui-service.ps1",
@@ -628,52 +1093,436 @@
           "sha256": "5ee3dcc7bbf8975d641526b0733c9ae6e7adc4af52793e59596de763dcc7f43e"
         },
         {
+          "path": "codex_home_manager/scripts/typescript_maintainability_gate.mjs",
+          "sourcePath": "scripts/typescript_maintainability_gate.mjs",
+          "gitMode": "100644",
+          "gitObject": "9eb4ee16c00b67cd4aa980530d3df873996f696b",
+          "bytes": 2970,
+          "sha256": "d09b3fb6bc56915b2ffc304b265219fe29ccbd128e71d7a192690e55808b7db1"
+        },
+        {
           "path": "codex_home_manager/scripts/ui_overflow_check.mjs",
           "sourcePath": "scripts/ui_overflow_check.mjs",
           "gitMode": "100644",
-          "gitObject": "c0843b55cae8669c330fcf3d61c999ada94857ad",
-          "bytes": 60696,
-          "sha256": "67ce9e6e84aa64f9c1ee455f43540d5033c8d19be52e02c2116008ba84593fd9"
+          "gitObject": "f2ba2c02c651148d69b6e15965d60f95e2166354",
+          "bytes": 63940,
+          "sha256": "62dde4a799ccc779551978348c126826bda5490d464e638a4d0fd5aa81aff647"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/Cargo.lock",
+          "sourcePath": "src-tauri/Cargo.lock",
+          "gitMode": "100644",
+          "gitObject": "bdf59764cd12e1504fb69c0bdfcde47d13ee8aac",
+          "bytes": 130573,
+          "sha256": "ca6583527955ca87e0b7359698e46782cb116b9fa1e4986a5c348143bf26c880"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/Cargo.toml",
+          "sourcePath": "src-tauri/Cargo.toml",
+          "gitMode": "100644",
+          "gitObject": "508c3c56efe63b7401a29f417283b7990ff4f9c9",
+          "bytes": 1064,
+          "sha256": "9e9c7d95f4c50f3b49a55e17eaf84139ebb57af776de3092bb86b395d93814b0"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/build.rs",
+          "sourcePath": "src-tauri/build.rs",
+          "gitMode": "100644",
+          "gitObject": "d860e1e6a7cac333c3cc0bc9cb67faf286b07d69",
+          "bytes": 39,
+          "sha256": "487059eaf8a947b80f20a9aacac038a5047b2ad69d2401b827376c67d6fe847f"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/capabilities/main.json",
+          "sourcePath": "src-tauri/capabilities/main.json",
+          "gitMode": "100644",
+          "gitObject": "5046ac9438f6c7c1ce3ecc712b987f5918129629",
+          "bytes": 288,
+          "sha256": "efb7ee6f50cb78caf09b07631c3491afd892369440cb870becf1b8339118592c"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/icons/icon.ico",
+          "sourcePath": "src-tauri/icons/icon.ico",
+          "gitMode": "100644",
+          "gitObject": "8da91e2b1c8ebd4fc83a774fb527bca6d5ef944f",
+          "bytes": 154700,
+          "sha256": "511555eba2bbf405752e74d2fcd26ca93028b0e214982ca51ef7f13e914902fc"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/Cargo.toml",
+          "sourcePath": "src-tauri/native-service/Cargo.toml",
+          "gitMode": "100644",
+          "gitObject": "4f737717e8ffea176a96acf9b4a28b55b57610b6",
+          "bytes": 1182,
+          "sha256": "8e87f3ffbf9001acd8efcee089c1ea863c80576c7d3932b5ae3a06d8f95a9c62"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/catalog.rs",
+          "sourcePath": "src-tauri/native-service/src/catalog.rs",
+          "gitMode": "100644",
+          "gitObject": "091db3e9fd30d9b57c1c5e0885061ce2339a8670",
+          "bytes": 89904,
+          "sha256": "c5a26280301db3d135ea0eb8f5f2d0d11a4ed8437bffc0d39d4da084c705b309"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/daily_tokens.rs",
+          "sourcePath": "src-tauri/native-service/src/daily_tokens.rs",
+          "gitMode": "100644",
+          "gitObject": "abea0dc149eaf42d628f762ecf9fee793d4cbf28",
+          "bytes": 23129,
+          "sha256": "ceb750ed8e9a16bdfc1dd6f190e8e3157f8f896b71ff2e8a275583415dcc18ce"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/global_search.rs",
+          "sourcePath": "src-tauri/native-service/src/global_search.rs",
+          "gitMode": "100644",
+          "gitObject": "49a6d0dda2464483b38b05f336833a61bbc32c73",
+          "bytes": 25208,
+          "sha256": "2b06db2e90ba6196873eede64f03b5f46d6df87f224177df953038c2d3fece10"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/history.rs",
+          "sourcePath": "src-tauri/native-service/src/history.rs",
+          "gitMode": "100644",
+          "gitObject": "e0151bad411eef405e22f1df18148591efe2abfa",
+          "bytes": 51042,
+          "sha256": "570e45bbf638240b4bc414a673b4aea47cbe42d2993019f9f0ddecc89e78d6de"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/lib.rs",
+          "sourcePath": "src-tauri/native-service/src/lib.rs",
+          "gitMode": "100644",
+          "gitObject": "ef2a113a7bc0a9c31bd033fa531b0212482e3830",
+          "bytes": 26,
+          "sha256": "0f13ac038ae8d0ad171d7bf76d83c622883b402bea30166935c860a2d892970e"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/main.rs",
+          "sourcePath": "src-tauri/native-service/src/main.rs",
+          "gitMode": "100644",
+          "gitObject": "8566f325343218bc42fb1d006591e0e95d2cb205",
+          "bytes": 46890,
+          "sha256": "5be9f86824d2f7bb82e98ca838fbf6c3a08753b15655afa16c937c3e9f495578"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/pagination_patch.rs",
+          "sourcePath": "src-tauri/native-service/src/pagination_patch.rs",
+          "gitMode": "100644",
+          "gitObject": "8e77b45cd3272914ee5b40cfe66660bc7f58e965",
+          "bytes": 19720,
+          "sha256": "b32673e81f55296039386a319b6a4ca9042245ae0ce9695fbcd2d2ef44dc4987"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/prompt_index.rs",
+          "sourcePath": "src-tauri/native-service/src/prompt_index.rs",
+          "gitMode": "100644",
+          "gitObject": "377aa766bed77c479f63d79402cd2a45f24f333d",
+          "bytes": 189274,
+          "sha256": "4e87e8c474dfb577a398cc47ff8e0f7eb8f34319e0a3506c03b5d270b0951b2f"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/prompts.rs",
+          "sourcePath": "src-tauri/native-service/src/prompts.rs",
+          "gitMode": "100644",
+          "gitObject": "5a28308ce79f031dc6e8f5edfbb2059816da44dc",
+          "bytes": 81275,
+          "sha256": "8231b6836034117f46bc5579da008392a19e377c82cf78f1def52aead05ce71a"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/adapters/cc_switch.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/adapters/cc_switch.rs",
+          "gitMode": "100644",
+          "gitObject": "fff36128d12c2d360ba8b2d33f454e963ca5f2b3",
+          "bytes": 16913,
+          "sha256": "db5cf39921f5005fde2cd95afb4b34f66eb5d8be13f13deb831bfe7335b3ca02"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/adapters/mod.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/adapters/mod.rs",
+          "gitMode": "100644",
+          "gitObject": "d089406d50fe6fa44870f45378a40902f88bd1f9",
+          "bytes": 3177,
+          "sha256": "0c00b39dd84fc9d9a8e23429ada260ba9745c4fecb97473fc403917554e87c29"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/adapters/native_codex.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/adapters/native_codex.rs",
+          "gitMode": "100644",
+          "gitObject": "aa38ca3b5e179507da9d839377f906812c376d1d",
+          "bytes": 5273,
+          "sha256": "43a99499f810e0594556f966a6975908723f4f3cafc198f9b13170ac9c53a2ec"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/config.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/config.rs",
+          "gitMode": "100644",
+          "gitObject": "66053aa9261e855d121fc78d51561671768574cb",
+          "bytes": 10933,
+          "sha256": "45e9c88c062a6c99d44a59af2b5bb4f51c9f8fc37a713b1195e1e979f87a5c59"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/environment.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/environment.rs",
+          "gitMode": "100644",
+          "gitObject": "3c95620550c2121cd1a49c7f24ada220c4b21a27",
+          "bytes": 1917,
+          "sha256": "3903672fce54baf1ee37a88cd4ca6b61ba48d03f81cf85abeebf4cd16053b926"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/history.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/history.rs",
+          "gitMode": "100644",
+          "gitObject": "858b25e8f3dacac5da4f5f87004dfb4fb87f0dbc",
+          "bytes": 38893,
+          "sha256": "0c2ea6a258a475e5ee6c13121fa12c7e3950ca0a25f2c84c9aff343489bf34dd"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/mod.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/mod.rs",
+          "gitMode": "100644",
+          "gitObject": "49b2685271e836db7b177f51f2fad2f304ea7c62",
+          "bytes": 1102,
+          "sha256": "28402e154e6b940e8276c34ac8cec9ac1ab950684763570eda0dcc9ed9b93690"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/protocol.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/protocol.rs",
+          "gitMode": "100644",
+          "gitObject": "42343548aa93840e43774f372bde0648d43d7a37",
+          "bytes": 16169,
+          "sha256": "555f4e7d64151a01833a82d49936229de1db1bfaa00df68f5efaf539b0e7f0e3"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/redaction.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/redaction.rs",
+          "gitMode": "100644",
+          "gitObject": "be4033783911e6d4256882cd81f9a052ebcaa7be",
+          "bytes": 2067,
+          "sha256": "2abb6a985bf3b212e593446f545d8dd4cabbe5ec04c966f22c7765a555d4ea26"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/sqlite.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/sqlite.rs",
+          "gitMode": "100644",
+          "gitObject": "1e85deb934d5de05d37aac6fb19f028d3d46ae60",
+          "bytes": 6775,
+          "sha256": "d30d0384b5350ca129108e5952cc9f80c7c759c4ce29360af99c2ad63d329665"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/src/provider_interop/transaction.rs",
+          "sourcePath": "src-tauri/native-service/src/provider_interop/transaction.rs",
+          "gitMode": "100644",
+          "gitObject": "b30844740532875b4e4dd1e8590d55f832f50f70",
+          "bytes": 25016,
+          "sha256": "bc8021b1a20e2eaf5ae497f9d15097442147d506b0c955f10bd86e8c2f0ba8da"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_adapters.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_adapters.rs",
+          "gitMode": "100644",
+          "gitObject": "d5fa44fe18a79a3e6fbbb9a638e8eed23765ee2c",
+          "bytes": 6219,
+          "sha256": "b5ba84177bb21ff3e6a6ee1c5463fb4b723effd340eb456c95de7382f022d5e5"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_config.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_config.rs",
+          "gitMode": "100644",
+          "gitObject": "91b0aa5d27995c4d3e961a3d1db35b0426c35e01",
+          "bytes": 2734,
+          "sha256": "38cf9a805b1bdc3cf8c74ec08d7c0186e0a465952842889cec9588c1c9742f3c"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_fault_injection.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_fault_injection.rs",
+          "gitMode": "100644",
+          "gitObject": "8c6c8aab59eb788fae11d309ac0f8081e98cdf4a",
+          "bytes": 2317,
+          "sha256": "6f7fd7a9f660ecd5ae3a7407c98a8bf1563ec9756b18bbd7b6d65cc2a461b240"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_history.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_history.rs",
+          "gitMode": "100644",
+          "gitObject": "7385f41d13f7c5efdf35b9c63abbd8ad504f24ed",
+          "bytes": 12197,
+          "sha256": "1f09ef99913a064f21d373332423daeecdd5ed551cb2f5025dde326e99b2aaa5"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_history_properties.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_history_properties.rs",
+          "gitMode": "100644",
+          "gitObject": "1f9e9b1de16bad8a1598e4d7e4a60c8f94b8a9e6",
+          "bytes": 1608,
+          "sha256": "13efa346dadd5cad1c93d0dfdb4c306ce07e0105823a1202a9e3c00aa98d6e0f"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_protocol.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_protocol.rs",
+          "gitMode": "100644",
+          "gitObject": "ec5a01ff5b1362c7e2b678f8b15f19afe87a226a",
+          "bytes": 3230,
+          "sha256": "b4655843650c59360013df9b853dd703265ab2a2e78298009bccb7ef8b301f95"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/native-service/tests/provider_interop_transaction.rs",
+          "sourcePath": "src-tauri/native-service/tests/provider_interop_transaction.rs",
+          "gitMode": "100644",
+          "gitObject": "5f451e9bea0f448ef00b9e24317d5e5fc124a160",
+          "bytes": 9229,
+          "sha256": "0f69404b6074c7e3e0413ade14fec86e64347d70472919bd8c485645b12428d2"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/src/lib.rs",
+          "sourcePath": "src-tauri/src/lib.rs",
+          "gitMode": "100644",
+          "gitObject": "e42aa635bd73bc841cdbef61cff2107d02703b95",
+          "bytes": 2203,
+          "sha256": "bf1d263c748b83c9e258edab1632b209c7e00c599c5055c3307942c22c6ae97b"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/src/main.rs",
+          "sourcePath": "src-tauri/src/main.rs",
+          "gitMode": "100644",
+          "gitObject": "9a3c87f4c98a2e75969ebd418f01304a0ecf494e",
+          "bytes": 125,
+          "sha256": "40f69b63e2ec47be556516f91961c65ee2b19f2dff6d79a04fe6600c29ea5605"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/src/runtime_status.rs",
+          "sourcePath": "src-tauri/src/runtime_status.rs",
+          "gitMode": "100644",
+          "gitObject": "3842a53863c647c2802428186ef9c4d58ad5b725",
+          "bytes": 1023,
+          "sha256": "826be8e48c195de00c22f7be5fac10dbd6467793d20e279d0ced3d3a9571d9e7"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/src/service.rs",
+          "sourcePath": "src-tauri/src/service.rs",
+          "gitMode": "100644",
+          "gitObject": "f947d08bd72f40c2b8e71177512739d9f5fde9ea",
+          "bytes": 11871,
+          "sha256": "069edf09ca77cd151702543365ff39dcc445854a16c6ef2219734fad57d3d505"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/src/windows_job.rs",
+          "sourcePath": "src-tauri/src/windows_job.rs",
+          "gitMode": "100644",
+          "gitObject": "6194087eeac2a821ef828ba0f861b9d8f84cada9",
+          "bytes": 3055,
+          "sha256": "1215cb9e1024104ddd726146948a17ce07acfb9075e2393c25c3cc12bc9fb7c6"
+        },
+        {
+          "path": "codex_home_manager/src-tauri/tauri.conf.json",
+          "sourcePath": "src-tauri/tauri.conf.json",
+          "gitMode": "100644",
+          "gitObject": "3da5070b0ba9f0cab7a03b0dc30efedb4ae6815c",
+          "bytes": 1826,
+          "sha256": "882ea1405b3b18a6703b1a1e7ec9b3ea198eb5744025ab7df3e1ca7bc07c215a"
+        },
+        {
+          "path": "codex_home_manager/src/DesktopRuntime.tsx",
+          "sourcePath": "src/DesktopRuntime.tsx",
+          "gitMode": "100644",
+          "gitObject": "12f63e23633bf4c72fb2b4714c5493c315141501",
+          "bytes": 5603,
+          "sha256": "7368429b7eae46a1d3860dfe91c6186f34cdc6c633377d7a0541f67ed6e1b576"
+        },
+        {
+          "path": "codex_home_manager/src/GlobalThreadSearchModal.tsx",
+          "sourcePath": "src/GlobalThreadSearchModal.tsx",
+          "gitMode": "100644",
+          "gitObject": "e7092269a7c55720dce8e26491ffe6af80dd6b8f",
+          "bytes": 17750,
+          "sha256": "eeb85eb90d96d90373a01d8f6dee05d5d22a9b0d36f247c765470a9fd48340b9"
+        },
+        {
+          "path": "codex_home_manager/src/MaintenanceCenter.tsx",
+          "sourcePath": "src/MaintenanceCenter.tsx",
+          "gitMode": "100644",
+          "gitObject": "0389f0e2b72066c28436b273efdeab4b2a9cd665",
+          "bytes": 28692,
+          "sha256": "9e1cc8fc39cb05744343344d45b6fc11d1c45162b49f8c5e8cc48bcdd0591e86"
+        },
+        {
+          "path": "codex_home_manager/src/MarkdownContent.tsx",
+          "sourcePath": "src/MarkdownContent.tsx",
+          "gitMode": "100644",
+          "gitObject": "862a0b71e120ddf49fc39057e87bc8a4f07d6cdc",
+          "bytes": 2754,
+          "sha256": "9c8a7b39757b5ab3b6f6fec48b219a9d21c6a41a9dfda67b8f3d5365b73780ec"
         },
         {
           "path": "codex_home_manager/src/PromptOrdering.tsx",
           "sourcePath": "src/PromptOrdering.tsx",
           "gitMode": "100644",
-          "gitObject": "8bdbd5f92dc1c21bf5b1ab5364c2707f95dabd54",
-          "bytes": 3533,
-          "sha256": "d70656d0d00ec5fea201c2922341b6529a73d6a4fa5c10ad73cc70581255a79e"
+          "gitObject": "3174a5488440cdd6253483214785d60f150e17b4",
+          "bytes": 3846,
+          "sha256": "174194421442205ee62a47c64732deb6deac5c509ae4a968f5fcb549ac0ff13c"
+        },
+        {
+          "path": "codex_home_manager/src/ProviderInteroperabilityPanel.tsx",
+          "sourcePath": "src/ProviderInteroperabilityPanel.tsx",
+          "gitMode": "100644",
+          "gitObject": "72fc17033fbe77a76b2d0aa4e4f5e48bbf539123",
+          "bytes": 35203,
+          "sha256": "3ac66ae99a22bbfaec4bd32407830e45a976ab18091b8602dee4ef9a98616ac7"
         },
         {
           "path": "codex_home_manager/src/TimelineEntry.tsx",
           "sourcePath": "src/TimelineEntry.tsx",
           "gitMode": "100644",
-          "gitObject": "4d6d4139481fc46fbe800bf3fb9f4c0414967fe9",
-          "bytes": 3181,
-          "sha256": "acc2d8d0487cee662e45ef4fa988a3987bace1f46f39aeabc1133876cfa19339"
+          "gitObject": "05a1607284b97da3c9a19cbdf233210a6e090629",
+          "bytes": 8463,
+          "sha256": "084110838ebef21b5acd33ae64299ac24e5f680ac1453cae89bb43c15f670b04"
         },
         {
           "path": "codex_home_manager/src/browserHome.ts",
           "sourcePath": "src/browserHome.ts",
           "gitMode": "100644",
-          "gitObject": "d431485ad0bab73a64a9a50a784f3e23ccaa6e40",
-          "bytes": 142583,
-          "sha256": "f6c1b16ef89bfe4d15c2e01fe3a85026fd9efb8dd17b1b35f22e93769e1d3e4d"
+          "gitObject": "9f22b0533e7a504a1b5cdca48e61969c88fed980",
+          "bytes": 146130,
+          "sha256": "6f920cf538cec59a946aa5eb12192a62e8dea3f9002fe880060c6cf1b9364a06"
         },
         {
           "path": "codex_home_manager/src/main.tsx",
           "sourcePath": "src/main.tsx",
           "gitMode": "100644",
-          "gitObject": "2ba11558bd976d70f05e3999622ea6583ade7201",
-          "bytes": 418217,
-          "sha256": "d42733467060d136ce24a31703762a7486b49193a0d5f3d8ccc5b375aba6f149"
+          "gitObject": "77993b83ce74e5965c8c8345fd4441def031eb85",
+          "bytes": 489795,
+          "sha256": "00d183248999cb438a28868b0624c2a177d9f3fd8b0bb82d3ac649c587176ea0"
+        },
+        {
+          "path": "codex_home_manager/src/maintenance.css",
+          "sourcePath": "src/maintenance.css",
+          "gitMode": "100644",
+          "gitObject": "7a75f3814f32a72e9f6c5234340e63f5eb691010",
+          "bytes": 16958,
+          "sha256": "6e07c4533e00ebba14c823d7ab53d2192ea68f09ebf2852eb6f5f6557ccbb1fa"
         },
         {
           "path": "codex_home_manager/src/promptClassification.ts",
           "sourcePath": "src/promptClassification.ts",
           "gitMode": "100644",
-          "gitObject": "6c00555a93cb6510bf9b0dabcbc61f183140814e",
-          "bytes": 4783,
-          "sha256": "4e6654f8e583e3dc5f33487c1a8efe4bb99222188d0420fe048e6c750677c385"
+          "gitObject": "68b115df7120f02db04b4d1c4c58e05a632a23e1",
+          "bytes": 5476,
+          "sha256": "3a7931129bcad74eb772c8107e8957f504c09df749e052a5860778174b8ec163"
+        },
+        {
+          "path": "codex_home_manager/src/provider-interoperability.css",
+          "sourcePath": "src/provider-interoperability.css",
+          "gitMode": "100644",
+          "gitObject": "bb135e17fe9cd334f03843b7f086b193daef82f5",
+          "bytes": 9408,
+          "sha256": "3898de9fbdd7241c80ff33f6f6e50fb0fddb38c2f8a45f3103f58d9248abad12"
+        },
+        {
+          "path": "codex_home_manager/src/providerInteroperability.ts",
+          "sourcePath": "src/providerInteroperability.ts",
+          "gitMode": "100644",
+          "gitObject": "973b34f63dbd32e30e7f5a4b08bc6cbac3353907",
+          "bytes": 6080,
+          "sha256": "2849c7ce7aff2778a88ae69bce2be34e54e28942079910da4813403ccb6d76af"
         },
         {
           "path": "codex_home_manager/src/sql-js.d.ts",
@@ -687,33 +1536,41 @@
           "path": "codex_home_manager/src/styles.css",
           "sourcePath": "src/styles.css",
           "gitMode": "100644",
-          "gitObject": "8bd511bfdc447005d0f5e2f66e4f0896a2a3e7e2",
-          "bytes": 119960,
-          "sha256": "957ade164657f27a8ae576fc567ad23efe4c2ef220180195fd5c611255280bd0"
+          "gitObject": "2193c55c6c30ef1fee2707bb376460c2836fa455",
+          "bytes": 141711,
+          "sha256": "e6907ad12eb16a06e91c0a74198b2809da64321592a68b0e527d2f375d34dc3e"
         },
         {
           "path": "codex_home_manager/src/threadContentSearch.ts",
           "sourcePath": "src/threadContentSearch.ts",
           "gitMode": "100644",
-          "gitObject": "0a7d49318fffe0e52b12472d8f9e971cb12c4f3e",
-          "bytes": 4344,
-          "sha256": "7fb5173e63c03850071b2e4df3c61a1050c20884b2f9bc437f7ec980a20f6f2f"
+          "gitObject": "53a5a7e63a83b4e98edbb52a0375fe12e83fb518",
+          "bytes": 4482,
+          "sha256": "2df88f914284a01dad04ed7d68e5d0c4e6fadb1c3b9c2e3a880fda4d6c02bebe"
         },
         {
           "path": "codex_home_manager/src/threadTimeline.ts",
           "sourcePath": "src/threadTimeline.ts",
           "gitMode": "100644",
-          "gitObject": "b6176ea5ef80f1aa5da1598da17a1a9403c17518",
-          "bytes": 26270,
-          "sha256": "febb7c216a5e9be2ed21860e92930134d380e1ce3ade902092828e5da161d443"
+          "gitObject": "6d361769618b8811c4b5889a2a0e1599e34b6590",
+          "bytes": 31740,
+          "sha256": "2b2ab7e9f6eedc46543466551a83cd46ae0f1e7bd29166e50fdb94b5f474f1ae"
         },
         {
           "path": "codex_home_manager/src/uiBehavior.ts",
           "sourcePath": "src/uiBehavior.ts",
           "gitMode": "100644",
-          "gitObject": "5974bad1e862e2037480474c2e1f7c3996f99bdc",
-          "bytes": 3296,
-          "sha256": "2a637beacc83d5ea8cf79ef87f51038be1ea478c286c36619a7c3f772f8a561b"
+          "gitObject": "9a84a55f796aa57ff5e5127b94cd25f1c600bfe3",
+          "bytes": 3514,
+          "sha256": "8f9b3dc965bb2cb6b3939d6acdb08e66256be4d65d1e389285889b5b88d39228"
+        },
+        {
+          "path": "codex_home_manager/src/useUnderfillPagination.ts",
+          "sourcePath": "src/useUnderfillPagination.ts",
+          "gitMode": "100644",
+          "gitObject": "424483560ed1ebccf584eb6dfe40bd5f8ec31666",
+          "bytes": 2209,
+          "sha256": "5f760ccf49a186c9cf5dd71a200e88ca82ece5d4cfab9ded964a87fda926584a"
         },
         {
           "path": "codex_home_manager/src/vite-env.d.ts",
@@ -727,49 +1584,249 @@
           "path": "codex_home_manager/tests/browser_home_streaming.test.mjs",
           "sourcePath": "tests/browser_home_streaming.test.mjs",
           "gitMode": "100644",
-          "gitObject": "7c59989cbbf54bfa18af2d213b5f6be44d23c762",
-          "bytes": 14058,
-          "sha256": "9ef056716ff559f3584285e72b55821fa74f092e42eb9ccd0efabacecc1622b3"
+          "gitObject": "75b266d535340778275c90f97a26659b8d443c27",
+          "bytes": 20591,
+          "sha256": "b7a02e7cd9a7b6896b7f9a22dff425fff81b6d9bd3b9bb07e1c32748005205c2"
+        },
+        {
+          "path": "codex_home_manager/tests/desktop_artifact_contract.test.mjs",
+          "sourcePath": "tests/desktop_artifact_contract.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "adcd75bea6f6422893ec7dc7d79ee34cc1f5f4b0",
+          "bytes": 14444,
+          "sha256": "111c5045d07495f27cf9e17152441fbb80ac280093346057efe8190882e99653"
+        },
+        {
+          "path": "codex_home_manager/tests/desktop_packaging_receipts.Tests.ps1",
+          "sourcePath": "tests/desktop_packaging_receipts.Tests.ps1",
+          "gitMode": "100644",
+          "gitObject": "0d8e403b296c98b7fd1700ad5f9ad3fcf84e7626",
+          "bytes": 6662,
+          "sha256": "34400a541b8e66e129c4336c19cd0b9f90f8f72caf10bb20ffd9547759e53959"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/pagination_receipt_status.json",
+          "sourcePath": "tests/fixtures/pagination_receipt_status.json",
+          "gitMode": "100644",
+          "gitObject": "111649570f5bd091400064a84df0dd4583b75559",
+          "bytes": 5736,
+          "sha256": "3beeaf37211196fac93cc0a90c646d24fcf0b87a5830758806310599012ef43d"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/provider_interop/cc_switch_schema_16.sql",
+          "sourcePath": "tests/fixtures/provider_interop/cc_switch_schema_16.sql",
+          "gitMode": "100644",
+          "gitObject": "29fbf1877c1ed052a2624f24ce2c741bcb2fa8e0",
+          "bytes": 975,
+          "sha256": "26f3154ca4a7ae57eb2b220d3539f4c950821b67d2512eed65872d49f8b84d68"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/provider_interop/codex_config_official.toml",
+          "sourcePath": "tests/fixtures/provider_interop/codex_config_official.toml",
+          "gitMode": "100644",
+          "gitObject": "44662372cd06d7a499ae374771bae5f9db3de209",
+          "bytes": 146,
+          "sha256": "4e95ff74bed06e22aa82e9bde86451b47459d16183ad37ebf16cce13c3dbc688"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/provider_interop/codex_config_proxy.toml",
+          "sourcePath": "tests/fixtures/provider_interop/codex_config_proxy.toml",
+          "gitMode": "100644",
+          "gitObject": "658034c6b4b6bd86a4be3c2461813bb2cea3c02f",
+          "bytes": 213,
+          "sha256": "637e5608f1689929f7527e1b86ddd1d9d3f981c5252730f11e944010d8f4a441"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/provider_interop/common_config.toml",
+          "sourcePath": "tests/fixtures/provider_interop/common_config.toml",
+          "gitMode": "100644",
+          "gitObject": "88c34f90b5ff63c4acf624962732be07e5525301",
+          "bytes": 160,
+          "sha256": "d13c950e6d2ea0685070cd28dae9c32e32a2296cd901c246072c7717524e4359"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/provider_interop/desktop_dynamic_config.toml",
+          "sourcePath": "tests/fixtures/provider_interop/desktop_dynamic_config.toml",
+          "gitMode": "100644",
+          "gitObject": "5e4886f245d4c25ecd0de7da0d925bc342e59f0c",
+          "bytes": 716,
+          "sha256": "f8d23444300da7aba0a8ede79334551864a616b445a6160f643c4ab384627af1"
+        },
+        {
+          "path": "codex_home_manager/tests/fixtures/timeline_classification_contract.json",
+          "sourcePath": "tests/fixtures/timeline_classification_contract.json",
+          "gitMode": "100644",
+          "gitObject": "9a76ec11128296bb28dfaa7b8a9c24743245ce6f",
+          "bytes": 4830,
+          "sha256": "69977efd13911c78b9cdcbeae637c09e18df07f2bca5d8d7db5ec8b81bf6953b"
         },
         {
           "path": "codex_home_manager/tests/frontend_accessibility.test.mjs",
           "sourcePath": "tests/frontend_accessibility.test.mjs",
           "gitMode": "100644",
-          "gitObject": "3b5e7601981d1292e86317025809986abeec615c",
-          "bytes": 85897,
-          "sha256": "673265f212df631eb169cd25446eccb62a20aeafbe3b4175e0a557986ac09f31"
+          "gitObject": "bbe871a67d3879be32301715678664e2935ff955",
+          "bytes": 131579,
+          "sha256": "babdd09c293555d6e49c99559e130678a1d726370a6c4c822d25b323cc07dcb4"
         },
         {
           "path": "codex_home_manager/tests/frontend_connector_contracts.test.mjs",
           "sourcePath": "tests/frontend_connector_contracts.test.mjs",
           "gitMode": "100644",
-          "gitObject": "29ead366ab00ce59f9112d9ac14e6a5540102c35",
-          "bytes": 8348,
-          "sha256": "499d19d7f7d97044fa29f1ed111bccac524e6cf79c75da15f16dc842f225d225"
+          "gitObject": "d26bd99f1dbd61d6941fe49e039d2eef603445b4",
+          "bytes": 13978,
+          "sha256": "5737ca49e22a9fe8c0a30992876a8c811f2286d995f4f26b361573064e4af911"
         },
         {
           "path": "codex_home_manager/tests/frontend_quality.test.mjs",
           "sourcePath": "tests/frontend_quality.test.mjs",
           "gitMode": "100644",
-          "gitObject": "68ec45bb0cf5d2ded151a5efd2bdee5e056c4df6",
-          "bytes": 20529,
-          "sha256": "00a7135ca4177b5f5f08535cd6a0737a6e3662137d9b63660da30697ab61575d"
+          "gitObject": "b1a62577d52e9e9a192d9b6f5d66e3843166e50c",
+          "bytes": 24362,
+          "sha256": "0203af903830608430aa77d7923c24978607fffd27f829b0d1d1d4faf7506b2a"
         },
         {
           "path": "codex_home_manager/tests/frontend_review_regressions.test.mjs",
           "sourcePath": "tests/frontend_review_regressions.test.mjs",
           "gitMode": "100644",
-          "gitObject": "3da1c61a70fa324d19c0bfc3505722f5861f727b",
-          "bytes": 9119,
-          "sha256": "1ea67924eae136d0fdec3d4659abb17b7ab3332487353d5ee0b149739b9c1773"
+          "gitObject": "68376783f18debccdec19923080c7d7c789129bf",
+          "bytes": 9805,
+          "sha256": "30b14cc84ac6db27d9c99d09be36e96a8c3b3d3075e4ae4b806453093a6a6419"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_delegation_smoke.mjs",
+          "sourcePath": "tests/installed_delegation_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "081f3bc87cd6b8e8f5177132d49151989e7febf8",
+          "bytes": 2187,
+          "sha256": "dd3ea7d9bd019b0a0ed3a6bfaea8093f3732be40d7c006c51c80346e931e2d8e"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_delegation_style_smoke.mjs",
+          "sourcePath": "tests/installed_delegation_style_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "d75d4b1e3051a62e3a19981bc4ffdc8e5e32198c",
+          "bytes": 4182,
+          "sha256": "6190f4472fe292c3b08a9f337bea6874ee906ce8535438b61f1315814c128ef2"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_prompt_context_smoke.mjs",
+          "sourcePath": "tests/installed_prompt_context_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "4345b509b6f112fc28874a2298d2025b881cbbb7",
+          "bytes": 17547,
+          "sha256": "0b7ddd15738758d858290eb7e8e0c807843f9366b387262e474b8c4b0379cad4"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_search_latency_smoke.mjs",
+          "sourcePath": "tests/installed_search_latency_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "0678611e7d3a3afc0829c6f55b8eaffd5d739369",
+          "bytes": 4142,
+          "sha256": "7fa0906dba198d6533f5c524d8351563629b56499c46651908d5fe9a73510a23"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_source_matrix_smoke.mjs",
+          "sourcePath": "tests/installed_source_matrix_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "bdc9dfbc3614964a1b185ae085d6f7a8ddab6a54",
+          "bytes": 5915,
+          "sha256": "f450b08c02b304d53c84fe595c59c85e708e3716bc83fa5971c806b2d29eab1c"
+        },
+        {
+          "path": "codex_home_manager/tests/installed_status_layout_smoke.mjs",
+          "sourcePath": "tests/installed_status_layout_smoke.mjs",
+          "gitMode": "100644",
+          "gitObject": "a833986d7fd32cd41d2d495ae3c550d0d2e84a21",
+          "bytes": 2534,
+          "sha256": "143e32bca292b3e282ca2ce5bb36361eecff8fcdb1d666e44f267c1dc5a06fa4"
+        },
+        {
+          "path": "codex_home_manager/tests/maintenance_center_logic.test.mjs",
+          "sourcePath": "tests/maintenance_center_logic.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "f8fc85386baeb2c2acf1dc4e19d30ec12fecd6cd",
+          "bytes": 16848,
+          "sha256": "15ad390082b0e017a4ab16d9087051c94ef95c3b8c94d82369ddea74d87a2200"
+        },
+        {
+          "path": "codex_home_manager/tests/maintenance_center_ui.test.mjs",
+          "sourcePath": "tests/maintenance_center_ui.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "d32985c6581b1c59f12c067b8dc23dbdb03b2100",
+          "bytes": 8028,
+          "sha256": "18204a9e63c98c368d46d6cb13b7bdc723473c57a2ccda8094223959c354eaec"
+        },
+        {
+          "path": "codex_home_manager/tests/maintenance_visual_layout.test.mjs",
+          "sourcePath": "tests/maintenance_visual_layout.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "fddfd4ddd79c9a09612ec73c00417da9b17f6e7b",
+          "bytes": 4573,
+          "sha256": "d93e4f4931430979e75270330a65868ad912b575c826dd4c537b07340b206ada"
+        },
+        {
+          "path": "codex_home_manager/tests/prompt_edge_reset.test.mjs",
+          "sourcePath": "tests/prompt_edge_reset.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "adbe42fdcf6591cb39096f4777612728f5bc3e3e",
+          "bytes": 2382,
+          "sha256": "8cc45a3da25fc2c0fec19594be1debd06d8f9573f87a005f661beb9d5ac7db34"
+        },
+        {
+          "path": "codex_home_manager/tests/prompt_scan_cursor.test.mjs",
+          "sourcePath": "tests/prompt_scan_cursor.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "6888c9c79a24ab9f65803642170f1ca47c770d36",
+          "bytes": 11104,
+          "sha256": "b549552364a5a7ab7ceeb14c0078c270588dab5287dabdb3df5e20b3fc9d5c8c"
+        },
+        {
+          "path": "codex_home_manager/tests/provider_interoperability_ui.test.mjs",
+          "sourcePath": "tests/provider_interoperability_ui.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "c602e15f792ad8a4316963a85bbb0f2ed5b564ec",
+          "bytes": 4293,
+          "sha256": "4a6f7df7314cb822cf05b5aea401abf31268846cd922e06757f47b594ecea9af"
+        },
+        {
+          "path": "codex_home_manager/tests/recent_prompt_fill.test.mjs",
+          "sourcePath": "tests/recent_prompt_fill.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "c4aa587370ec51d99f6383118a54b38520ffd4b5",
+          "bytes": 1394,
+          "sha256": "6895af663d6fe51a7626875032370022f201e00a1cde6f099385cf852742ce69"
+        },
+        {
+          "path": "codex_home_manager/tests/recent_prompt_transaction.test.mjs",
+          "sourcePath": "tests/recent_prompt_transaction.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "d0150026c91e873a8351e2d539dbeb83836cece4",
+          "bytes": 2576,
+          "sha256": "2b89f0c46410cccc22ecd1a2976f0be29a5046da84c6dcb2ce82864804ab00dc"
+        },
+        {
+          "path": "codex_home_manager/tests/test_browser_rollout_patch_status.py",
+          "sourcePath": "tests/test_browser_rollout_patch_status.py",
+          "gitMode": "100644",
+          "gitObject": "34ac43850f9a25659b814da56dfb3e03346ee4dd",
+          "bytes": 14231,
+          "sha256": "5bfe246a34c86ed7d7559d7571662f87e667de93bec0877e39362314de125457"
+        },
+        {
+          "path": "codex_home_manager/tests/test_cockpit_icon.py",
+          "sourcePath": "tests/test_cockpit_icon.py",
+          "gitMode": "100644",
+          "gitObject": "afe8b8940edfdfea7dad9ae0c0e34c0a79171f8d",
+          "bytes": 4154,
+          "sha256": "d9a13b1781a689b3fdc84b867038530fc0c82b3f0ab3aa776f5cd597e2ec04bb"
         },
         {
           "path": "codex_home_manager/tests/test_codex_data.py",
           "sourcePath": "tests/test_codex_data.py",
           "gitMode": "100644",
-          "gitObject": "d7645eb568b554146aa8ac2d443846f23cbc9a96",
-          "bytes": 388460,
-          "sha256": "cfa4d8b0d1bb0e074d530e2f5708252a746f3824d51a0a8bedeff08bb0272000"
+          "gitObject": "0cec1fe64724db20a325bffeec2cab9384cba903",
+          "bytes": 422595,
+          "sha256": "f03d0c50ac9fea69e177c506e644a55b430d4adac43a5fc860b8bd712561f705"
         },
         {
           "path": "codex_home_manager/tests/test_codex_plugin_state_snapshot.py",
@@ -778,6 +1835,22 @@
           "gitObject": "9649173c00128e77f11cf32e8a7365f2c62a9f73",
           "bytes": 15537,
           "sha256": "b9792e72c24b36de267507fa2616eaa4ff7cba8ccc286652a56ce4177fe34c79"
+        },
+        {
+          "path": "codex_home_manager/tests/test_desktop_release.py",
+          "sourcePath": "tests/test_desktop_release.py",
+          "gitMode": "100644",
+          "gitObject": "4d55c2693f7d50c45415c777268d42419dfc49ea",
+          "bytes": 3797,
+          "sha256": "4a8783d8b3f855f087378a325d95bca155e7781830a3c5ebef702a9221e62f3e"
+        },
+        {
+          "path": "codex_home_manager/tests/test_diagnostics_pagination_patch.py",
+          "sourcePath": "tests/test_diagnostics_pagination_patch.py",
+          "gitMode": "100644",
+          "gitObject": "424825fc902fe7ea37d8131f6827c2f7dfce0502",
+          "bytes": 1721,
+          "sha256": "ad13a972efc809be112ff87c6f1469deebe514511cddbf02458b4113dc1061df"
         },
         {
           "path": "codex_home_manager/tests/test_diagnostics_snapshot_runner.py",
@@ -807,17 +1880,25 @@
           "path": "codex_home_manager/tests/test_frontend_write_auth.py",
           "sourcePath": "tests/test_frontend_write_auth.py",
           "gitMode": "100644",
-          "gitObject": "5e11229a399941d430108848f8c3644518568666",
-          "bytes": 1052,
-          "sha256": "ff27644c76cfe88d6ed0bf59b0e0e9547d8440215e0886c0ae7ad0cc97a23c27"
+          "gitObject": "251cdc0cd321a4bdcdff057a277f932803f75a8a",
+          "bytes": 1044,
+          "sha256": "1380a90de68a1ba3307404d7f14e8beffed4f4b88c86a272685f6b7a4dd8888c"
         },
         {
           "path": "codex_home_manager/tests/test_maintainability_gate.py",
           "sourcePath": "tests/test_maintainability_gate.py",
           "gitMode": "100644",
-          "gitObject": "26ab8e4e5ed942e065c626248174a001ac35ade2",
-          "bytes": 507,
-          "sha256": "eef54094a38a1feeb52272732a49b4bf64ec555cc419dc2fe3aba3da857bb80d"
+          "gitObject": "2c9ac09ef9f5a6672e579ede2927047fb1131510",
+          "bytes": 882,
+          "sha256": "8e8be7508cda80a36bb63f3a07039a28cc635cbdffd7522fbaa6b7ad6aaaace6"
+        },
+        {
+          "path": "codex_home_manager/tests/test_maintenance.py",
+          "sourcePath": "tests/test_maintenance.py",
+          "gitMode": "100644",
+          "gitObject": "a80d421cddcfe72ffacb369e700b96ee14cbf896",
+          "bytes": 23769,
+          "sha256": "baeffcf68fea9f4333cf64dbfb212c07d4e5dfa7d46bf91600cfb8e252346df0"
         },
         {
           "path": "codex_home_manager/tests/test_merge_codex_managed_config.py",
@@ -836,20 +1917,28 @@
           "sha256": "96a98f69e67878d7475d991275c392d3dae45bdd92c44af8ef76283de99c89ee"
         },
         {
+          "path": "codex_home_manager/tests/test_migrate_codex_thread_offline.py",
+          "sourcePath": "tests/test_migrate_codex_thread_offline.py",
+          "gitMode": "100644",
+          "gitObject": "695cc6dd1e90e07df72f76de0601c12a8d0d294a",
+          "bytes": 1883,
+          "sha256": "f5676f2202c8774389456b7a9b0e652848d12f69ae2ef6cf4ea507fcfe900370"
+        },
+        {
           "path": "codex_home_manager/tests/test_official_thread_tools_session_meta.py",
           "sourcePath": "tests/test_official_thread_tools_session_meta.py",
           "gitMode": "100644",
-          "gitObject": "7d686ae67ae1f93a7a1a097cb0cc288114facc7b",
-          "bytes": 20647,
-          "sha256": "a7e56db5d01c93b7701f324965c34228a32e51c64aa510caf475518d17098bab"
+          "gitObject": "0ddad30cecf80ce25ead0ccf9cf5f11fa33e9c02",
+          "bytes": 21781,
+          "sha256": "1a6fc38a9fd4f5a0103696d5cfda8c9f4aa964fbd74ebaf944eeef87572f2fb6"
         },
         {
           "path": "codex_home_manager/tests/test_offline_codex_repair.py",
           "sourcePath": "tests/test_offline_codex_repair.py",
           "gitMode": "100644",
-          "gitObject": "66a82932f7cf76803bd1eecd79752a1892cf0266",
-          "bytes": 74753,
-          "sha256": "aa7e0d2172f6e782d02afbfe977cf050cf39e8a2f511c4075269eea9642de05b"
+          "gitObject": "1d0f987b0e0589f613f0574dacd7ecf7201b9bcf",
+          "bytes": 79452,
+          "sha256": "045ab3f6d00556c739a6880d6fa50ae449ba7837ae69bab4e701d03d68534d66"
         },
         {
           "path": "codex_home_manager/tests/test_offline_repair_policy.py",
@@ -866,6 +1955,14 @@
           "gitObject": "06ab3c1f060a242e16c573c1215884cec9326a43",
           "bytes": 73919,
           "sha256": "af3c638ada70180a15cec8dbf5807f44a2063fc3f86a57e853a2f9dc618ccf02"
+        },
+        {
+          "path": "codex_home_manager/tests/test_pagination_patch_status.py",
+          "sourcePath": "tests/test_pagination_patch_status.py",
+          "gitMode": "100644",
+          "gitObject": "6823bec33c62680bd0c2faff011b1ba575c1ff27",
+          "bytes": 10072,
+          "sha256": "97231d9ca714a249a80025339af2873a38eab60af506b20f6054a065653bb9f6"
         },
         {
           "path": "codex_home_manager/tests/test_pending_repair_validation.py",
@@ -887,9 +1984,57 @@
           "path": "codex_home_manager/tests/test_prompt_index.py",
           "sourcePath": "tests/test_prompt_index.py",
           "gitMode": "100644",
-          "gitObject": "043d14309e40b52cec9bb3d8c8189f859274410e",
-          "bytes": 51296,
-          "sha256": "42185ae9eb54af3a83c12746bf3894fa4ef3c8ef66cdc187a200a20c7df56d29"
+          "gitObject": "9b33839536618f41d777afbbe60ff78e84400bb1",
+          "bytes": 81059,
+          "sha256": "6258374c456b9ebe3e50271b7ceee68c060afc73b31c8a3418c6414a908d47a2"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_api.py",
+          "sourcePath": "tests/test_provider_interop_api.py",
+          "gitMode": "100644",
+          "gitObject": "8d40c566c148f176447641fdffa3abc2d595c7ee",
+          "bytes": 7458,
+          "sha256": "5ada32973409fde0f49945bd55a35659a3f19da929d499236c31278d272ddeb3"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_mcp.py",
+          "sourcePath": "tests/test_provider_interop_mcp.py",
+          "gitMode": "100644",
+          "gitObject": "1dc37be48f92f1124fbb934e4ccc181a6688ab96",
+          "bytes": 1325,
+          "sha256": "d42c44d3010b80d5a34b78df4177d0473bf650563f30825f67ba02ac6a9c7c65"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_parity.py",
+          "sourcePath": "tests/test_provider_interop_parity.py",
+          "gitMode": "100644",
+          "gitObject": "138e338b33b445694b971385ef4988395ffefdd3",
+          "bytes": 532,
+          "sha256": "793aa0baf2b18bfba3f2fdc48591433f228a7f3e1081e22a9435f94468494f2d"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_runtime.py",
+          "sourcePath": "tests/test_provider_interop_runtime.py",
+          "gitMode": "100644",
+          "gitObject": "8f6cddf3e5aea9c123e8fee121a06e3aef0dd044",
+          "bytes": 11225,
+          "sha256": "f8f59c8abd0a24a4bbc86814cc6c81eb8ec6cab31ea305f1edd6a3777d5cc0c9"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_service.py",
+          "sourcePath": "tests/test_provider_interop_service.py",
+          "gitMode": "100644",
+          "gitObject": "02f4038b5ba8bb53f583409ae38643a729b6c20f",
+          "bytes": 7443,
+          "sha256": "1d7a07decc816cab7e7ab7b059478d3b12309a6b53516d01e689fc91803eda8d"
+        },
+        {
+          "path": "codex_home_manager/tests/test_provider_interop_worker.py",
+          "sourcePath": "tests/test_provider_interop_worker.py",
+          "gitMode": "100644",
+          "gitObject": "7af3126afb09e8130adc6b06a056e01e77f18491",
+          "bytes": 2147,
+          "sha256": "2ce7120bdef755b11388c924acf43789b2665e6ad7b056ac754b75bfd47006f5"
         },
         {
           "path": "codex_home_manager/tests/test_public_api_contract.py",
@@ -911,17 +2056,17 @@
           "path": "codex_home_manager/tests/test_release_manifest.py",
           "sourcePath": "tests/test_release_manifest.py",
           "gitMode": "100644",
-          "gitObject": "30f671339e8479851d0d30f82b0d625593355e78",
-          "bytes": 54138,
-          "sha256": "44f7d676b78ab46de55fc21247769d6a15bc4d98487a50886396b5f04e165af7"
+          "gitObject": "97d9e14e843fbf783bb8333d27930f0c474e644f",
+          "bytes": 59566,
+          "sha256": "1a266672955a4645b16e2dcf12fc686fa2eed8d93990920fd5d25ff9734ebfd0"
         },
         {
           "path": "codex_home_manager/tests/test_release_packaging_policy.py",
           "sourcePath": "tests/test_release_packaging_policy.py",
           "gitMode": "100644",
-          "gitObject": "8d15e3fe5a85ad65480b7be2d6e03263ccfa7ebb",
-          "bytes": 16067,
-          "sha256": "332517053d755837d3fe5f62d216c42da4ac3bb4666c2bd73177a1788cdd02c3"
+          "gitObject": "73229051217567b3aee872406ecf63f8e779c154",
+          "bytes": 24229,
+          "sha256": "c31ad16698f569878040bfbec325601fa5ad74008dfc84c15609cdb3cd1794d8"
         },
         {
           "path": "codex_home_manager/tests/test_release_reproducibility.py",
@@ -946,6 +2091,14 @@
           "gitObject": "0b436dd10894425ec5f6474401b7c3393e20a82e",
           "bytes": 92247,
           "sha256": "ec331f758f096da878002c82e8bfa3fb18e8ade178ee3202c64977a6e33079d7"
+        },
+        {
+          "path": "codex_home_manager/tests/test_rollout_ordinal_projection_repair.py",
+          "sourcePath": "tests/test_rollout_ordinal_projection_repair.py",
+          "gitMode": "100644",
+          "gitObject": "ce90000649c7642054b5a7dfca3be1aa993a882b",
+          "bytes": 5234,
+          "sha256": "9276c8aa439257dab6b2e57cf9a42d52c88d6038711e3a0954f537a03a52af6d"
         },
         {
           "path": "codex_home_manager/tests/test_search_redaction_regressions.py",
@@ -1012,12 +2165,28 @@
           "sha256": "653cc8a87d75f4750b94290f1cefc8dd1d0f8701a1c03e20641c889716c313d7"
         },
         {
+          "path": "codex_home_manager/tests/test_thread_history_projection_repair.py",
+          "sourcePath": "tests/test_thread_history_projection_repair.py",
+          "gitMode": "100644",
+          "gitObject": "1e604e2ec540f9fcd71e415cef7723e021302ca6",
+          "bytes": 5484,
+          "sha256": "49ddfc92e47dc404497c62101084bbc6e2582d3f8530d18d8a74cece6fabbb82"
+        },
+        {
           "path": "codex_home_manager/tests/test_thread_history_repair.py",
           "sourcePath": "tests/test_thread_history_repair.py",
           "gitMode": "100644",
-          "gitObject": "9f7c7432eff767bdf62e8473622df4686bd83b7a",
-          "bytes": 57514,
-          "sha256": "5d3c0d0f16484597331c34f2d364fcd67db8e0d6b4a949ee15161e57fb2e7858"
+          "gitObject": "d94290fce90cce7180312fddba90c35c0e505f02",
+          "bytes": 62848,
+          "sha256": "735da771fc458d3abb09592cb38a49ceea3156d8489b1f28647513b8ac3bbfa2"
+        },
+        {
+          "path": "codex_home_manager/tests/test_timeline_classification_contract.py",
+          "sourcePath": "tests/test_timeline_classification_contract.py",
+          "gitMode": "100644",
+          "gitObject": "853e8af0a68596025cb72f958ca1bf2b5fbefcb6",
+          "bytes": 533,
+          "sha256": "024615232ec7532feb8b77d0b0f84ea8ddf1131b197285e507674bb444ec36a9"
         },
         {
           "path": "codex_home_manager/tests/test_windows_binary_evidence.py",
@@ -1031,33 +2200,65 @@
           "path": "codex_home_manager/tests/test_windows_connector.py",
           "sourcePath": "tests/test_windows_connector.py",
           "gitMode": "100644",
-          "gitObject": "98690f5a618ea18afbc2ef1a6cc191411df00e02",
-          "bytes": 6547,
-          "sha256": "1ec227ed32573f2f96a30ff090e2a9e8d30e168e4df30f98f0eebb029d5bfe9e"
+          "gitObject": "924248ef6a37a5d92fcd048cedf256c956dfffd7",
+          "bytes": 9629,
+          "sha256": "b7691013a7d15466da34c3281e9e424510747cce2f23714773ef1335e5a87d32"
         },
         {
           "path": "codex_home_manager/tests/thread_timeline_browser.test.mjs",
           "sourcePath": "tests/thread_timeline_browser.test.mjs",
           "gitMode": "100644",
-          "gitObject": "45436afbda9079a4f28481bfede521b6e601e014",
-          "bytes": 13973,
-          "sha256": "d42524397c7cdbb8eca22c09032b5811d6d292f4a38533c6ae3338845887d6b7"
+          "gitObject": "a321e189124b02da5f358dc4c8829d9296d2d425",
+          "bytes": 20232,
+          "sha256": "fd9dea9190e20d4238da135e905fc3b7fa9ad5640ed2587118cd59ea15a3dfa8"
+        },
+        {
+          "path": "codex_home_manager/tests/timeline_classification_contract.test.mjs",
+          "sourcePath": "tests/timeline_classification_contract.test.mjs",
+          "gitMode": "100644",
+          "gitObject": "64b1243af4219b3df94be764005cefffb40f349b",
+          "bytes": 2225,
+          "sha256": "18d4a7edb03fb9730516190a896f00e716984789aa655f970353fba77b9806fb"
+        },
+        {
+          "path": "codex_home_manager/tools/codex-appserver-shield/Cargo.lock",
+          "sourcePath": "tools/codex-appserver-shield/Cargo.lock",
+          "gitMode": "100644",
+          "gitObject": "079c80b67f29212219d7ee0a85c3403a7c178584",
+          "bytes": 166,
+          "sha256": "c323c77b3b968de61309020668428b29b68638d8f60f4b7eb246c2727a4eb581"
+        },
+        {
+          "path": "codex_home_manager/tools/codex-appserver-shield/Cargo.toml",
+          "sourcePath": "tools/codex-appserver-shield/Cargo.toml",
+          "gitMode": "100644",
+          "gitObject": "a7f5335b9f0bf531711134d5b830913ee9dabd93",
+          "bytes": 203,
+          "sha256": "59e0edfa9f38cbe49b635dfd92f56b7a39d7bd1a5ed01bed9e9d88293804e25b"
+        },
+        {
+          "path": "codex_home_manager/tools/codex-appserver-shield/src/main.rs",
+          "sourcePath": "tools/codex-appserver-shield/src/main.rs",
+          "gitMode": "100644",
+          "gitObject": "91db171fd50763d747fad5701798c3fde8e32b1b",
+          "bytes": 7900,
+          "sha256": "79a10574a5e78a76b9b1c218c5537b2c9cc80f4669129e745b61cccfe8e53f0b"
         },
         {
           "path": "codex_home_manager/tsconfig.json",
           "sourcePath": "tsconfig.json",
           "gitMode": "100644",
-          "gitObject": "c008418006ae791aa3f5b5c77769b37f4f5fb4b5",
-          "bytes": 525,
-          "sha256": "89e39bba357837189f0e2f08c16a4d19b7e1b75f44409d2f4face6ea33f71873"
+          "gitObject": "44b69cc7223c699d2b398fd3e7f769de1976bb26",
+          "bytes": 589,
+          "sha256": "fe65aac37bfa91cacc53f8eea646b2bbb7c12dd8d0e525da4d052bf6aa056bab"
         },
         {
           "path": "codex_home_manager/vite.config.ts",
           "sourcePath": "vite.config.ts",
           "gitMode": "100644",
-          "gitObject": "f5fd89fb43d932d6581f42e388ccb72042f767dc",
-          "bytes": 1106,
-          "sha256": "d35ecc080e91c475a99e8f18b2214dde701f1bd4fb7f32f224d8db4b9ac0a7e5"
+          "gitObject": "a863591c78b15c177405dd170acc743092821d51",
+          "bytes": 1377,
+          "sha256": "90c526b288163e421a70f9c92324498b13c8979be4db203aa7d8c0c8aaf34f99"
         }
       ]
     }

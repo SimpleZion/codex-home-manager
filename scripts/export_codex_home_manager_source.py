@@ -242,6 +242,7 @@ def build_manifest(
                     f"{source_publication_ignore_path} -> .gitignore",
                     "README.md -> docs/SOURCE_EXPORT.md",
                     "scripts/**",
+                    "config/storage-layout.json",
                 ],
             ),
             "managerRepository": source_manifest(
@@ -261,7 +262,7 @@ def export_source_monorepo(root_repository: Path, manager_repository: Path, outp
     root_snapshot = repository_snapshot(
         root_repository,
         lambda source_path: source_path in {".gitattributes", source_publication_ignore_path, "README.md"}
-        or source_path.startswith("scripts/"),
+        or source_path.startswith("scripts/") or source_path == "config/storage-layout.json",
     )
     manager_snapshot = repository_snapshot(manager_repository, lambda _source_path: True)
 
@@ -367,7 +368,7 @@ def validate_manifest_record(source_path: Path, record: Any) -> tuple[str, str]:
     return export_path, original_source_path
 
 
-def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
+def verify_source_monorepo(source_directory: Path, *, allow_generated: bool = False) -> dict[str, Any]:
     source_path = source_directory.resolve(strict=True)
     if not source_path.is_dir():
         raise SourceExportError(f"source monorepo is not a directory: {source_path}")
@@ -413,7 +414,7 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
                     expected_root_path = original_source_path
                 if export_path != expected_root_path or not (
                     export_path in {".gitattributes", ".gitignore", "docs/SOURCE_EXPORT.md"}
-                    or export_path.startswith("scripts/")
+                    or export_path.startswith("scripts/") or export_path == "config/storage-layout.json"
                 ):
                     raise SourceExportError(f"root repository file is outside the monorepo layout: {export_path}")
             elif original_source_path in {"README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md"} or original_source_path.startswith(manager_github_prefix):
@@ -438,10 +439,15 @@ def verify_source_monorepo(source_directory: Path) -> dict[str, Any]:
     expected_tree_files = expected_files | {manifest_name}
     missing_files = sorted(expected_tree_files - actual_files)
     unlisted_files = sorted(actual_files - expected_tree_files)
+    if allow_generated:
+        generated_roots = ("codex_home_manager/node_modules/", "codex_home_manager/dist/",
+            "codex_home_manager/build/", "codex_home_manager/.tmp/", "codex_home_manager/.pytest_cache/",
+            "codex_home_manager/.diagnostics/", ".tmp/", "output/")
+        unlisted_files = [name for name in unlisted_files if not name.startswith(generated_roots)]
     if missing_files:
         raise SourceExportError(f"source export has missing files: {', '.join(missing_files)}")
     if unlisted_files:
-        raise SourceExportError(f"source export has unlisted files: {', '.join(unlisted_files)}")
+        raise SourceExportError(f"source export has {len(unlisted_files)} unlisted files: {', '.join(unlisted_files[:20])}")
     return {
         "files": len(expected_files),
         "rootCommit": commits["rootRepository"],
@@ -587,6 +593,11 @@ def parse_arguments() -> argparse.Namespace:
     verify_parser = subparsers.add_parser("verify", help="Verify an exported or cloned source monorepo.")
     verify_parser.add_argument("--source", required=True, type=Path)
     verify_parser.add_argument(
+        "--allow-generated",
+        action="store_true",
+        help="Allow known dependency/build directories while still verifying every listed source byte.",
+    )
+    verify_parser.add_argument(
         "--install-node-dependencies",
         action="store_true",
         help="Run npm ci only after strict source integrity verification.",
@@ -610,7 +621,7 @@ def main() -> int:
             )
         else:
             source_path = arguments.source.resolve(strict=True)
-            integrity_result = verify_source_monorepo(source_path)
+            integrity_result = verify_source_monorepo(source_path, allow_generated=arguments.allow_generated)
             run_python_import_check(source_path)
             run_powershell_parser_check(source_path)
             if arguments.install_node_dependencies:

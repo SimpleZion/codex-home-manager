@@ -94,8 +94,10 @@ def load_verified_manifest(
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise VerificationError("signed release manifest is not valid UTF-8 JSON") from error
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 5:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (5, 6):
         raise VerificationError("signed release manifest has an unsupported schema")
+    if manifest.get("schema_version") == 6 and manifest.get("product") != "Codex Cockpit":
+        raise VerificationError("signed desktop release has an invalid product identity")
     if manifest.get("public_key_fingerprint") != trusted_fingerprint:
         raise VerificationError("signed release manifest public-key fingerprint does not match the trust anchor")
     return manifest, trusted_fingerprint

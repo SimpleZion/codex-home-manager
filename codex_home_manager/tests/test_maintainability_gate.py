@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -15,3 +16,14 @@ spec.loader.exec_module(module)
 
 def test_maintainability_ratchet_has_no_regression() -> None:
     assert module.run_gate() == []
+
+
+def test_typescript_maintainability_ratchet_has_no_regression() -> None:
+    completed = subprocess.run(
+        ["node", "scripts/typescript_maintainability_gate.mjs"],
+        cwd=script_path.parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

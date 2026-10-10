@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 
 connector_path = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "connector_main.py"
@@ -17,7 +19,7 @@ def load_connector(monkeypatch, module_name: str):
     uvicorn = types.ModuleType("uvicorn")
     uvicorn.run = lambda *_args, **_kwargs: None
     server = types.ModuleType("backend.server")
-    server.app = types.SimpleNamespace(version="1.0.10")
+    server.app = FastAPI(title="Codex Home Manager", version="1.0.10")
     monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
     monkeypatch.setitem(sys.modules, "backend.server", server)
     spec = importlib.util.spec_from_file_location(module_name, connector_path)
@@ -66,6 +68,51 @@ def test_connector_starts_pending_validation_watcher_for_server_owning_process(m
     assert calls == [expected_lock.resolve()]
 
 
+def test_desktop_sidecar_does_not_register_protocol_or_open_browser(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setenv("CODEX_HOME_MANAGER_DESKTOP_SHUTDOWN_TOKEN", "desktop-secret")
+    connector = load_connector(monkeypatch, "connector_desktop_mode_test")
+    calls: list[str] = []
+    monkeypatch.setattr(connector.sys, "argv", ["connector.exe", "--desktop-sidecar"])
+    monkeypatch.setattr(connector, "register_browser_protocol", lambda: calls.append("register"))
+    monkeypatch.setattr(connector.webbrowser, "open", lambda _url: calls.append("browser"))
+    monkeypatch.setattr(connector, "existing_connector_is_running", lambda: False)
+    monkeypatch.setattr(connector, "port_is_available", lambda: True)
+    monkeypatch.setattr(connector, "start_pending_restart_validation", lambda _path: True)
+
+    connector.main()
+
+    assert calls == []
+    assert connector.connector_mode(connector.sys.argv) == "desktop"
+
+
+def test_desktop_shutdown_route_requires_loopback_secret(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    connector = load_connector(monkeypatch, "connector_shutdown_route_test")
+    shutdown_calls: list[str] = []
+    target_app = FastAPI()
+    connector.install_desktop_shutdown_route(
+        target_app,
+        "desktop-secret",
+        lambda: shutdown_calls.append("shutdown"),
+    )
+    client = TestClient(target_app, client=("127.0.0.1", 50000))
+
+    assert client.post(connector.desktop_shutdown_path).status_code == 403
+    assert client.post(
+        connector.desktop_shutdown_path,
+        headers={connector.desktop_shutdown_header: "wrong-secret"},
+    ).status_code == 403
+    response = client.post(
+        connector.desktop_shutdown_path,
+        headers={connector.desktop_shutdown_header: "desktop-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "stopping"}
+    assert shutdown_calls == ["shutdown"]
+
+
 def test_existing_connector_probe_uses_public_capabilities_endpoint(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
     connector = load_connector(monkeypatch, "connector_capabilities_probe_test")
@@ -99,6 +146,26 @@ def test_existing_connector_probe_uses_public_capabilities_endpoint(monkeypatch,
 
     assert connector.existing_connector_is_running() is True
     assert requested_urls == ["http://127.0.0.1:8765/api/capabilities"]
+
+
+def test_desktop_legacy_connector_supports_an_isolated_internal_port(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setenv("CODEX_HOME_MANAGER_PORT", "8766")
+
+    connector = load_connector(monkeypatch, "connector_internal_port_test")
+
+    assert connector.connector_port == 8766
+    assert connector.local_console_url == "http://127.0.0.1:8766/"
+    assert connector.connector_probe_url == "http://127.0.0.1:8766/api/capabilities"
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "not-a-port"])
+def test_connector_rejects_invalid_configured_ports(monkeypatch, tmp_path: Path, value: str) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setenv("CODEX_HOME_MANAGER_PORT", value)
+
+    with pytest.raises(RuntimeError, match="CODEX_HOME_MANAGER_PORT"):
+        load_connector(monkeypatch, f"connector_invalid_port_{value}")
 
 
 def test_existing_connector_probe_rejects_auth_rejection_without_product_identity(monkeypatch, tmp_path: Path) -> None:

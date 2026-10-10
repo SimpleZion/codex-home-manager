@@ -15,6 +15,102 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts import release_manifest
 
 
+def test_current_release_verifiers_share_the_explicit_rotated_trust_anchor() -> None:
+    manager = Path(__file__).resolve().parents[1]
+    expected = release_manifest.embedded_release_public_key_fingerprint
+    assert expected == "sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f"
+    for relative in ("scripts/package-local-connector.ps1", "scripts/finalize-release-manifest.ps1", "packaging/windows/release_verifier.py"):
+        assert expected in (manager / relative).read_text(encoding="utf-8")
+    security_path = manager / "SECURITY.md"
+    if not security_path.is_file():
+        security_path = manager.parent / "SECURITY.md"
+    security = security_path.read_text(encoding="utf-8")
+    assert expected in security
+    assert "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208" in security
+    assert "not cross-signed" in security
+
+
+def test_public_dist_preserves_the_frozen_frontend_receipt(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    site = tmp_path / "site"
+    dist.mkdir()
+    site.mkdir()
+    (dist / "index.html").write_text("fixture", encoding="utf-8")
+    (dist / "frontend-release-manifest.json").write_text('{"schemaVersion":2}\n', encoding="utf-8")
+    plan = release_manifest.plan_public_site_dist_sync(dist, site)
+    for record in plan["copy_files"]:
+        shutil.copyfile(dist / record["path"], site / record["path"])
+    assert len(release_manifest.verify_public_site_dist(dist, site)) == 2
+    (site / "frontend-release-manifest.json").write_text("tampered", encoding="utf-8")
+    with pytest.raises(release_manifest.ReleaseManifestError, match="hash mismatch"):
+        release_manifest.verify_public_site_dist(dist, site)
+
+
+def test_release_signing_material_is_not_stored_in_disposable_backup() -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    assert release_manifest.release_signing_directory == workspace / ".codex" / "release-signing"
+    for name in ("package-local-connector.ps1", "finalize-release-manifest.ps1"):
+        content = (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(encoding="utf-8")
+        assert 'Join-Path $rootRepository ".codex\\release-signing"' in content
+        assert "D:\\Backup\\codex_home_manager\\release-signing" not in content
+    packager = (workspace / "codex_home_manager" / "scripts" / "package-local-connector.ps1").read_text(encoding="utf-8")
+    assert packager.index("Restore the original key") < packager.index("& python $releaseManifestScript export-public-key")
+    assert "& python $releaseManifestScript keygen" not in packager
+
+
+def test_public_key_export_does_not_regenerate_late_missing_private_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    signing = tmp_path / "signing"
+    signing.mkdir()
+    monkeypatch.setattr(release_manifest, "release_signing_directory", signing)
+    trust = signing / "trust.sha256"
+    trust.write_text(release_manifest.embedded_release_public_key_fingerprint + "\n", encoding="ascii")
+    public = tmp_path / "public.pem"
+    public.write_bytes(b"existing-public-material")
+    before = trust.read_bytes(), public.read_bytes()
+    with pytest.raises(release_manifest.ReleaseManifestError, match="private key does not exist"):
+        release_manifest.export_existing_public_key(signing / "missing.pem", public, trust)
+    assert not (signing / "missing.pem").exists()
+    assert (trust.read_bytes(), public.read_bytes()) == before
+
+
+def test_public_key_export_preserves_existing_signing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    signing = tmp_path / "signing"
+    monkeypatch.setattr(release_manifest, "release_signing_directory", signing)
+    private = signing / "key.pem"
+    trust = signing / "trust.sha256"
+    original_public = tmp_path / "original.pem"
+    exported_public = tmp_path / "exported.pem"
+    release_manifest.generate_key_pair(private, original_public, trust)
+    before = private.read_bytes(), trust.read_bytes()
+    release_manifest.export_existing_public_key(private, exported_public, trust)
+    assert exported_public.read_bytes() == original_public.read_bytes()
+    assert (private.read_bytes(), trust.read_bytes()) == before
+
+
+def test_release_preparation_stops_before_building_when_original_key_is_missing(tmp_path: Path) -> None:
+    powershell = shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is required for the release preflight regression")
+    scripts = tmp_path / "codex_home_manager" / "scripts"
+    scripts.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[1] / "scripts" / "package-local-connector.ps1"
+    script = scripts / source.name
+    shutil.copyfile(source, script)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(script),
+         "-SourceEvidenceDirectory", str(evidence), "-WindowsEvidenceDirectory", str(evidence),
+         "-SourceCommit", "a" * 40, "-SourceEvidenceRepository", "example/project",
+         "-SourceEvidenceSignerWorkflow", "github.com/example/project/.github/workflows/source-ci.yml"],
+        capture_output=True, text=True, encoding="utf-8", timeout=15,
+    )
+    assert result.returncode != 0
+    assert "Required publisher signing material is missing" in result.stderr
+    assert not (scripts.parent / "build").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
 def test_download_bytes_uses_github_release_api_media_type(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_headers: dict[str, str] = {}
 

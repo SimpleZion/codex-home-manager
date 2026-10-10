@@ -1,71 +1,66 @@
 from __future__ import annotations
 
 from pathlib import Path
+import base64
+from io import BytesIO
+import struct
 
-from PIL import Image, ImageDraw
-
-
-def rounded_rectangle_mask(size: int, radius: int) -> Image.Image:
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=255)
-    return mask
+from PIL import Image
 
 
-def draw_database_icon(draw: ImageDraw.ImageDraw, scale: float) -> None:
-    x0 = int(70 * scale)
-    y0 = int(70 * scale)
-    x1 = int(186 * scale)
-    y1 = int(180 * scale)
-    ellipse_height = int(34 * scale)
-    stroke_width = max(4, int(9 * scale))
-    line_color = (255, 255, 255, 245)
-    fill_color = (219, 234, 254, 56)
-
-    draw.ellipse((x0, y0, x1, y0 + ellipse_height), fill=fill_color, outline=line_color, width=stroke_width)
-    draw.line((x0, y0 + ellipse_height // 2, x0, y1 - ellipse_height // 2), fill=line_color, width=stroke_width)
-    draw.line((x1, y0 + ellipse_height // 2, x1, y1 - ellipse_height // 2), fill=line_color, width=stroke_width)
-    draw.arc((x0, y1 - ellipse_height, x1, y1), 0, 180, fill=line_color, width=stroke_width)
-    draw.arc((x0, int(112 * scale), x1, int(112 * scale) + ellipse_height), 0, 180, fill=line_color, width=stroke_width)
-    draw.arc((x0, int(144 * scale), x1, int(144 * scale) + ellipse_height), 0, 180, fill=line_color, width=stroke_width)
+icon_sizes = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 128, 256]
 
 
-def render_icon(size: int) -> Image.Image:
-    scale = size / 256
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    base = Image.new("RGBA", (size, size), (37, 99, 235, 255))
-    pixels = base.load()
-    for y in range(size):
-        for x in range(size):
-            green_mix = int(62 * (x / max(1, size - 1)) * (y / max(1, size - 1)))
-            pixels[x, y] = (
-                max(0, 37 - green_mix // 8),
-                min(255, 99 + green_mix),
-                max(0, 235 - green_mix // 2),
-                255,
-            )
+def render_icon(size: int, master_path: Path | None = None) -> Image.Image:
+    master_path = master_path or Path(__file__).resolve().parents[1] / "packaging/windows/assets/cockpit-master.png"
+    with Image.open(master_path) as master:
+        if master.width != master.height or master.width < 1024:
+            raise ValueError("A square production master of at least 1024 pixels is required")
+        # The production master contains its own safe margins and transparent corners.
+        artwork = master.convert("RGBA")
+        if artwork.getchannel("A").getextrema()[0] != 0:
+            raise ValueError("The production master must have transparent outer corners")
+        return artwork.resize((size, size), Image.Resampling.LANCZOS)
 
-    mask = rounded_rectangle_mask(size, max(6, int(46 * scale)))
-    image.alpha_composite(Image.composite(base, Image.new("RGBA", (size, size), (0, 0, 0, 0)), mask))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle(
-        (int(10 * scale), int(10 * scale), int(246 * scale), int(246 * scale)),
-        radius=max(6, int(38 * scale)),
-        outline=(255, 255, 255, 46),
-        width=max(1, int(3 * scale)),
-    )
-    draw_database_icon(draw, scale)
-    return image
+
+def save_icon(frames: list[Image.Image], path: Path) -> None:
+    encoded_frames: list[bytes] = []
+    for frame in frames:
+        buffer = BytesIO()
+        frame.save(buffer, format="PNG", optimize=True)
+        encoded_frames.append(buffer.getvalue())
+
+    header_size = 6 + 16 * len(frames)
+    offset = header_size
+    directory = bytearray(struct.pack("<HHH", 0, 1, len(frames)))
+    for frame, encoded in zip(frames, encoded_frames, strict=True):
+        width = 0 if frame.width == 256 else frame.width
+        height = 0 if frame.height == 256 else frame.height
+        directory.extend(struct.pack("<BBBBHHII", width, height, 0, 0, 1, 32, len(encoded), offset))
+        offset += len(encoded)
+    path.write_bytes(bytes(directory) + b"".join(encoded_frames))
 
 
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     icon_path = root / "packaging" / "windows" / "assets" / "codex-home-manager.ico"
+    tauri_icon_path = root / "src-tauri" / "icons" / "icon.ico"
     icon_path.parent.mkdir(parents=True, exist_ok=True)
-    sizes = [16, 24, 32, 48, 64, 128, 256]
-    images = [render_icon(size) for size in sizes]
-    images[-1].save(icon_path, sizes=[(size, size) for size in sizes], append_images=images[:-1])
-    print(icon_path)
+    tauri_icon_path.parent.mkdir(parents=True, exist_ok=True)
+    frames = [render_icon(size) for size in icon_sizes]
+    for target in (icon_path, tauri_icon_path):
+        save_icon(frames, target)
+        print(target)
+    public_path = root / "public" / "cockpit-icon.png"
+    public_path.parent.mkdir(parents=True, exist_ok=True)
+    web_icon = render_icon(256)
+    web_icon.save(public_path, optimize=True)
+    encoded_icon = base64.b64encode(public_path.read_bytes()).decode("ascii")
+    (root / "public" / "favicon.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Codex Cockpit">'
+        f'<image width="256" height="256" href="data:image/png;base64,{encoded_icon}"/></svg>\n',
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

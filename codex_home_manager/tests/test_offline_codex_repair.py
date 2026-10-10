@@ -1545,6 +1545,109 @@ def test_title_sync_rewrites_duplicate_session_index_to_latest_record(tmp_path: 
     assert records == [{"id": "thread-a", "thread_name": "new", "updated_at": "2026-07-11T02:00:00Z"}]
 
 
+def test_title_sync_backfills_current_name_column_without_overwriting_first_prompt_or_existing_name(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite"
+    database = sqlite3.connect(state_path)
+    database.execute("create table threads(id text primary key, title text, name text, updated_at integer)")
+    database.execute("insert into threads values ('thread-a', 'D:\\Project\\handoff.md is the context', null, 100)")
+    database.execute("insert into threads values ('thread-b', 'original prompt', 'Explicit user name', 200)")
+    database.execute("insert into threads values ('thread-c', 'Same fallback', null, 300)")
+    database.commit()
+    index_path = tmp_path / "session_index.jsonl"
+    index_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "thread-a", "thread_name": "Take over project", "updated_at": "2026-07-11T02:00:00Z"}),
+                json.dumps({"id": "thread-b", "thread_name": "Stale legacy name", "updated_at": "2026-07-11T02:00:00Z"}),
+                json.dumps({"id": "thread-c", "thread_name": "Same fallback", "updated_at": "2026-07-11T02:00:00Z"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    original_index = index_path.read_bytes()
+
+    plan = apply_codex_offline_repair.build_sqlite_title_sync_plan(database, index_path)
+    assert plan["target_column"] == "name"
+    assert plan["sqlite_updates"] == [
+        {
+            "thread_id": "thread-a",
+            "before": "",
+            "after": "Take over project",
+            "target_column": "name",
+        }
+    ]
+    result = apply_codex_offline_repair.synchronize_sqlite_titles(database, index_path, precommit_guard=lambda: None, plan=plan)
+    database.commit()
+    rows = database.execute("select id,title,name from threads order by id").fetchall()
+    database.close()
+
+    assert result["changed_thread_ids"] == ["thread-a"]
+    assert rows == [
+        ("thread-a", "D:\\Project\\handoff.md is the context", "Take over project"),
+        ("thread-b", "original prompt", "Explicit user name"),
+        ("thread-c", "Same fallback", None),
+    ]
+    assert index_path.read_bytes() == original_index
+
+
+def test_title_sync_with_current_name_column_skips_archived_and_subagent_threads(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite"
+    database = sqlite3.connect(state_path)
+    database.execute(
+        "create table threads(id text primary key, title text, name text, archived integer, thread_source text, source text, updated_at integer)"
+    )
+    database.execute("create table thread_spawn_edges(parent_thread_id text, child_thread_id text, status text)")
+    database.execute("insert into threads values ('main', 'main prompt', null, 0, 'cli', null, 100)")
+    database.execute("insert into threads values ('archived', 'archived prompt', null, 1, 'cli', null, 200)")
+    database.execute("insert into threads values ('child', 'child prompt', null, 0, 'subagent', null, 300)")
+    database.execute("insert into threads values ('edge-child', 'edge prompt', null, 0, 'user', null, 400)")
+    database.execute(
+        "insert into threads values ('metadata-child', 'metadata prompt', null, 0, 'user', ?, 500)",
+        (json.dumps({"subagent": {"thread_spawn": {"parent_thread_id": "main"}}}),),
+    )
+    database.execute("insert into thread_spawn_edges values ('main', 'edge-child', 'closed')")
+    database.commit()
+    index_path = tmp_path / "session_index.jsonl"
+    index_path.write_text(
+        "\n".join(
+            json.dumps({"id": thread_id, "thread_name": title})
+            for thread_id, title in (
+                ("main", "Main task"),
+                ("archived", "Archived task"),
+                ("child", "Child task"),
+                ("edge-child", "Edge child task"),
+                ("metadata-child", "Metadata child task"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plan = apply_codex_offline_repair.build_sqlite_title_sync_plan(database, index_path)
+    assert plan["sqlite_updates"] == [
+        {
+            "thread_id": "main",
+            "before": "",
+            "after": "Main task",
+            "target_column": "name",
+        }
+    ]
+    result = apply_codex_offline_repair.synchronize_sqlite_titles(database, index_path, precommit_guard=lambda: None, plan=plan)
+    database.commit()
+    rows = database.execute("select id,name from threads order by id").fetchall()
+    database.close()
+
+    assert result["changed_thread_ids"] == ["main"]
+    assert rows == [
+        ("archived", None),
+        ("child", None),
+        ("edge-child", None),
+        ("main", "Main task"),
+        ("metadata-child", None),
+    ]
+
+
 def test_title_sync_adds_sqlite_threads_missing_from_session_index_and_preserves_other_records(tmp_path: Path) -> None:
     state_path = tmp_path / "state.sqlite"
     database = sqlite3.connect(state_path)

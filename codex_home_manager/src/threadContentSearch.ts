@@ -1,4 +1,4 @@
-import type { TimelineFilter, TimelineItem } from "./threadTimeline";
+import type { TimelineFilter, TimelineItem, TimelineSourceFilter } from "./threadTimeline";
 
 export type SearchMatch = {
   start: number;
@@ -9,6 +9,7 @@ export type ThreadTimelineSearchPage = {
   threadId: string;
   requestId: string;
   kind: TimelineFilter;
+  sourceFilter: TimelineSourceFilter;
   search: string;
   matchCount: number;
   matchCountComplete: boolean;
@@ -29,6 +30,7 @@ export type ThreadTimelineSearchRequest = {
   threadId: string;
   codexHome: string;
   kind: TimelineFilter;
+  sourceFilter: TimelineSourceFilter;
   search: string;
   cursor?: string | null;
   limit: number;
@@ -113,6 +115,7 @@ export function createThreadTimelineSearchPagePath(request: ThreadTimelineSearch
   const params = new URLSearchParams({
     codex_home: request.codexHome,
     kind: request.kind,
+    sourceFilter: request.sourceFilter,
     search: request.search,
     limit: String(request.limit),
     scanBudgetMs: String(request.scanBudgetMs),

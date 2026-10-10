@@ -3,8 +3,9 @@ $ErrorActionPreference = "Stop"
 $appDirectory = Split-Path -Parent $PSScriptRoot
 $healthUrl = "http://127.0.0.1:8765/api/health"
 $appUrl = "http://127.0.0.1:8765/"
-$serverLogPath = Join-Path $appDirectory "server.log"
-$serverErrorLogPath = Join-Path $appDirectory "server.err.log"
+$runtimeLogDirectory = Join-Path $appDirectory ".runtime\logs"
+$serverLogPath = Join-Path $runtimeLogDirectory "server.log"
+$serverErrorLogPath = Join-Path $runtimeLogDirectory "server.err.log"
 
 function Test-ServiceHealth {
     try {
@@ -28,7 +29,7 @@ if (Test-ServiceHealth) {
 Push-Location $appDirectory
 try {
     if (-not (Test-Path "node_modules")) {
-        npm install
+        npm ci --cache "D:\ZFiles\CXProject\Codex\cache\npm" --prefer-offline --no-audit --no-fund
     }
 
     if (-not (Test-Path "dist\index.html")) {
@@ -38,6 +39,8 @@ try {
 finally {
     Pop-Location
 }
+
+New-Item -ItemType Directory -Force -Path $runtimeLogDirectory | Out-Null
 
 if (Test-Path $serverLogPath) {
     Clear-Content -LiteralPath $serverLogPath
@@ -49,7 +52,7 @@ if (Test-Path $serverErrorLogPath) {
 Start-Process `
     -WindowStyle Hidden `
     -FilePath "python" `
-    -ArgumentList @("-m", "backend.server") `
+    -ArgumentList @("-B", "-m", "backend.server") `
     -WorkingDirectory $appDirectory `
     -RedirectStandardOutput $serverLogPath `
     -RedirectStandardError $serverErrorLogPath | Out-Null

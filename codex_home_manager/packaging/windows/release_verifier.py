@@ -18,7 +18,7 @@ from artifact_verifier_core import (
 )
 
 
-trusted_public_key_fingerprint = "sha256:ef7194fbc8fa8550430c908d9d02c74f7fc0d1e87f7f9b4ec5a164526b48f208"
+trusted_public_key_fingerprint = "sha256:ac9c44ea419ded2b51226e77444b11b2a28962b284b4789fbf282ae05c70607f"
 default_metadata_base_url = "https://codex-home-manager.simplezion.com"
 metadata_names = (
     "release-manifest.json",
@@ -96,7 +96,7 @@ def run_verification(arguments: argparse.Namespace) -> dict[str, object]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Verify Codex Home Manager without requiring Python or additional packages."
+        description="Verify Codex Cockpit without requiring Python or additional packages."
     )
     parser.add_argument("--file-path", type=Path, help="Downloaded connector EXE or ZIP. Defaults to the signed name in Downloads.")
     parser.add_argument("--artifact-kind", choices=("exe", "zip"), default="exe")

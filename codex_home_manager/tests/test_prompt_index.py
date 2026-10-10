@@ -15,9 +15,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import server
+from backend import codex_data as codex_data_module
 from backend import prompt_index as prompt_index_module
 from backend.codex_data import (
     export_thread_prompts,
+    read_thread_prompt_context,
     read_thread_prompt_page,
     read_thread_timeline_search_page,
     timeline_conversation_candidate_line,
@@ -30,6 +32,7 @@ from backend.prompt_index import (
     iter_prompt_records,
     prompt_index_database_path,
     prompt_index_root_path,
+    read_prompt_index_state,
     redacted_jsonl_record_bytes,
 )
 from backend.search_normalization import normalize_search_text
@@ -59,6 +62,96 @@ def create_prompt_test_home(root_path: Path, records: list[dict[str, object]] | 
     return codex_home_path, rollout_path
 
 
+def create_continuation_prompt_test_home(root_path: Path) -> tuple[Path, list[Path]]:
+    codex_home_path = root_path / "codex-home"
+    old_rollout_path = codex_home_path / "sessions" / "2026" / "05" / "rollout-old-thread-1.jsonl"
+    current_rollout_path = codex_home_path / "sessions" / "2026" / "09" / "rollout-current-thread-1.jsonl"
+    decoy_rollout_path = codex_home_path / "sessions" / "2026" / "10" / "rollout-decoy-thread-1.jsonl"
+    for rollout_path, metadata, prompts in (
+        (
+            old_rollout_path,
+            {"type": "session_meta", "payload": {"id": "thread-1", "cwd": str(root_path / "project")}},
+            ["old one", "old two", "old three"],
+        ),
+        (
+            current_rollout_path,
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "current-segment-id",
+                    "history_base": {"thread_id": "thread-1"},
+                    "cwd": str(root_path / "project"),
+                },
+            },
+            ["current one", "current two"],
+        ),
+        (
+            decoy_rollout_path,
+            {"type": "session_meta", "payload": {"id": "another-thread", "cwd": str(root_path / "project")}},
+            ["must not export"],
+        ),
+    ):
+        rollout_path.parent.mkdir(parents=True, exist_ok=True)
+        with rollout_path.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n")
+            for index, prompt in enumerate(prompts):
+                output.write(json.dumps(user_record(prompt, index), ensure_ascii=False, separators=(",", ":")) + "\n")
+    with closing(sqlite3.connect(codex_home_path / "state_5.sqlite")) as connection, connection:
+        connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, title TEXT)")
+        connection.execute(
+            "INSERT INTO threads(id, rollout_path, cwd, title) VALUES (?, ?, ?, ?)",
+            ("thread-1", str(current_rollout_path), str(root_path / "project"), "Continuation export test"),
+        )
+    return codex_home_path, [old_rollout_path, current_rollout_path]
+
+
+def test_official_incoming_delegation_is_indexed_once(tmp_path: Path):
+    text = '<codex_delegation>\n<source_thread_id>source-task</source_thread_id>\n<input>handover complete</input>\n</codex_delegation>'
+    payload = {"type": "function_call_output", "name": "send_message_to_thread", "namespace": "codex_app", "output": text}
+    record = {"type": "response_item", "payload": payload}
+    mirror = {"type": "event_msg", "payload": {"type": "item_completed", "item": {**payload, "type": "FunctionCallOutput"}}}
+    assert codex_data_module.prompt_text_from_item(record) == (text, "response_item")
+    assert codex_data_module.prompt_text_from_item(mirror) is None
+    assert codex_data_module.timeline_event_from_item(record, 123)["promptSourceType"] == "delegation"
+    for replacement in [{"namespace": "other"}, {"name": "read_thread"}, {"output": '{"threadId":"target"}'}, {"output": 'quoted ' + text}]:
+        assert codex_data_module.incoming_delegation_text({**record, "payload": {**payload, **replacement}}) is None
+    home, _ = create_prompt_test_home(tmp_path, [record, mirror, record])
+    page = read_thread_prompt_page(str(home), "thread-1", scope="delegation")
+    assert len(page["prompts"]) == 2
+    timeline = read_thread_timeline_search_page(str(home), "thread-1", source_filter="delegation", search="handover")
+    assert len(timeline["matches"]) == 2
+
+
+def test_classification_migration_preserves_progress_and_search(tmp_path: Path):
+    fixtures = json.loads((Path(__file__).parent / "fixtures" / "timeline_classification_contract.json").read_text(encoding="utf-8"))
+    records = [{**fixture["record"], "timestamp": f"2026-01-01T00:{index:02}:00Z"} for index, fixture in enumerate(fixtures)]
+    home, _ = create_prompt_test_home(tmp_path, records)
+    read_thread_prompt_page(str(home), "thread-1", scope="all", scan_budget_ms=5000)
+    read_thread_timeline_search_page(str(home), "thread-1", source_filter="all", scan_budget_ms=5000)
+    database = prompt_index_database_path(home)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        progress = connection.execute("SELECT * FROM prompt_files").fetchall()
+        coordinates = connection.execute("SELECT id,file_id,event_index,byte_offset,text FROM timeline_events ORDER BY id").fetchall()
+        connection.execute("UPDATE timeline_events SET kind='user',label='用户输入',prompt_source_type='user',pure_text=text WHERE prompt_source_type='goal'")
+        connection.execute("UPDATE timeline_events SET kind='assistant',label='最终回复' WHERE kind='assistant_unclassified'")
+        connection.execute("UPDATE timeline_events SET label='思考过程' WHERE kind='commentary'")
+        connection.execute("UPDATE prompts SET source_type='internal',source_label='内部上下文',visible_by_default=0,pure_text='',has_pure_text=0 WHERE text LIKE 'Explain %<environment_context>%' OR text LIKE 'Explain %<permissions instructions>%'")
+        connection.execute("PRAGMA user_version=22")
+    with closing(prompt_index_module._connect(database)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert [tuple(row) for row in connection.execute("SELECT * FROM prompt_files")] == progress
+        assert [tuple(row) for row in connection.execute("SELECT id,file_id,event_index,byte_offset,text FROM timeline_events ORDER BY id")] == coordinates
+        assert connection.execute("SELECT COUNT(*) FROM timeline_events WHERE kind='assistant_unclassified'").fetchone()[0] == 2
+        assert connection.execute("SELECT kind,prompt_source_type,pure_text FROM timeline_events WHERE prompt_source_type='goal'").fetchone()[:] == ("context", "goal", "")
+        assert connection.execute("SELECT COUNT(*) FROM timeline_events WHERE label='思考过程'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM prompts WHERE text LIKE 'Explain %' AND source_type='user'").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM prompt_search_fts WHERE prompt_search_fts MATCH 'explain'").fetchone()[0] == 4
+    page = read_thread_timeline_search_page(str(home), "thread-1", kind="assistant_unclassified", source_filter="all")
+    assert len(page["matches"]) == 2
+    final_page = read_thread_timeline_search_page(str(home), "thread-1", kind="assistant", source_filter="all")
+    assert len(final_page["matches"]) == 2
+
+
 def user_record(text: str, index: int = 0) -> dict[str, object]:
     return {
         "type": "response_item",
@@ -69,6 +162,80 @@ def user_record(text: str, index: int = 0) -> dict[str, object]:
             "content": [{"type": "input_text", "text": text}],
         },
     }
+
+
+@pytest.mark.parametrize("entrypoint", ["timeline", "prompts-asc", "prompts-desc", "export"])
+@pytest.mark.parametrize("limit", [1, 200])
+def test_fts_search_drives_ordered_lookup_instead_of_repeating_match(tmp_path: Path, monkeypatch, entrypoint: str, limit: int):
+    records = [user_record("ordinary background", index) for index in range(2001)]
+    for index in (0, 1000, 2000):
+        records[index] = user_record(f"selective needle {index}", index)
+    home, rollout = create_prompt_test_home(tmp_path, records)
+    initialize = read_thread_timeline_search_page if entrypoint == "timeline" else read_thread_prompt_page
+    initial = initialize(str(home), "thread-1", scan_budget_ms=1000)
+    while not initial["index"]["complete"]:
+        initial = initialize(str(home), "thread-1", scan_budget_ms=1000)
+    database = prompt_index_database_path(home)
+    original_connect = prompt_index_module._connect_read_only
+    plans = []
+
+    def connect_with_plan_capture(path):
+        connection = original_connect(path)
+
+        def capture(statement):
+            if statement.lstrip().startswith("SELECT") and " JOIN " in statement and " MATCH " in statement:
+                plans.append([str(row[3]) for row in connection.execute("EXPLAIN QUERY PLAN " + statement)])
+
+        connection.set_trace_callback(capture)
+        return connection
+
+    monkeypatch.setattr(prompt_index_module, "_connect_read_only", connect_with_plan_capture)
+    for query, expected in [("selective needle", ["selective needle 0", "selective needle 1000", "selective needle 2000"]), ("absent needle", [])]:
+        actual = []
+        cursor = None
+        if entrypoint == "export":
+            actual = [item["text"] for item in iter_prompt_records(database, rollout, scope="all", search=query, fetch_size=1)]
+        else:
+            for _ in range(4):
+                arguments = dict(search=query, cursor=cursor, limit=limit, index_state=initial["index"])
+                if entrypoint == "timeline":
+                    result = prompt_index_module.read_timeline_search_page(database, rollout, kind="conversation", source_filter="all", **arguments)
+                    items = result["matches"]
+                else:
+                    result = prompt_index_module.read_prompt_page(database, rollout, scope="all", source_type=None, order=entrypoint.split("-")[1], **arguments)
+                    items = result["prompts"]
+                actual.extend(item["text"] for item in items)
+                assert result["matchCount"] == len(expected)
+                cursor = result["nextCursor"]
+                if not cursor:
+                    break
+            assert cursor is None
+        assert actual == (list(reversed(expected)) if entrypoint == "prompts-desc" else expected)
+    assert plans
+    # The outer loop must be the MATCH result, not every message in the thread.
+    for plan in plans:
+        assert "SCAN f VIRTUAL TABLE" in plan[0], plan
+        assert any("SEARCH" in step and "_index=?)" in step for step in plan[1:]), plan
+
+
+def test_timeline_kind_and_source_filters_are_orthogonal(tmp_path: Path):
+    records = [
+        user_record("filterprobe user"),
+        user_record("<subagent_notification>filterprobe subagent</subagent_notification>"),
+        user_record("<heartbeat>filterprobe automation</heartbeat>"),
+        user_record("<recommended_plugins>filterprobe internal</recommended_plugins>"),
+        {"type": "response_item", "payload": {"type": "function_call_output", "namespace": "codex_app", "name": "send_message_to_thread", "output": "<codex_delegation><input>filterprobe delegation</input></codex_delegation>"}},
+        {"type": "turn_context", "payload": {"cwd": "filterprobe raw context"}},
+    ]
+    home, _ = create_prompt_test_home(tmp_path, records)
+    conversation_sources = {"all": {"user", "subagent", "automation", "internal", "delegation"}, "pure": {"user"}, "focused": {"user"}, "with_agents": {"user", "subagent"}, "automation": {"automation"}, "delegation": {"delegation"}}
+    user_sources = {**conversation_sources, "all": conversation_sources["all"] - {"internal"}}
+    for kind in ("conversation", "user"):
+        for source, expected in (user_sources if kind == "user" else conversation_sources).items():
+            direct = codex_data_module.read_thread_timeline(str(home), "thread-1", kind_filter=kind, source_filter=source, search_text="filterprobe")
+            indexed = read_thread_timeline_search_page(str(home), "thread-1", kind=kind, source_filter=source, search="filterprobe", scan_budget_ms=5000)
+            assert {item["promptSourceType"] for item in direct["items"]} == expected, (kind, source, "direct")
+            assert len(indexed["matches"]) == len(expected), (kind, source, "indexed")
 
 
 def test_timeline_candidate_ignores_messages_nested_in_compacted_history() -> None:
@@ -198,6 +365,206 @@ def test_ten_thousand_prompts_page_search_and_incremental_tail_scan(tmp_path: Pa
     assert appended_page["promptCount"] == 10_001
 
 
+def test_prompt_context_keeps_nonmatching_neighbors_around_search_anchor(tmp_path: Path) -> None:
+    records = [user_record(f"neighbor prompt {index:02d}{' needle' if index == 15 else ''}", index) for index in range(1, 31)]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+    search_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        search="needle",
+        order="desc",
+        limit=10,
+        scan_budget_ms=1_000,
+    )
+
+    context = read_thread_prompt_context(
+        str(codex_home_path),
+        "thread-1",
+        anchor_index=search_page["prompts"][0]["index"],
+        scope="pure",
+        search="needle",
+        before=2,
+        after=3,
+    )
+
+    assert [prompt["index"] for prompt in context["prompts"]] == [13, 14, 15, 16, 17, 18]
+    assert context["anchorIndex"] == 15
+    assert context["anchorOffset"] == 2
+    assert context["hasEarlier"] is True
+    assert context["hasLater"] is True
+    assert sum("needle" in prompt["text"] for prompt in context["prompts"]) == 1
+
+    client = TestClient(server.app)
+    token_payload = client.get("/api/auth/token", params={"codex_home": str(codex_home_path)}).json()
+    headers = {token_payload["headerName"]: token_payload["token"]}
+    response = client.get(
+        "/api/threads/thread-1/prompts/context",
+        params={
+            "codex_home": str(codex_home_path),
+            "anchorIndex": search_page["prompts"][0]["index"],
+            "scope": "pure",
+            "search": "needle",
+            "before": 1,
+            "after": 1,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert [prompt["index"] for prompt in response.json()["prompts"]] == [14, 15, 16]
+    hit = search_page["prompts"][0]
+    for overrides, message in [
+        ({"generation": "outdated"}, "generation changed"),
+        ({"anchor_byte_offset": hit["byteOffset"] + 1}, "record position changed"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            read_thread_prompt_context(str(codex_home_path), "thread-1", anchor_index=hit["index"], **overrides)
+
+
+def test_recent_prompt_strategy_reads_true_tail_without_building_or_inflating_index(tmp_path: Path) -> None:
+    oversized_checkpoint = {
+        "type": "compacted",
+        "timestamp": "2026-08-14T00:02:00Z",
+        "payload": {"replacement_history": [{"type": "message", "role": "user", "content": "x" * 1_500_000}]},
+    }
+    oversized_user = user_record("latest request\ndata:image/png;base64," + "A" * 1_500_000, 4)
+    codex_home_path, _ = create_prompt_test_home(
+        tmp_path,
+        [user_record("oldest request", 1), user_record("middle request", 2), oversized_checkpoint, oversized_user],
+    )
+
+    first_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        order="desc",
+        strategy="recent",
+        limit=1,
+        scan_budget_ms=1_000,
+    )
+
+    assert first_page["index"]["strategy"] == "recent"
+    assert first_page["prompts"][0]["ordinalExact"] is False
+    assert first_page["prompts"][0]["pureText"].startswith("latest request")
+    assert "A" * 1_000 not in first_page["prompts"][0]["pureText"]
+    assert first_page["nextCursor"].startswith("recent.")
+    assert prompt_index_database_path(codex_home_path).exists() is False
+
+    second_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        order="desc",
+        strategy="recent",
+        cursor=first_page["nextCursor"],
+        limit=1,
+        scan_budget_ms=1_000,
+    )
+    assert second_page["prompts"][0]["pureText"] == "middle request"
+    assert second_page["matchCount"] == 2
+    assert prompt_index_database_path(codex_home_path).exists() is False
+
+
+def test_recent_prompt_strategy_extracts_current_attachment_request_marker_and_deduplicates_protocols(tmp_path: Path) -> None:
+    request_text = "互联网测速你确定采用已有的最优方案了吗，感觉都没有中间过程，干等很久"
+    wrapper = "\n".join(
+        [
+            "# Files mentioned by the user:",
+            "",
+            "## codex-clipboard.png: C:/Temp/codex-clipboard.png",
+            "",
+            "## My request:",
+            request_text,
+        ]
+    )
+    response_copy = {
+        "type": "response_item",
+        "timestamp": "2026-08-15T11:36:10.687Z",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": wrapper},
+                {"type": "input_text", "text": '<image name="[Image #1]">[image]</image>'},
+            ],
+        },
+    }
+    event_copy = {
+        "type": "event_msg",
+        "timestamp": "2026-08-15T11:36:10.688Z",
+        "payload": {"type": "user_message", "message": wrapper},
+    }
+    codex_home_path, _ = create_prompt_test_home(tmp_path, [user_record("older request", 1), response_copy, event_copy])
+
+    page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="pure",
+        order="desc",
+        strategy="recent",
+        limit=20,
+        scan_budget_ms=1_000,
+    )
+
+    assert [prompt["pureText"] for prompt in page["prompts"]] == [request_text, "older request"]
+    assert page["prompts"][0]["sourceType"] == "attachment"
+    assert page["purePromptCount"] == 2
+    assert page["matchCount"] == 2
+
+
+def test_deferred_prompt_page_reuses_cached_rows_and_schedules_catch_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oversized_non_prompt = {
+        "type": "compacted",
+        "timestamp": "2026-08-14T00:02:00Z",
+        "payload": {"replacement_history": [{"type": "message", "role": "assistant", "content": "x" * 8_000_000}]},
+    }
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, [user_record("cached prompt", 1)])
+    initial_page = read_thread_prompt_page(
+        str(codex_home_path), "thread-1", scope="all", order="desc", limit=60, scan_budget_ms=1_000
+    )
+    assert initial_page["index"]["complete"] is True
+    with rollout_path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps(oversized_non_prompt, ensure_ascii=False, separators=(",", ":")) + "\n")
+        output.write(json.dumps(user_record("eventual latest prompt", 2), ensure_ascii=False, separators=(",", ":")) + "\n")
+    partial_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        order="desc",
+        limit=60,
+        scan_budget_ms=5,
+    )
+    assert partial_page["index"]["complete"] is False
+    scanned_before = partial_page["index"]["scannedBytes"]
+
+    scheduled: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        codex_data_module,
+        "schedule_rollout_prompt_index",
+        lambda home, rollout, **_: scheduled.append((home, rollout)) or True,
+    )
+    started_at = time.perf_counter()
+    cached_page = read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        order="desc",
+        limit=60,
+        scan_budget_ms=100,
+        defer_index=True,
+    )
+
+    assert time.perf_counter() - started_at < 0.5
+    assert cached_page["index"]["queryMode"] == "cached"
+    assert cached_page["index"]["backgroundScheduled"] is True
+    assert cached_page["index"]["scannedBytes"] == scanned_before
+    assert [item["text"] for item in cached_page["prompts"]] == ["cached prompt"]
+    assert scheduled == [(codex_home_path.resolve(), rollout_path.resolve())]
+
+
 @pytest.mark.parametrize(
     ("source", "query"),
     [
@@ -276,6 +643,209 @@ def test_timeline_cross_protocol_prefix_keeps_the_complete_reply(tmp_path: Path)
     assert [item["text"] for item in all_replies["matches"]] == ["partial answer with unique tail"]
 
 
+def test_timeline_index_prefers_explicit_phase_over_unphased_event_mirror(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:00.000Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "正在检查页面"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.000Z",
+            "payload": {"type": "agent_message", "message": "正在检查页面"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:01.000Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "检查完成"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:01.000Z",
+            "payload": {"type": "agent_message", "message": "检查完成"},
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    commentary = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="commentary", scan_budget_ms=1_000
+    )
+    replies = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="assistant", scan_budget_ms=1_000
+    )
+
+    assert [item["text"] for item in commentary["matches"]] == ["正在检查页面"]
+    assert [item["text"] for item in replies["matches"]] == ["检查完成"]
+
+
+def test_timeline_index_automation_filter_includes_automation_context(tmp_path: Path) -> None:
+    records = [
+        user_record("<heartbeat><instructions>巡检插件</instructions></heartbeat>"),
+        user_record("普通用户输入", 1),
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    result = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="conversation",
+        search="巡检插件",
+        source_filter="automation",
+        scan_budget_ms=1_000,
+    )
+
+    assert [item["text"] for item in result["matches"]] == [
+        "<heartbeat><instructions>巡检插件</instructions></heartbeat>"
+    ]
+    assert result["matches"][0]["kind"] == "context"
+    assert result["matches"][0]["promptSourceType"] == "automation"
+
+
+def test_timeline_index_does_not_cross_non_conversation_records_for_mirrors(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:00.000Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "正在检查"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.500Z",
+            "payload": {"type": "task_started"},
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:01.000Z",
+            "payload": {"type": "agent_message", "message": "正在检查"},
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    result = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="conversation",
+        search="正在检查",
+        scan_budget_ms=1_000,
+    )
+
+    assert [item["kind"] for item in result["matches"]] == ["commentary", "assistant_unclassified"]
+
+
+def test_timeline_index_does_not_treat_an_adjacent_user_message_as_an_agent_mirror(tmp_path: Path) -> None:
+    records = [
+        user_record("相同文本"),
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.100Z",
+            "payload": {"type": "agent_message", "message": "相同文本"},
+        },
+    ]
+    codex_home_path, _ = create_prompt_test_home(tmp_path, records)
+
+    result = read_thread_timeline_search_page(
+        str(codex_home_path),
+        "thread-1",
+        kind="conversation",
+        search="相同文本",
+        scan_budget_ms=1_000,
+    )
+
+    assert [item["kind"] for item in result["matches"]] == ["user", "assistant_unclassified"]
+
+
+def test_timeline_index_preserves_physical_lineage_across_incremental_scans(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.000Z",
+            "payload": {"type": "agent_message", "phase": "commentary", "message": "跨批次进度"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:00.100Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "跨批次进度"}],
+            },
+        },
+    ]
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, records)
+
+    first_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="conversation", search="跨批次进度", scan_budget_ms=1_000
+    )
+    assert [item["kind"] for item in first_page["matches"]] == ["commentary"]
+
+    with rollout_path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps({
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.200Z",
+            "payload": {"type": "agent_message", "message": "跨批次进度"},
+        }, ensure_ascii=False) + "\n")
+
+    updated_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="conversation", search="跨批次进度", scan_budget_ms=1_000
+    )
+    assert [item["kind"] for item in updated_page["matches"]] == ["commentary"]
+
+
+def test_prompt_only_index_preserves_timeline_physical_lineage(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.000Z",
+            "payload": {"type": "agent_message", "phase": "commentary", "message": "交错索引进度"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-08-14T00:02:00.100Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "交错索引进度"}],
+            },
+        },
+    ]
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, records)
+    read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="conversation", scan_budget_ms=1_000
+    )
+
+    read_thread_prompt_page(str(codex_home_path), "thread-1", scope="all", scan_budget_ms=1_000)
+
+    with rollout_path.open("a", encoding="utf-8", newline="\n") as output:
+        output.write(json.dumps({
+            "type": "event_msg",
+            "timestamp": "2026-08-14T00:02:00.200Z",
+            "payload": {"type": "agent_message", "message": "交错索引进度"},
+        }, ensure_ascii=False) + "\n")
+
+    updated_page = read_thread_timeline_search_page(
+        str(codex_home_path), "thread-1", kind="conversation", search="交错索引进度", scan_budget_ms=1_000
+    )
+    assert [item["kind"] for item in updated_page["matches"]] == ["commentary"]
+
+
 def test_incremental_timeline_replaces_an_already_persisted_short_protocol_copy(tmp_path: Path) -> None:
     short_record = {
         "type": "event_msg",
@@ -349,6 +919,51 @@ def test_five_mib_prompt_tail_is_searchable_and_copy_source_is_complete(tmp_path
     assert page["matchCount"] == 1
     assert tail in page["prompts"][0]["pureText"]
     assert copied == source
+
+
+def test_prompt_copy_exports_every_valid_continuation_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home_path, expected_rollout_paths = create_continuation_prompt_test_home(tmp_path)
+    paths = codex_data_module.resolve_codex_paths(str(codex_home_path))
+    row = codex_data_module.fetch_thread_row(paths, "thread-1")
+    assert row is not None
+    active_path = Path(str(row["rollout_path"]))
+    assert codex_data_module.thread_rollout_paths(paths, "thread-1", active_path) == expected_rollout_paths
+
+    direct_records = [
+        json.loads(line)
+        for line in server.stream_thread_prompt_copy(
+            str(codex_home_path),
+            "thread-1",
+            scope="pure",
+            output_format="jsonl",
+        )
+    ]
+    expected_prompts = ["old one", "old two", "old three", "current one", "current two"]
+    assert [record["exportText"] for record in direct_records] == expected_prompts
+    assert [record["index"] for record in direct_records] == [1, 2, 3, 4, 5]
+    assert "".join(
+        server.stream_thread_prompt_copy(str(codex_home_path), "thread-1", scope="pure", output_format="text")
+    ) == "\n\n".join(expected_prompts)
+
+    client = TestClient(server.app)
+    token_payload = client.get("/api/auth/token", params={"codex_home": str(codex_home_path)}).json()
+    response = client.get(
+        "/api/threads/thread-1/prompts/copy",
+        params={"codex_home": str(codex_home_path), "scope": "pure", "format": "jsonl"},
+        headers={token_payload["headerName"]: token_payload["token"]},
+    )
+    assert response.status_code == 200
+    assert [json.loads(line)["exportText"] for line in response.text.splitlines()] == expected_prompts
+
+    monkeypatch.setenv("CODEX_HOME_MANAGER_EXPORT_ROOT", str(tmp_path / "exports"))
+    export_result = export_thread_prompts(str(codex_home_path), "thread-1", output_format="json", scope="pure")
+    exported_payload = json.loads(Path(export_result["outputPath"]).read_text(encoding="utf-8"))
+    assert exported_payload["promptCount"] == 5
+    assert exported_payload["allPromptCount"] == 5
+    assert len(exported_payload["rolloutPaths"]) == 2
+    assert [prompt["exportText"] for prompt in exported_payload["prompts"]] == expected_prompts
 
 
 def test_search_matches_only_the_body_visible_for_the_selected_scope(tmp_path: Path) -> None:
@@ -644,6 +1259,28 @@ def test_prompt_page_redacts_data_urls_and_rejects_stale_cursor_after_rewrite(tm
         if sidecar_path.exists():
             derived_bytes += sidecar_path.read_bytes()
     assert b"alpha" not in derived_bytes
+
+
+def test_cached_prompt_index_state_rejects_same_size_rewrite(tmp_path: Path) -> None:
+    codex_home_path, rollout_path = create_prompt_test_home(tmp_path, [user_record("alpha")])
+    read_thread_prompt_page(
+        str(codex_home_path),
+        "thread-1",
+        scope="all",
+        limit=10,
+        scan_budget_ms=1_000,
+    )
+    database_path = prompt_index_database_path(codex_home_path)
+    assert read_prompt_index_state(database_path, rollout_path) is not None
+
+    original_bytes = rollout_path.read_bytes()
+    rewritten_bytes = original_bytes.replace(b"alpha", b"bravo")
+    assert len(rewritten_bytes) == len(original_bytes)
+    original_stat = rollout_path.stat()
+    rollout_path.write_bytes(rewritten_bytes)
+    os.utime(rollout_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000))
+
+    assert read_prompt_index_state(database_path, rollout_path) is None
 
 
 def test_large_data_url_prompt_is_redacted_before_json_materialization(tmp_path: Path) -> None:

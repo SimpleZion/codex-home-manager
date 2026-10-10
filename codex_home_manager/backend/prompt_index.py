@@ -17,7 +17,7 @@ from typing import Any
 
 from backend.search_normalization import normalize_search_text, normalized_match_original_span
 
-prompt_index_schema_version = 15
+prompt_index_schema_version = 23
 prompt_index_boundary_bytes = 64 * 1024
 prompt_index_commit_records = 256
 prompt_index_commit_bytes = 8 * 1024 * 1024
@@ -326,7 +326,10 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA secure_delete=ON")
     connection.execute("PRAGMA busy_timeout=30000")
     previous_schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if previous_schema_version != prompt_index_schema_version:
+    migrated_classification = previous_schema_version == 22
+    if migrated_classification:
+        _migrate_classification(connection)
+    if previous_schema_version != prompt_index_schema_version and not migrated_classification:
         # All three tables contain rebuildable derived data. Recreate the file
         # progress schema atomically instead of maintaining migrations for a
         # local cache that can always be regenerated from the rollout JSONL.
@@ -362,6 +365,11 @@ def _connect(database_path: Path) -> sqlite3.Connection:
             timeline_partial_offset INTEGER NOT NULL,
             timeline_partial_candidate INTEGER NOT NULL,
             timeline_complete INTEGER NOT NULL,
+            timeline_lineage_line_number INTEGER NOT NULL,
+            timeline_lineage_text_hash TEXT NOT NULL,
+            timeline_lineage_source_type TEXT NOT NULL,
+            timeline_lineage_payload_type TEXT NOT NULL,
+            timeline_lineage_kind TEXT NOT NULL,
             updated_at_ns INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prompts (
@@ -408,6 +416,10 @@ def _connect(database_path: Path) -> sqlite3.Connection:
             encrypted INTEGER NOT NULL,
             has_encrypted_content INTEGER NOT NULL,
             prompt_source_type TEXT NOT NULL,
+            pure_text TEXT NOT NULL,
+            pure_search_text TEXT NOT NULL,
+            pure_character_count INTEGER NOT NULL,
+            has_pure_text INTEGER NOT NULL,
             UNIQUE(file_id, event_index)
         );
         CREATE INDEX IF NOT EXISTS timeline_events_file_order_idx ON timeline_events(file_id, event_index);
@@ -423,6 +435,7 @@ def _connect(database_path: Path) -> sqlite3.Connection:
             file_id UNINDEXED,
             event_index UNINDEXED,
             search_text,
+            pure_search_text,
             tokenize='trigram'
         );
         CREATE TABLE IF NOT EXISTS prompt_index_metadata (
@@ -441,12 +454,67 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         (time.time_ns(),),
     )
     connection.commit()
-    if previous_schema_version != prompt_index_schema_version:
+    if previous_schema_version != prompt_index_schema_version and not migrated_classification:
         # Schema changes rebuild this derived cache from the rollout. Reclaim
         # pages left by the old FTS tables immediately so a smaller index does
         # not retain the previous multi-gigabyte file allocation.
         connection.execute("VACUUM")
     return connection
+
+
+def _migrate_classification(connection: sqlite3.Connection) -> None:
+    from backend.codex_data import classify_prompt_record, timeline_assistant_stage
+
+    # Reclassify the stored projection, preserving scan offsets, generations and
+    # FTS coordinates. Do not rescan multi-gigabyte rollout files for labels.
+    with connection:
+        connection.execute("SAVEPOINT classification_revision")
+        try:
+            for table, order_column, source_column, label_column in (
+                ("prompts", "prompt_index", "source_type", "source_label"),
+                ("timeline_events", "event_index", "prompt_source_type", "label"),
+            ):
+                search_table = "prompt_search_fts" if table == "prompts" else "timeline_search_fts"
+                pure_changed = False
+                records = connection.execute(
+                    f"SELECT * FROM {table} WHERE {source_column} IN ('user','attachment','browser','internal','goal') ORDER BY id"
+                )
+                for row in records:
+                    classification = classify_prompt_record(str(row["text"]))
+                    source = classification["sourceType"]
+                    label = classification["sourceLabel"]
+                    pure_text = classification["pureText"]
+                    if (source, label, pure_text) == (row[source_column], row[label_column], row["pure_text"]):
+                        continue
+                    pure_count = row["pure_character_count"] if pure_text == row["pure_text"] else row["character_count"] if pure_text == row["text"] else len(pure_text)
+                    pure_search = normalize_search_text(pure_text)
+                    fields = f"{source_column}=?, {label_column}=?, pure_text=?, pure_search_text=?, pure_character_count=?, has_pure_text=?"
+                    values = [source, label, pure_text, pure_search, pure_count, int(bool(pure_text))]
+                    if table == "prompts":
+                        fields += ", visible_by_default=?"
+                        values.append(int(classification["visibleByDefault"]))
+                    else:
+                        fields += ", kind=?"
+                        values.append("user" if classification["visibleByDefault"] else "context")
+                    connection.execute(f"UPDATE {table} SET {fields} WHERE id=?", (*values, row["id"]))
+                    if pure_text != row["pure_text"]:
+                        pure_changed = True
+                records.close()
+                if pure_changed:
+                    coordinate = f"p.file_id=CAST({search_table}.file_id AS INTEGER) AND p.{order_column}=CAST({search_table}.{order_column} AS INTEGER)"
+                    connection.execute(
+                        f"UPDATE {search_table} SET pure_search_text=(SELECT p.pure_search_text FROM {table} p WHERE {coordinate}) "
+                        f"WHERE EXISTS (SELECT 1 FROM {table} p WHERE {coordinate} AND p.pure_search_text<>{search_table}.pure_search_text)"
+                    )
+            for row in connection.execute("SELECT id, phase FROM timeline_events WHERE kind IN ('commentary','assistant') ORDER BY id"):
+                kind, label = timeline_assistant_stage(row["phase"])
+                connection.execute("UPDATE timeline_events SET kind=?, label=? WHERE id=?", (kind, label, row["id"]))
+            connection.execute(f"PRAGMA user_version={prompt_index_schema_version}")
+            connection.execute("RELEASE classification_revision")
+        except BaseException:
+            connection.execute("ROLLBACK TO classification_revision")
+            connection.execute("RELEASE classification_revision")
+            raise
 
 
 def _connect_read_only(database_path: Path) -> sqlite3.Connection:
@@ -518,8 +586,11 @@ def _reset_file_index(
                 scanned_offset, scanned_line_count, boundary_hash, partial_offset,
                 partial_candidate, complete,
                 timeline_scanned_offset, timeline_scanned_line_count, timeline_boundary_hash,
-                timeline_partial_offset, timeline_partial_candidate, timeline_complete, updated_at_ns
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, 0, 0, 0, 0, ?, 0, 0, 0, ?)
+                timeline_partial_offset, timeline_partial_candidate, timeline_complete,
+                timeline_lineage_line_number, timeline_lineage_text_hash,
+                timeline_lineage_source_type, timeline_lineage_payload_type,
+                timeline_lineage_kind, updated_at_ns
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, 0, 0, 0, 0, ?, 0, 0, 0, 0, '', '', '', '', ?)
             """,
             (
                 path_text,
@@ -548,7 +619,10 @@ def _reset_file_index(
                 complete = 0, timeline_scanned_offset = 0,
                 timeline_scanned_line_count = 0, timeline_boundary_hash = ?,
                 timeline_partial_offset = 0, timeline_partial_candidate = 0,
-                timeline_complete = 0, updated_at_ns = ?
+                timeline_complete = 0, timeline_lineage_line_number = 0,
+                timeline_lineage_text_hash = '', timeline_lineage_source_type = '',
+                timeline_lineage_payload_type = '', timeline_lineage_kind = '',
+                updated_at_ns = ?
             WHERE id = ?
             """,
             (
@@ -930,7 +1004,7 @@ def update_prompt_index(
         ) if include_timeline else 0
         recent_event_rows = connection.execute(
             """
-            SELECT byte_offset, kind, text, source_type, timestamp_ms, event_index
+            SELECT byte_offset, line_number, kind, text, source_type, timestamp_ms, event_index
             FROM timeline_events WHERE file_id = ? ORDER BY event_index DESC LIMIT 512
             """,
             (int(row["id"]),),
@@ -945,6 +1019,15 @@ def update_prompt_index(
                     int(item["timestamp_ms"] or 0),
                     int(item["event_index"]),
                 )
+            )
+        previous_timeline_lineage: tuple[int, str, str, str, str] | None = None
+        if int(row["timeline_lineage_line_number"] or 0) > 0:
+            previous_timeline_lineage = (
+                int(row["timeline_lineage_line_number"]),
+                str(row["timeline_lineage_text_hash"]),
+                str(row["timeline_lineage_source_type"]),
+                str(row["timeline_lineage_payload_type"]),
+                str(row["timeline_lineage_kind"]),
             )
         scanned_offset = scan_start_offset
         partial_offset = int(row[progress_partial_offset_field])
@@ -982,26 +1065,30 @@ def update_prompt_index(
                     INSERT INTO timeline_events(
                         file_id, event_index, line_number, byte_offset, timestamp, timestamp_ms,
                         kind, label, text, search_text, character_count, source_type, payload_type,
-                        phase, call_id, readable, encrypted, has_encrypted_content, prompt_source_type
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        phase, call_id, readable, encrypted, has_encrypted_content, prompt_source_type,
+                        pure_text, pure_search_text, pure_character_count, has_pure_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     batch_event_records,
                 )
                 connection.executemany(
                     """
-                    INSERT INTO timeline_search_fts(file_id, event_index, search_text)
-                    VALUES (?, ?, ?)
+                    INSERT INTO timeline_search_fts(file_id, event_index, search_text, pure_search_text)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    ((record[0], record[1], record[9]) for record in batch_event_records),
+                    ((record[0], record[1], record[9], record[20]) for record in batch_event_records),
                 )
             current_stat = os.fstat(file.fileno())
+            lineage = previous_timeline_lineage or (0, "", "", "", "")
             connection.execute(
                 f"""
                 UPDATE prompt_files
                 SET observed_size = ?, observed_mtime_ns = ?, {progress_offset_field} = ?,
                     {progress_line_field} = ?, {progress_boundary_field} = ?,
                     {progress_partial_offset_field} = ?, {progress_partial_candidate_field} = ?,
-                    {progress_complete_field} = ?, updated_at_ns = ?
+                    {progress_complete_field} = ?, timeline_lineage_line_number = ?,
+                    timeline_lineage_text_hash = ?, timeline_lineage_source_type = ?,
+                    timeline_lineage_payload_type = ?, timeline_lineage_kind = ?, updated_at_ns = ?
                 WHERE id = ?
                 """,
                 (
@@ -1013,6 +1100,11 @@ def update_prompt_index(
                     partial_offset,
                     int(partial_candidate),
                     int(complete),
+                    lineage[0],
+                    lineage[1],
+                    lineage[2],
+                    lineage[3],
+                    lineage[4],
                     time.time_ns(),
                     int(row["id"]),
                 ),
@@ -1136,6 +1228,27 @@ def update_prompt_index(
                             event_source_type = str(timeline_event.get("sourceType") or "")
                             event_timestamp_ms = int(timeline_event.get("timestampMs") or 0)
                             event_history = recent_timeline_events.setdefault(event_kind, [])
+                            adjacent_protocol_mirror = False
+                            if (
+                                event_source_type == "event_msg"
+                                and str(timeline_event.get("payloadType") or "") == "agent_message"
+                                and not str(timeline_event.get("phase") or "")
+                                and previous_timeline_lineage is not None
+                            ):
+                                (
+                                    prior_line_number,
+                                    prior_text,
+                                    prior_source_type,
+                                    prior_payload_type,
+                                    prior_kind,
+                                ) = previous_timeline_lineage
+                                adjacent_protocol_mirror = (
+                                    prior_line_number == line_number - 1
+                                    and prior_source_type == "response_item"
+                                    and prior_payload_type == "message"
+                                    and prior_kind in {"commentary", "assistant", "assistant_unclassified"}
+                                    and prior_text == hashlib.sha256(event_text.strip().encode("utf-8")).hexdigest()
+                                )
                             superseded_event_indices: list[int] = []
                             for prior_record in event_history:
                                 prior_offset, prior_text, prior_source_type, prior_timestamp_ms, prior_event_index = prior_record
@@ -1174,7 +1287,7 @@ def update_prompt_index(
                                 event_history[:] = [
                                     record for record in event_history if int(record[4]) not in superseded_set
                                 ]
-                            duplicate_event = bool(
+                            duplicate_event = adjacent_protocol_mirror or bool(
                                 is_timeline_duplicate
                                 and is_timeline_duplicate(timeline_event, recent_timeline_events)
                             )
@@ -1201,6 +1314,10 @@ def update_prompt_index(
                                         int(bool(timeline_event.get("encrypted"))),
                                         int(bool(timeline_event.get("hasEncryptedContent"))),
                                         str(timeline_event.get("promptSourceType") or ""),
+                                        str(timeline_event.get("pureText") or event_text),
+                                        normalize_search_text(str(timeline_event.get("pureText") or event_text)),
+                                        int(timeline_event.get("pureCharacterCount") or len(str(timeline_event.get("pureText") or event_text))),
+                                        int(bool(timeline_event.get("hasPureText", True))),
                                     )
                                 )
                                 event_history.append(
@@ -1214,6 +1331,13 @@ def update_prompt_index(
                                 )
                                 if len(event_history) > 256:
                                     del event_history[:-256]
+                            previous_timeline_lineage = (
+                                line_number,
+                                hashlib.sha256(event_text.strip().encode("utf-8")).hexdigest(),
+                                event_source_type,
+                                str(timeline_event.get("payloadType") or ""),
+                                event_kind,
+                            )
                     extracted = extract_prompt(parsed_item) if include_prompts else None
                     if extracted is not None:
                         text, protocol = extracted
@@ -1318,6 +1442,63 @@ def _index_state(
     }
 
 
+def read_prompt_index_state(
+    database_path: Path,
+    rollout_path: Path,
+    *,
+    index_kind: str = "prompts",
+) -> dict[str, Any] | None:
+    """Read a validated index snapshot without advancing the source scan."""
+    started_at = time.perf_counter()
+    database_path = database_path.expanduser().resolve(strict=False)
+    rollout_path = rollout_path.expanduser().resolve(strict=False)
+    if not database_path.is_file() or not rollout_path.is_file():
+        return None
+
+    normalized_index_kind = str(index_kind or "prompts").strip().lower()
+    if normalized_index_kind not in {"prompts", "timeline"}:
+        raise ValueError(f"unsupported prompt index kind: {index_kind}")
+    progress_offset_field = "scanned_offset" if normalized_index_kind == "prompts" else "timeline_scanned_offset"
+    progress_line_field = "scanned_line_count" if normalized_index_kind == "prompts" else "timeline_scanned_line_count"
+    progress_boundary_field = "boundary_hash" if normalized_index_kind == "prompts" else "timeline_boundary_hash"
+    progress_complete_field = "complete" if normalized_index_kind == "prompts" else "timeline_complete"
+    path_text = str(rollout_path)
+
+    try:
+        with _database_read(database_path), closing(_connect_read_only(database_path)) as connection:
+            if int(connection.execute("PRAGMA user_version").fetchone()[0]) != prompt_index_schema_version:
+                return None
+            row = connection.execute("SELECT * FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
+            if row is None:
+                return None
+            stat_result = rollout_path.stat()
+            scanned_offset = int(row[progress_offset_field])
+            if (
+                not _same_file_identity(row, stat_result)
+                or int(row["observed_size"]) != int(stat_result.st_size)
+                or int(row["observed_mtime_ns"]) != int(stat_result.st_mtime_ns)
+                or scanned_offset > stat_result.st_size
+            ):
+                return None
+            with rollout_path.open("rb") as source:
+                if str(row[progress_boundary_field]) != _boundary_hash(source, scanned_offset):
+                    return None
+            return _index_state(
+                row,
+                stat_result,
+                False,
+                scanned_offset,
+                started_at,
+                0,
+                progress_offset_field=progress_offset_field,
+                progress_line_field=progress_line_field,
+                progress_complete_field=progress_complete_field,
+                index_kind=normalized_index_kind,
+            )
+    except (OSError, sqlite3.DatabaseError, PromptIndexInUse):
+        return None
+
+
 def _encode_cursor(payload: dict[str, Any]) -> str:
     raw_payload = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw_payload).decode("ascii").rstrip("=")
@@ -1415,8 +1596,9 @@ def read_prompt_page(
         where_sql = " AND ".join(f"({clause})" for clause in clauses)
         from_sql = "prompts AS p"
         if use_fts:
-            from_sql += (
-                " JOIN prompt_search_fts AS f ON CAST(f.file_id AS INTEGER) = p.file_id"
+            # Keep MATCH as the outer loop; ORDER BY must not repeat it per message.
+            from_sql = (
+                "prompt_search_fts AS f CROSS JOIN prompts AS p ON CAST(f.file_id AS INTEGER) = p.file_id"
                 " AND CAST(f.prompt_index AS INTEGER) = p.prompt_index"
             )
         row_cursor = connection.execute(
@@ -1483,21 +1665,121 @@ def read_prompt_page(
     }
 
 
-def _timeline_kind_clause(kind: str) -> tuple[str, list[Any]]:
+def read_prompt_context(
+    database_path: Path,
+    rollout_path: Path,
+    *,
+    anchor_index: int,
+    anchor_byte_offset: int | None = None,
+    generation: str | None = None,
+    scope: str,
+    search: str = "",
+    source_type: str | None = None,
+    before: int = 10,
+    after: int = 10,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    safe_anchor_index = max(1, int(anchor_index))
+    safe_before = max(0, min(50, int(before)))
+    safe_after = max(0, min(50, int(after)))
+    scope_sql, scope_parameters = _scope_clause(scope, "p")
+    normalized_search = normalize_search_text(search.strip())
+    path_text = str(rollout_path.expanduser().resolve(strict=False))
+    with _database_read(database_path), closing(_connect_read_only(database_path)) as connection, _cancelable_query(connection, cancel_check):
+        file_row = connection.execute("SELECT * FROM prompt_files WHERE path = ?", (path_text,)).fetchone()
+        if file_row is None:
+            raise RuntimeError("prompt index metadata is missing")
+        if generation is not None and generation != str(file_row["generation"]):
+            raise ValueError("prompt context anchor is stale: index generation changed")
+        clauses = ["p.file_id = ?", scope_sql]
+        parameters: list[Any] = [int(file_row["id"]), *scope_parameters]
+        if source_type:
+            clauses.append("p.source_type = ?")
+            parameters.append(source_type)
+        where_sql = " AND ".join(f"({clause})" for clause in clauses)
+        anchor_row = connection.execute(
+            f"SELECT p.* FROM prompts AS p WHERE {where_sql} AND p.prompt_index = ?",
+            (*parameters, safe_anchor_index),
+        ).fetchone()
+        if anchor_row is None:
+            raise ValueError("prompt context anchor does not match the current filters")
+        if anchor_byte_offset is not None and anchor_byte_offset != int(anchor_row["byte_offset"]):
+            raise ValueError("prompt context anchor is stale: record position changed")
+        earlier_rows = list(connection.execute(
+            f"SELECT p.* FROM prompts AS p WHERE {where_sql} AND p.prompt_index < ? ORDER BY p.prompt_index DESC LIMIT ?",
+            (*parameters, safe_anchor_index, safe_before),
+        ))
+        earlier_rows.reverse()
+        later_rows = list(connection.execute(
+            f"SELECT p.* FROM prompts AS p WHERE {where_sql} AND p.prompt_index > ? ORDER BY p.prompt_index ASC LIMIT ?",
+            (*parameters, safe_anchor_index, safe_after),
+        ))
+        rows = [*earlier_rows, anchor_row, *later_rows]
+        prompts: list[dict[str, Any]] = []
+        remaining_page_bytes = prompt_search_result_page_characters
+        for row in rows:
+            _check_cancelled(cancel_check)
+            item_budget = max(1, min(prompt_search_result_item_characters, remaining_page_bytes))
+            prompt = _prompt_from_row_with_budget(row, normalized_search, item_budget)
+            prompts.append(prompt)
+            remaining_page_bytes -= len(str(prompt["text"]).encode("utf-8"))
+            if prompt["pureText"] != prompt["text"]:
+                remaining_page_bytes -= len(str(prompt["pureText"]).encode("utf-8"))
+        first_index = int(rows[0]["prompt_index"])
+        last_index = int(rows[-1]["prompt_index"])
+        has_earlier = connection.execute(
+            f"SELECT 1 FROM prompts AS p WHERE {where_sql} AND p.prompt_index < ? LIMIT 1",
+            (*parameters, first_index),
+        ).fetchone() is not None
+        has_later = connection.execute(
+            f"SELECT 1 FROM prompts AS p WHERE {where_sql} AND p.prompt_index > ? LIMIT 1",
+            (*parameters, last_index),
+        ).fetchone() is not None
+    return {
+        "prompts": prompts,
+        "anchorIndex": safe_anchor_index,
+        "anchorOffset": len(earlier_rows),
+        "hasEarlier": has_earlier,
+        "hasLater": has_later,
+    }
+
+
+def _timeline_kind_clause(kind: str, source_filter: str = "all") -> tuple[str, list[Any]]:
     normalized_kind = (kind or "conversation").strip().lower()
     if normalized_kind == "all":
         return "1 = 1", []
     if normalized_kind == "conversation":
-        return "kind IN ('user', 'commentary', 'assistant')", []
+        return "(kind IN ('user', 'commentary', 'assistant', 'assistant_unclassified') OR (kind = 'context' AND prompt_source_type <> ''))", []
+    if normalized_kind == "user":
+        return "prompt_source_type IN ('user', 'attachment', 'browser', 'subagent', 'automation', 'delegation', 'goal')", []
     if normalized_kind == "tool":
         return "kind IN ('tool_call', 'tool_output')", []
     allowed_kinds = {
-        "user", "commentary", "assistant", "reasoning", "tool_call", "tool_output",
+        "user", "commentary", "assistant", "assistant_unclassified", "reasoning", "tool_call", "tool_output",
         "developer", "system", "context", "status",
     }
     if normalized_kind not in allowed_kinds:
         raise ValueError(f"unsupported timeline kind: {kind}")
     return "kind = ?", [normalized_kind]
+
+
+def _timeline_source_filter_clause(source_filter: str, table_alias: str = "") -> tuple[str, list[Any]]:
+    normalized_filter = (source_filter or "all").strip().lower()
+    prefix = f"{table_alias}." if table_alias else ""
+    if normalized_filter == "all":
+        return "1 = 1", []
+    if normalized_filter in {"automation", "delegation"}:
+        return f"{prefix}prompt_source_type = ?", [normalized_filter]
+    if normalized_filter == "pure":
+        allowed = "'user', 'attachment', 'browser'"
+    elif normalized_filter == "focused":
+        allowed = "'user', 'attachment', 'browser'"
+    elif normalized_filter == "with_agents":
+        allowed = "'user', 'attachment', 'browser', 'subagent'"
+        return f"({prefix}kind NOT IN ('user', 'context') OR {prefix}prompt_source_type IN ({allowed}))", []
+    else:
+        raise ValueError(f"unsupported timeline source filter: {source_filter}")
+    return f"({prefix}kind NOT IN ('user', 'context') OR ({prefix}prompt_source_type IN ({allowed}) AND {prefix}has_pure_text = 1))", []
 
 
 def _timeline_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1534,8 +1816,10 @@ def _timeline_event_from_row_with_budget(
     row: sqlite3.Row,
     normalized_query: str,
     byte_limit: int,
+    use_pure_text: bool = False,
 ) -> dict[str, Any]:
-    original_text = str(row["text"])
+    use_pure = use_pure_text and str(row["kind"]) in {"user", "context"}
+    original_text = str(row["pure_text"] if use_pure else row["text"])
     text, text_truncated = _search_result_excerpt(original_text, normalized_query, byte_limit)
     return {
         "id": f"byte-{int(row['byte_offset'])}",
@@ -1545,7 +1829,7 @@ def _timeline_event_from_row_with_budget(
         "kind": str(row["kind"]),
         "label": str(row["label"]),
         "text": text,
-        "characterCount": int(row["character_count"]),
+        "characterCount": int(row["pure_character_count"] if use_pure else row["character_count"]),
         "textTruncated": text_truncated,
         "sourceType": str(row["source_type"]),
         "payloadType": str(row["payload_type"]),
@@ -1555,6 +1839,9 @@ def _timeline_event_from_row_with_budget(
         "encrypted": bool(row["encrypted"]),
         "hasEncryptedContent": bool(row["has_encrypted_content"]),
         "promptSourceType": str(row["prompt_source_type"]),
+        "pureText": str(row["pure_text"]),
+        "pureCharacterCount": int(row["pure_character_count"]),
+        "hasPureText": bool(row["has_pure_text"]),
     }
 
 
@@ -1567,15 +1854,19 @@ def read_timeline_search_page(
     cursor: str | None,
     limit: int,
     index_state: dict[str, Any],
+    source_filter: str = "all",
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     safe_limit = max(1, min(200, int(limit)))
-    kind_sql, kind_parameters = _timeline_kind_clause(kind)
+    kind_sql, kind_parameters = _timeline_kind_clause(kind, source_filter)
+    source_sql, source_parameters = _timeline_source_filter_clause(source_filter, "e")
     normalized_search = normalize_search_text(search.strip())
+    use_pure_text = (source_filter or "all").strip().lower() in {"pure", "focused"}
+    search_column = "pure_search_text" if use_pure_text else "search_text"
     use_fts = bool(normalized_search and _use_trigram_index(normalized_search))
     query_signature = hashlib.sha256(
         json.dumps(
-            {"kind": (kind or "conversation").strip().lower(), "search": normalized_search},
+            {"kind": (kind or "conversation").strip().lower(), "search": normalized_search, "sourceFilter": (source_filter or "all").strip().lower()},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -1596,20 +1887,21 @@ def read_timeline_search_page(
         if file_row is None:
             raise RuntimeError("timeline index metadata is unavailable")
         qualified_kind_sql = kind_sql.replace("kind", "e.kind")
-        clauses = ["e.file_id = ?", "e.event_index > ?", qualified_kind_sql]
-        parameters: list[Any] = [int(file_row["id"]), after_index, *kind_parameters]
+        clauses = ["e.file_id = ?", "e.event_index > ?", qualified_kind_sql, source_sql]
+        parameters: list[Any] = [int(file_row["id"]), after_index, *kind_parameters, *source_parameters]
         if normalized_search:
             if use_fts:
                 clauses.append("timeline_search_fts MATCH ?")
-                parameters.append(_fts_literal(normalized_search, "search_text"))
+                parameters.append(_fts_literal(normalized_search, search_column))
             else:
-                clauses.append("instr(e.search_text, ?) > 0")
+                clauses.append(f"instr(e.{search_column}, ?) > 0")
                 parameters.append(normalized_search)
         where_sql = " AND ".join(f"({clause})" for clause in clauses)
         from_sql = "timeline_events AS e"
         if use_fts:
-            from_sql += (
-                " JOIN timeline_search_fts AS f ON CAST(f.file_id AS INTEGER) = e.file_id"
+            # CROSS JOIN prevents SQLite from rescanning MATCH for every ordered event.
+            from_sql = (
+                "timeline_search_fts AS f CROSS JOIN timeline_events AS e ON CAST(f.file_id AS INTEGER) = e.file_id"
                 " AND CAST(f.event_index AS INTEGER) = e.event_index"
             )
         row_cursor = connection.execute(
@@ -1628,7 +1920,7 @@ def read_timeline_search_page(
                 has_indexed_more = True
                 break
             item_budget = min(prompt_search_result_item_characters, remaining_page_bytes)
-            event = _timeline_event_from_row_with_budget(row, normalized_search, item_budget)
+            event = _timeline_event_from_row_with_budget(row, normalized_search, item_budget, use_pure_text)
             events.append(event)
             remaining_page_bytes -= len(str(event["text"]).encode("utf-8"))
             last_index = int(row["event_index"])
@@ -1639,14 +1931,14 @@ def read_timeline_search_page(
             next_cursor = _encode_cursor(
                 {"generation": index_state["generation"], "query": query_signature, "after": last_index}
             )
-        count_parameters: list[Any] = [int(file_row["id"]), *kind_parameters]
-        count_clauses = ["e.file_id = ?", qualified_kind_sql]
+        count_parameters: list[Any] = [int(file_row["id"]), *kind_parameters, *source_parameters]
+        count_clauses = ["e.file_id = ?", qualified_kind_sql, source_sql]
         if normalized_search:
             if use_fts:
                 count_clauses.append("timeline_search_fts MATCH ?")
-                count_parameters.append(_fts_literal(normalized_search, "search_text"))
+                count_parameters.append(_fts_literal(normalized_search, search_column))
             else:
-                count_clauses.append("instr(e.search_text, ?) > 0")
+                count_clauses.append(f"instr(e.{search_column}, ?) > 0")
                 count_parameters.append(normalized_search)
         match_count = int(connection.execute(
             f"SELECT COUNT(*) FROM {from_sql} WHERE {' AND '.join(f'({clause})' for clause in count_clauses)}",
@@ -1654,6 +1946,7 @@ def read_timeline_search_page(
         ).fetchone()[0])
     return {
         "kind": (kind or "conversation").strip().lower(),
+        "sourceFilter": (source_filter or "all").strip().lower(),
         "search": search,
         "matchCount": match_count,
         "matchCountComplete": bool(index_state["complete"]),
@@ -1722,8 +2015,8 @@ def iter_prompt_records(
                 parameters.append(normalized_search)
         from_sql = "prompts AS p"
         if use_fts:
-            from_sql += (
-                " JOIN prompt_search_fts AS f ON CAST(f.file_id AS INTEGER) = p.file_id"
+            from_sql = (
+                "prompt_search_fts AS f CROSS JOIN prompts AS p ON CAST(f.file_id AS INTEGER) = p.file_id"
                 " AND CAST(f.prompt_index AS INTEGER) = p.prompt_index"
             )
         cursor = connection.execute(

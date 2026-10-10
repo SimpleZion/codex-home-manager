@@ -1,4 +1,6 @@
 node_modules/
+.codex/
+output/
 dist/
 build/
 .pytest_cache/
@@ -21,4 +23,3 @@ htmlcov/
 *.p12
 **/*private*.pem
 **/*signing-key*.pem
-

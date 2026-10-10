@@ -20,6 +20,7 @@ from .codex_data import (
     build_snapshot,
     connect_database,
     collect_jsonl_schema_stats,
+    detect_current_codex_versions,
     detect_codex_processes,
     explicit_sidebar_thread_ids_from_state,
     inspect_official_thread_tool_initial_session_meta,
@@ -32,6 +33,9 @@ from .codex_data import (
     stat_file,
 )
 from .hidden_process import run_hidden_command
+from .pagination_patch_status import detect_pagination_patch_status
+from .browser_rollout_patch_status import detect_browser_rollout_patch_status
+from .desktop_memory_diagnostics import diagnostic_evidence as desktop_memory_evidence
 from .process_utils import list_windows_processes
 from .windows_paths import windows_path_key
 
@@ -296,7 +300,7 @@ def build_codex_repair_prompt(report: dict[str, Any], language: str) -> str:
 
     if language == "en":
         lines = [
-            "You are Codex running on my own machine. Use this Codex Home Manager diagnostic report as the starting point, then verify the evidence locally before changing anything.",
+            "You are Codex running on my own machine. Use this Codex Cockpit diagnostic report as the starting point, then verify the evidence locally before changing anything.",
             "",
             "Goal: diagnose and repair the reported Codex Desktop / CODEX_HOME problems. Do not rely only on this pasted report; inspect the real local files, SQLite databases, JSONL logs, plugin cache and running processes first.",
             "",
@@ -345,7 +349,7 @@ def build_codex_repair_prompt(report: dict[str, Any], language: str) -> str:
         return "\n".join(lines).strip()
 
     lines = [
-        "你是运行在我自己电脑上的 Codex。下面是 Codex Home Manager 的只读体检报告，请把它当作起点，但在修改任何东西之前必须先用本机真实证据复核。",
+        "你是运行在我自己电脑上的 Codex。下面是 Codex Cockpit 的只读体检报告，请把它当作起点，但在修改任何东西之前必须先用本机真实证据复核。",
         "",
         "目标：诊断并修复报告中列出的 Codex Desktop / CODEX_HOME 问题。不要只凭这段报告下结论；先检查本机真实文件、SQLite 数据库、JSONL 日志、插件缓存和运行进程。",
         "",
@@ -1140,6 +1144,7 @@ def scan_rollout_event_stream_integrity(
         "lineCount": 0,
         "responseUserMessages": 0,
         "responseAssistantMessages": 0,
+        "topLevelUserMessages": 0,
         "eventUserMessages": 0,
         "eventAgentMessages": 0,
         "eventThreadNameUpdated": 0,
@@ -1182,6 +1187,13 @@ def scan_rollout_event_stream_integrity(
                 collect_jsonl_schema_stats(item, result)
                 item_type = item.get("type")
                 payload = item.get("payload")
+                if item_type == "user_message":
+                    text = response_item_message_text(payload) if isinstance(payload, dict) else str(payload or "").strip()
+                    if text and not is_codex_context_payload(text):
+                        result["topLevelUserMessages"] += 1
+                        if not result["firstEventUserMessage"]:
+                            result["firstEventUserMessage"] = compact_diagnostic_text(text)
+                    continue
                 if item_type == "response_item" and isinstance(payload, dict) and payload.get("type") == "message":
                     role = str(payload.get("role") or "")
                     text = response_item_message_text(payload)
@@ -1217,37 +1229,23 @@ def scan_rollout_event_stream_integrity(
     except OSError:
         result["parseErrors"] += 1
 
+    legacy_user_messages = int(result["topLevelUserMessages"]) + int(result["eventUserMessages"])
+    result["canonicalUserMessages"] = int(result["responseUserMessages"]) or legacy_user_messages
+    result["canonicalAssistantMessages"] = int(result["responseAssistantMessages"]) or int(result["eventAgentMessages"])
+    result["canonicalChatMessages"] = int(result["canonicalUserMessages"]) + int(result["canonicalAssistantMessages"])
     result["responseChatMessages"] = int(result["responseUserMessages"]) + int(result["responseAssistantMessages"])
     result["eventChatMessages"] = int(result["eventUserMessages"]) + int(result["eventAgentMessages"])
     return result
 
 
-def main_event_stream_missing(scan: dict[str, Any]) -> bool:
-    response_chat_messages = int(scan.get("responseChatMessages") or 0)
-    event_chat_messages = int(scan.get("eventChatMessages") or 0)
-    response_assistant_messages = int(scan.get("responseAssistantMessages") or 0)
-    event_agent_messages = int(scan.get("eventAgentMessages") or 0)
-    return (
-        response_chat_messages >= 2
-        and event_chat_messages == 0
-    ) or (
-        response_assistant_messages >= 2
-        and event_agent_messages == 0
-        and event_chat_messages <= 1
-    )
-
-
-def main_event_stream_sparse(scan: dict[str, Any]) -> bool:
-    response_chat_messages = int(scan.get("responseChatMessages") or 0)
-    event_chat_messages = int(scan.get("eventChatMessages") or 0)
-    return response_chat_messages >= 10 and event_chat_messages < max(2, response_chat_messages // 2)
-
-
-def event_stream_evidence(scan: dict[str, Any]) -> str:
+def conversation_stream_evidence(scan: dict[str, Any]) -> str:
     return (
         f"{scan.get('title')} | {scan.get('threadId')} | "
+        f"canonical_user={scan.get('canonicalUserMessages')} "
+        f"canonical_assistant={scan.get('canonicalAssistantMessages')} | "
         f"response_user={scan.get('responseUserMessages')} "
         f"response_assistant={scan.get('responseAssistantMessages')} "
+        f"top_level_user={scan.get('topLevelUserMessages')} "
         f"event_user={scan.get('eventUserMessages')} "
         f"event_agent={scan.get('eventAgentMessages')} "
         f"title_events={scan.get('eventThreadNameUpdated')} | "
@@ -1985,6 +1983,16 @@ def inspect_current_codex_appx_install() -> dict[str, Any]:
     return remember(result)
 
 
+def current_desktop_install_for_pagination(paths: Any) -> dict[str, Any] | None:
+    current_appx_install = inspect_current_codex_appx_install()
+    if current_appx_install.get("available") and current_appx_install.get("installPath"):
+        return {
+            "path": str(current_appx_install["installPath"]),
+            "version": str(current_appx_install.get("version") or ""),
+        }
+    return detect_current_codex_versions(paths).get("desktopInstall")
+
+
 def scan_chrome_native_host_paths(
     codex_home_path: Path,
     current_appx_install: dict[str, Any] | None = None,
@@ -2043,6 +2051,14 @@ def scan_chrome_native_host_paths(
             resolved = str(value)
         return os.path.normcase(resolved) if os.name == "nt" else resolved
 
+    equivalent_file_cache: dict[tuple[str, str], bool] = {}
+
+    def files_are_equivalent(left: Path, right: Path) -> bool:
+        path_pair = tuple(sorted((comparable_path(left), comparable_path(right))))
+        if path_pair not in equivalent_file_cache:
+            equivalent_file_cache[path_pair] = files_have_same_sha256(left, right)
+        return equivalent_file_cache[path_pair]
+
     def inspect_entry(file_path: Path, entry_index: int, path_values: Any, protocol: str) -> None:
         result["entries"] += 1
         result[f"{protocol}Entries"] += 1
@@ -2089,7 +2105,7 @@ def scan_chrome_native_host_paths(
             if not paths_match and key == "codexCliPath":
                 actual_cli_path = Path(expanded_value)
                 expected_cli_path = Path(str(expected_value))
-                paths_match = files_have_same_sha256(actual_cli_path, expected_cli_path)
+                paths_match = files_are_equivalent(actual_cli_path, expected_cli_path)
                 if paths_match:
                     result["equivalentCodexCliAliases"].append(
                         f"{sample_prefix}={value} equivalent={expected_value}"
@@ -3679,6 +3695,114 @@ def run_codex_diagnostics(
             [str(paths.codex_home_path)],
         )
 
+    pagination_patch = detect_pagination_patch_status(current_desktop_install_for_pagination(paths))
+    pagination_state = str(pagination_patch.get("state") or "unknown")
+    pagination_status = {
+        "effective": "pass",
+        "unverified": "warning",
+        "ready": "info",
+        "missing": "info",
+        "stale": "warning",
+        "invalid": "warning",
+        "unknown": "warning",
+    }.get(pagination_state, "warning")
+    pagination_evidence = [
+        f"state={pagination_state}",
+        f"current_package={pagination_patch.get('current', {}).get('packageFullName') or '-'}",
+        f"initial_turns={pagination_patch.get('policy', {}).get('initialTurns')}",
+        f"initial_turn_items_paginated={pagination_patch.get('policy', {}).get('initialTurnItemsPaginated')}",
+        f"initial_turn_item_page_size={pagination_patch.get('policy', {}).get('initialTurnItemPageSize')}",
+        f"user_page_turns={pagination_patch.get('policy', {}).get('userPageTurns')}",
+        f"prompt_rail_loaded_turns_only={pagination_patch.get('policy', {}).get('promptRailLoadedTurnsOnly')}",
+        f"periodic_status_metadata_only={pagination_patch.get('policy', {}).get('periodicStatusMetadataOnly')}",
+        f"priority_feed_metadata_only={pagination_patch.get('policy', {}).get('priorityFeedMetadataOnly')}",
+        f"passive_tab_restoration_loaded_turns_only={pagination_patch.get('policy', {}).get('passiveTabRestorationLoadedTurnsOnly')}",
+        f"runtime_status={pagination_patch.get('installed', {}).get('runtimeStatus') if isinstance(pagination_patch.get('installed'), dict) else '-'}",
+        f"runtime_observation_seconds={pagination_patch.get('installed', {}).get('runtimeObservationSeconds') if isinstance(pagination_patch.get('installed'), dict) else '-'}",
+        f"runtime_background_turn_list_requests={pagination_patch.get('installed', {}).get('runtimeBackgroundTurnListRequests') if isinstance(pagination_patch.get('installed'), dict) else '-'}",
+        f"reason={pagination_patch.get('reason') or '-'}",
+    ]
+    add_check(
+        "desktop.pagination_patch",
+        "performance",
+        localize(language, "Desktop long-thread pagination patch", "Desktop 长线程分页补丁"),
+        pagination_status,
+        localize(
+            language,
+            f"Pagination patch state: {pagination_state}.",
+            f"分页补丁状态：{pagination_state}。",
+        ),
+        pagination_evidence,
+        [
+            str(item.get("path"))
+            for item in (pagination_patch.get("prepared"), pagination_patch.get("installed"))
+            if isinstance(item, dict) and item.get("path")
+        ],
+    )
+    if pagination_state in {"stale", "invalid", "unknown", "unverified"}:
+        add_issue(
+            "performance.desktop_pagination_patch_inactive",
+            "warning",
+            "performance",
+            localize(language, "Long-thread pagination patch is inactive", "长线程分页补丁未生效"),
+            localize(
+                language,
+                str(pagination_patch.get("reason") or "The patch cannot be verified."),
+                "当前 Codex 版本与分页补丁证据不再匹配，或有效 ASAR 无法通过验证。",
+            ),
+            localize(
+                language,
+                "Rebuild and validate the version-locked patch, then install it only after explicit restart approval.",
+                "重新构建并验证与当前版本锁定的补丁；取得明确重启授权后再安装。",
+            ),
+            pagination_evidence,
+        )
+
+    browser_patch = detect_browser_rollout_patch_status()
+    browser_state = str(browser_patch.get("state") or "unknown")
+    browser_status = {"verified": "pass", "not_found": "info"}.get(browser_state, "warning")
+    browser_summary = localize(language, browser_patch.get("reason", "Unverified browser runtime."),
+                               browser_patch.get("reasonZh", "浏览器 runtime 尚未验证。"))
+    browser_evidence = [
+        f"state={browser_state}",
+        f"runtime_status={browser_patch.get('runtimeStatus') or '-'}",
+        f"observation_seconds={browser_patch.get('observationSeconds', '-')}",
+        f"manifest={browser_patch.get('manifestPath') or '-'}",
+        f"receipt={browser_patch.get('receiptPath') or '-'}",
+    ]
+    browser_paths = []
+    for runtime in browser_patch.get("current", []):
+        browser_paths.append(str(runtime["sourcePath"]))
+        browser_evidence.append(f"service={runtime['sourcePath']}; sha256={runtime.get('serviceHash', '-')}; helper_sha256={runtime.get('helperHash', '-')}")
+    for worker in browser_patch.get("workers", []):
+        browser_evidence.append(f"worker_pid={worker.get('pid')}; created_at={worker.get('createdAt')}; exe={worker.get('exe')}")
+    if browser_patch.get("error"):
+        browser_evidence.append(f"error={browser_patch['error']}")
+    add_check(
+        "desktop.browser_rollout_patch", "performance",
+        localize(language, "Browser rollout tracking patch", "浏览器 rollout 跟踪补丁"),
+        browser_status, browser_summary, browser_evidence, browser_paths,
+    )
+    if browser_state not in {"verified", "not_found"}:
+        add_issue(
+            "performance.browser_rollout_patch_unverified", "warning", "performance",
+            localize(language, "Browser rollout tracking repair requires verification", "浏览器 rollout 跟踪修复需要验证"),
+            browser_summary,
+            localize(language,
+                     "Check the active runtime, service/helper hashes and a live-worker validation of at least 900 seconds. This check does not install or restart anything.",
+                     "核对活跃 runtime、服务/helper 哈希及至少 900 秒的活跃 worker 运行验证。本检查不会安装补丁或重启进程。"),
+            browser_evidence, browser_paths,
+        )
+
+    add_check(
+        "desktop.memory_attribution", "performance",
+        localize(language, "Desktop memory attribution", "Desktop 内存来源"), "info",
+        localize(language,
+                 "Read-only process evidence. RSS sums may include shared pages; loaded turns do not prove full rendering. Incomplete scans are not zero usage.",
+                 "只读进程取证。RSS 合计可能重复计算共享页；已加载 turn 不等于全量渲染；扫描不完整不代表零占用。"),
+        desktop_memory_evidence(), [],
+    )
+
     required_files = [
         ("state_database", paths.database_path, "critical", "state_5.sqlite"),
         ("global_state", paths.global_state_path, "warning", ".codex-global-state.json"),
@@ -4196,6 +4320,41 @@ def run_codex_diagnostics(
             for thread in threads
             if not thread.get("archived") and thread.get("threadKind") == "main" and thread.get("fileExists")
         ]
+        missing_official_name_threads = [
+            thread
+            for thread in eligible_event_stream_threads
+            if thread.get("sqliteNameSupported")
+            and not str(thread.get("sqliteName") or "").strip()
+            and str(thread.get("sessionIndexTitle") or "").strip()
+        ]
+        recoverable_official_name_threads = [
+            thread
+            for thread in missing_official_name_threads
+            if normalized_compare_text(str(thread.get("sessionIndexTitle") or ""))
+            != normalized_compare_text(str(thread.get("sqliteTitle") or ""))
+        ]
+        ambiguous_official_name_threads = [
+            thread
+            for thread in missing_official_name_threads
+            if normalized_compare_text(str(thread.get("sessionIndexTitle") or ""))
+            == normalized_compare_text(str(thread.get("sqliteTitle") or ""))
+        ]
+        mismatched_official_name_threads = [
+            thread
+            for thread in eligible_event_stream_threads
+            if thread.get("sqliteNameSupported")
+            and str(thread.get("sqliteName") or "").strip()
+            and str(thread.get("sessionIndexTitle") or "").strip()
+            and normalized_compare_text(str(thread.get("sqliteName") or ""))
+            != normalized_compare_text(str(thread.get("sessionIndexTitle") or ""))
+        ]
+        misleading_title_fallback_threads = [
+            thread
+            for thread in missing_official_name_threads
+            if re.match(r"^(?:\\\\\?\\)?[A-Za-z]:\\", str(thread.get("sqliteTitle") or "").strip())
+            or str(thread.get("sqliteTitle") or "").lstrip().startswith(("# Files mentioned by the user:", "## Referenced ChatGPT conversation:"))
+            or len(str(thread.get("sqliteTitle") or "").strip()) > 120
+        ]
         eligible_event_stream_threads.sort(
             key=lambda thread: (
                 0 if thread.get("codexVisible") else 1,
@@ -4220,6 +4379,8 @@ def run_codex_diagnostics(
                     "threadId": str(thread.get("id") or ""),
                     "title": str(thread.get("title") or ""),
                     "sqliteTitle": str(thread.get("sqliteTitle") or ""),
+                    "sqliteName": str(thread.get("sqliteName") or ""),
+                    "sqliteNameSupported": bool(thread.get("sqliteNameSupported")),
                     "sessionIndexTitle": str(thread.get("sessionIndexTitle") or ""),
                     "rolloutPath": rollout_path_text,
                     "jsonlParseErrors": int(scan.get("parseErrors") or 0),
@@ -4232,44 +4393,18 @@ def run_codex_diagnostics(
                 }
             )
             main_event_stream_scans.append(scan)
-        missing_main_event_stream_threads = [
-            scan for scan in main_event_stream_scans if main_event_stream_missing(scan)
-        ]
-        sparse_main_event_stream_threads = [
+        empty_main_conversation_stream_threads = [
             scan
             for scan in main_event_stream_scans
-            if not main_event_stream_missing(scan) and main_event_stream_sparse(scan)
+            if not scan.get("scanTruncated") and int(scan.get("canonicalChatMessages") or 0) == 0
         ]
-        missing_user_event_stream_threads = [
-            scan
-            for scan in main_event_stream_scans
-            if int(scan.get("responseUserMessages") or 0) > 0
-            and int(scan.get("eventUserMessages") or 0) == 0
-        ]
-        missing_agent_event_stream_threads = [
-            scan
-            for scan in main_event_stream_scans
-            if int(scan.get("responseAssistantMessages") or 0) > 0
-            and int(scan.get("eventAgentMessages") or 0) == 0
-        ]
-        main_event_stream_attention_threads: list[dict[str, Any]] = []
-        seen_event_stream_attention_ids: set[str] = set()
-        for scan in (
-            missing_main_event_stream_threads
-            + sparse_main_event_stream_threads
-            + missing_user_event_stream_threads
-            + missing_agent_event_stream_threads
-        ):
-            thread_id = str(scan.get("threadId") or "")
-            if thread_id in seen_event_stream_attention_ids:
-                continue
-            seen_event_stream_attention_ids.add(thread_id)
-            main_event_stream_attention_threads.append(scan)
         title_event_missing_threads: list[dict[str, Any]] = []
         title_event_mismatch_threads: list[dict[str, Any]] = []
         for scan in main_event_stream_scans:
             session_index_title = str(scan.get("sessionIndexTitle") or "")
             sqlite_title = str(scan.get("sqliteTitle") or "")
+            sqlite_name = str(scan.get("sqliteName") or "")
+            persisted_name = sqlite_name if scan.get("sqliteNameSupported") else sqlite_title
             display_title = str(scan.get("title") or session_index_title or sqlite_title)
             latest_event_title = str(scan.get("latestThreadNameUpdated") or "")
             first_user_message = str(scan.get("firstEventUserMessage") or scan.get("firstResponseUserMessage") or "")
@@ -4281,10 +4416,10 @@ def run_codex_diagnostics(
             ):
                 title_event_missing_threads.append(scan)
             if latest_event_title:
-                comparable_titles = [title for title in (session_index_title, sqlite_title) if title]
+                comparable_titles = [title for title in (session_index_title, persisted_name) if title]
                 if any(normalized_compare_text(title) != normalized_compare_text(latest_event_title) for title in comparable_titles):
                     title_event_mismatch_threads.append(scan)
-            elif session_index_title and sqlite_title and normalized_compare_text(session_index_title) != normalized_compare_text(sqlite_title):
+            elif session_index_title and persisted_name and normalized_compare_text(session_index_title) != normalized_compare_text(persisted_name):
                 title_event_mismatch_threads.append(scan)
         jsonl_parse_error_threads = [
             scan for scan in main_event_stream_scans if int(scan.get("jsonlParseErrors") or 0) > 0
@@ -4409,28 +4544,22 @@ def run_codex_diagnostics(
                 [f"{thread.get('title')} | {thread.get('id')}" for thread in explicit_sidebar_without_session_index_threads[:8]],
                 [str(paths.session_index_path), str(paths.global_state_path)],
             )
-        main_event_stream_status = "pass"
-        if missing_main_event_stream_threads:
-            main_event_stream_status = "critical"
-        elif sparse_main_event_stream_threads or missing_user_event_stream_threads or missing_agent_event_stream_threads:
-            main_event_stream_status = "warning"
-        elif skipped_event_stream_threads or truncated_event_stream_scans:
-            main_event_stream_status = "warning"
+        main_event_stream_status = "warning" if skipped_event_stream_threads or truncated_event_stream_scans else "pass"
         add_check(
             "threads.main_event_stream",
             "threads",
-            localize(language, "Main thread event_msg conversation stream", "主线程 event_msg 可见对话流"),
+            localize(language, "Main thread canonical conversation records", "主线程规范对话记录"),
             main_event_stream_status,
             localize(
                 language,
-                "Main thread response_item messages are backed by event_msg user/agent messages.",
-                "主线程 response_item 中的真实对话有对应 event_msg user/agent 可见消息。",
+                "Observed conversation records use supported representations; modern response_item and legacy event formats are accepted independently.",
+                "已观测到的对话记录使用受支持的表示；现代 response_item 与旧版 event 格式均可独立成立。",
             )
             if main_event_stream_status == "pass"
             else localize(
                 language,
-                f"{len(missing_main_event_stream_threads)} main threads have missing event streams, {len(sparse_main_event_stream_threads)} are sparse, and {len(main_event_stream_attention_threads)} have user/agent role gaps.",
-                f"{len(missing_main_event_stream_threads)} 条主线程 event_msg 可见对话流缺失，{len(sparse_main_event_stream_threads)} 条主线程可见对话流明显稀疏，{len(main_event_stream_attention_threads)} 条主线程存在 user/agent 角色缺口。",
+                f"Coverage is incomplete: {len(truncated_event_stream_scans)} scans were bounded before completion and {skipped_event_stream_threads} threads were not sampled.",
+                f"覆盖尚不完整：{len(truncated_event_stream_scans)} 次扫描因预算限制未完成，另有 {skipped_event_stream_threads} 条线程未抽样。",
             ),
             [
                 f"scanned_main_threads={len(main_event_stream_scans)}",
@@ -4440,75 +4569,61 @@ def run_codex_diagnostics(
                 f"per_file_max_bytes={event_stream_scan_max_bytes}",
                 f"per_file_max_lines={event_stream_scan_max_lines}",
                 f"truncated_scans={len(truncated_event_stream_scans)}",
-                f"missing_streams={len(missing_main_event_stream_threads)}",
-                f"sparse_streams={len(sparse_main_event_stream_threads)}",
-                f"missing_user_events={len(missing_user_event_stream_threads)}",
-                f"missing_agent_events={len(missing_agent_event_stream_threads)}",
-                *[event_stream_evidence(scan) for scan in main_event_stream_attention_threads[:8]],
+                f"empty_or_metadata_only_streams={len(empty_main_conversation_stream_threads)}",
+                *[conversation_stream_evidence(scan) for scan in empty_main_conversation_stream_threads[:8]],
             ],
         )
-        if missing_main_event_stream_threads:
-            add_issue(
-                "threads.main_event_stream_missing",
-                "critical",
-                "threads",
-                localize(language, "Main threads lost visible event_msg conversation records", "主线程丢失 event_msg 可见对话记录"),
-                localize(
-                    language,
-                    f"{len(missing_main_event_stream_threads)} main threads still contain response_item messages but have no usable event_msg user/agent stream.",
-                    f"{len(missing_main_event_stream_threads)} 条主线程仍有 response_item 真实对话，但 event_msg user/agent 可见对话流不可用。",
-                ),
-                localize(
-                    language,
-                    "Do not slim these main threads again. Rebuild the visible event_msg stream from response_item text after backing up the rollout JSONL.",
-                    "不要继续瘦身这些主线程。先备份 rollout JSONL，再从 response_item 文本重建 event_msg 可见对话流。",
-                ),
-                [event_stream_evidence(scan) for scan in missing_main_event_stream_threads[:8]],
-                [str(scan.get("rolloutPath") or "") for scan in missing_main_event_stream_threads[:8]],
+        official_name_status = "warning" if missing_official_name_threads or mismatched_official_name_threads else "pass"
+        add_check(
+            "threads.official_name_projection",
+            "threads",
+            localize(language, "Official Codex task-name projection", "Codex 正式线程标题投影"),
+            official_name_status,
+            localize(
+                language,
+                "SQLite task names agree with the legacy session index.",
+                "SQLite 正式线程标题与旧版 session_index 一致。",
             )
-        if sparse_main_event_stream_threads:
+            if official_name_status == "pass"
+            else localize(
+                language,
+                f"{len(missing_official_name_threads)} active main threads have no SQLite name and {len(mismatched_official_name_threads)} have a different persisted name.",
+                f"{len(missing_official_name_threads)} 条 active 主线程缺少 SQLite 正式标题，{len(mismatched_official_name_threads)} 条正式标题与旧版索引不一致。",
+            ),
+            [
+                f"missing_sqlite_name={len(missing_official_name_threads)}",
+                f"recoverable_from_session_index={len(recoverable_official_name_threads)}",
+                f"manual_name_required={len(ambiguous_official_name_threads)}",
+                f"mismatched_sqlite_name={len(mismatched_official_name_threads)}",
+                f"misleading_path_attachment_or_long_fallback={len(misleading_title_fallback_threads)}",
+                *[
+                    f"{thread.get('id')} | name={thread.get('sqliteName')} | fallback={thread.get('sqliteTitle')} | session_index={thread.get('sessionIndexTitle')}"
+                    for thread in (misleading_title_fallback_threads + missing_official_name_threads + mismatched_official_name_threads)[:8]
+                ],
+            ],
+            [str(paths.database_path), str(paths.session_index_path)],
+        )
+        if missing_official_name_threads or mismatched_official_name_threads:
             add_issue(
-                "threads.main_event_stream_sparse",
+                "threads.official_name_projection_mismatch",
                 "warning",
                 "threads",
-                localize(language, "Main thread event_msg stream is sparse", "主线程 event_msg 可见对话流明显稀疏"),
+                localize(language, "Codex task names are missing from the current SQLite projection", "Codex 正式线程标题未正确写入当前 SQLite 投影"),
                 localize(
                     language,
-                    f"{len(sparse_main_event_stream_threads)} main threads have far fewer event_msg chat records than response_item messages.",
-                    f"{len(sparse_main_event_stream_threads)} 条主线程 event_msg 对话记录明显少于 response_item 真实对话。",
+                    f"{len(missing_official_name_threads)} active main threads fall back to their first prompt; {len(recoverable_official_name_threads)} have a distinct recoverable legacy name and {len(ambiguous_official_name_threads)} require manual naming.",
+                    f"{len(missing_official_name_threads)} 条 active 主线程会退回显示首条 prompt；其中 {len(recoverable_official_name_threads)} 条有可恢复的不同旧标题，{len(ambiguous_official_name_threads)} 条只能人工命名。",
                 ),
                 localize(
                     language,
-                    "Compare the rollout tail before repair; rebuild only missing visible text and keep tool output, images and encrypted_content out of synthetic event_msg records.",
-                    "修复前先对比 rollout 尾部；只补可见 user/assistant 文本，不把 tool 输出、图片和 encrypted_content 写入合成 event_msg。",
-                ),
-                [event_stream_evidence(scan) for scan in sparse_main_event_stream_threads[:8]],
-                [str(scan.get("rolloutPath") or "") for scan in sparse_main_event_stream_threads[:8]],
-            )
-        if missing_user_event_stream_threads or missing_agent_event_stream_threads:
-            add_issue(
-                "threads.main_event_stream_role_gap",
-                "warning" if not missing_main_event_stream_threads else "critical",
-                "threads",
-                localize(language, "Main thread event_msg user/agent roles are incomplete", "主线程 event_msg 用户/助手角色记录不完整"),
-                localize(
-                    language,
-                    f"{len(missing_user_event_stream_threads)} threads are missing user_message events and {len(missing_agent_event_stream_threads)} are missing agent_message events.",
-                    f"{len(missing_user_event_stream_threads)} 条线程缺少 user_message event，{len(missing_agent_event_stream_threads)} 条线程缺少 agent_message event。",
-                ),
-                localize(
-                    language,
-                    "Treat this as a visibility corruption risk before any further slimming or closed-child cleanup.",
-                    "继续瘦身或清理 closed 子线程前，先把它当作可见对话损坏风险处理。",
+                    "Backfill an empty threads.name only when the latest session_index name differs from the first-prompt fallback. Preserve ambiguous records, threads.title, prompts, rollout JSONL and every existing non-empty name.",
+                    "仅当最新 session_index 标题与首条 prompt 回退标题不同时，才回填空的 threads.name；其余记录保持不变，并保留 threads.title、全部 prompt、rollout JSONL 和所有已有非空名称。",
                 ),
                 [
-                    event_stream_evidence(scan)
-                    for scan in (missing_user_event_stream_threads + missing_agent_event_stream_threads)[:8]
+                    f"{thread.get('id')} | fallback={thread.get('sqliteTitle')} | intended={thread.get('sessionIndexTitle')}"
+                    for thread in (misleading_title_fallback_threads + missing_official_name_threads)[:8]
                 ],
-                [
-                    str(scan.get("rolloutPath") or "")
-                    for scan in (missing_user_event_stream_threads + missing_agent_event_stream_threads)[:8]
-                ],
+                [str(paths.database_path), str(paths.session_index_path)],
             )
         # Current Codex releases reject legacy thread_name_updated events during replay.
         # Persisted SQLite/session_index title agreement is the supported integrity signal.
@@ -4529,7 +4644,7 @@ def run_codex_diagnostics(
                 f"missing_title_events={len(title_event_missing_threads)}",
                 f"title_mismatches={len(title_event_mismatch_threads)}",
                 *[
-                    f"{scan.get('title')} | {scan.get('threadId')} | sqlite={scan.get('sqliteTitle')} | session_index={scan.get('sessionIndexTitle')} | latest_event={scan.get('latestThreadNameUpdated')}"
+                    f"{scan.get('title')} | {scan.get('threadId')} | sqlite_name={scan.get('sqliteName')} | sqlite_fallback={scan.get('sqliteTitle')} | session_index={scan.get('sessionIndexTitle')} | latest_event={scan.get('latestThreadNameUpdated')}"
                     for scan in (title_event_missing_threads + title_event_mismatch_threads)[:8]
                 ],
             ],
@@ -4552,7 +4667,7 @@ def run_codex_diagnostics(
                     "需要联动修复标题来源；只改其中一层可能导致 Codex Desktop 显示错误线程名。",
                 ),
                 [
-                    f"{scan.get('title')} | {scan.get('threadId')} | sqlite={scan.get('sqliteTitle')} | session_index={scan.get('sessionIndexTitle')} | latest_event={scan.get('latestThreadNameUpdated')}"
+                    f"{scan.get('title')} | {scan.get('threadId')} | sqlite_name={scan.get('sqliteName')} | sqlite_fallback={scan.get('sqliteTitle')} | session_index={scan.get('sessionIndexTitle')} | latest_event={scan.get('latestThreadNameUpdated')}"
                     for scan in title_event_mismatch_threads[:8]
                 ],
                 [str(paths.session_index_path), str(paths.database_path)],
@@ -4752,8 +4867,8 @@ def run_codex_diagnostics(
                 ),
                 localize(
                     language,
-                    "Use Codex Home Manager diagnostics for fast local checks, then slim the largest threads after previewing exactly what will be removed.",
-                    "先用 Codex Home Manager 体检做快速本地检查，再对最大线程执行瘦身预览，确认会移除什么后再处理。",
+                    "Use Codex Cockpit diagnostics for fast local checks, then slim the largest threads after previewing exactly what will be removed.",
+                    "先用 Codex Cockpit 体检做快速本地检查，再对最大线程执行瘦身预览，确认会移除什么后再处理。",
                 ),
                 [
                     f"total_thread_storage_bytes={total_storage_bytes}",
@@ -6443,8 +6558,8 @@ def run_codex_diagnostics(
             ),
             localize(
                 language,
-                "Use Codex Home Manager's official-thread-tools repair while Codex is fully closed, then reopen Desktop and verify visible target-thread delivery plus target-side official tool exposure.",
-                "完全关闭 Codex 后使用 Codex Home Manager 的官方线程工具修复，再重新打开 Desktop；成功必须以目标线程可见收到消息、且目标线程自身能看到官方工具为准。",
+                "Use Codex Cockpit's official-thread-tools repair while Codex is fully closed, then reopen Desktop and verify visible target-thread delivery plus target-side official tool exposure.",
+                "完全关闭 Codex 后使用 Codex Cockpit 的官方线程工具修复，再重新打开 Desktop；成功必须以目标线程可见收到消息、且目标线程自身能看到官方工具为准。",
             ),
             legacy_thread_messenger_evidence,
             [str(paths.config_path), str(paths.database_path)],

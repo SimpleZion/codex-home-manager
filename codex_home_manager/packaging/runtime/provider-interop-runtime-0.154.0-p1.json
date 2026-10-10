@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "provider-interoperability-v3",
+  "contracts": {
+    "responseItemTypePrefix": 1,
+    "portableToolsForExplicitBaseUrl": 1
+  },
+  "source": {
+    "repository": "https://github.com/openai/codex",
+    "tag": "rust-v0.154.0",
+    "commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+    "patch": "openai-codex-0.154.0-provider-interoperability-v3.patch",
+    "patchSha256": "D4E362A995462FC43B069B905C3AE7E56584DD10E0DA47CAB33EF030A578FBC5"
+  },
+  "official": {
+    "appVersion": "26.908.9136.0",
+    "cliVersion": "0.154.0-alpha.6.2",
+    "cliSha256": "960C111D47AFD61669954B9DF9E56083E302EDBFA3EF6962D81DCC14A30051DC"
+  },
+  "patched": {
+    "cliVersion": "0.154.0",
+    "cliSha256": "8B215153346DA514FDD61362D6B2E947580F77CBC95C62D340497E8EAD75342A"
+  },
+  "companion": {
+    "sha256": "7B4987007702973DFEB49EC9A0C11F737488890E208CCB04F7A147769C4BB1F1"
+  },
+  "policy": {
+    "unknownOfficialVersion": "hold_verified_patch",
+    "verifiedUpstreamFix": "return_to_official",
+    "failedIntegrityCheck": "fail_closed"
+  }
+}

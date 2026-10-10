@@ -150,6 +150,32 @@ def create_codex_home(tmp_path: Path, *, complete_initial_meta: bool = False) ->
     return codex_home, rollout_path, thread_id
 
 
+def test_candidate_scan_reads_shared_rollout_once(tmp_path: Path, monkeypatch) -> None:
+    codex_home, rollout_path, _ = create_codex_home(tmp_path)
+    connection = sqlite3.connect(codex_home / "state_5.sqlite")
+    connection.execute("INSERT INTO threads VALUES (?, ?, ?, 0)", ("thread-b", str(rollout_path), "shared rollout"))
+    for position, name in enumerate(sorted(required_thread_tool_names)):
+        connection.execute(
+            "INSERT INTO thread_dynamic_tools VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("thread-b", position, name, f"description for {name}", "{}", 0, "codex_app"),
+        )
+    connection.commit()
+    connection.close()
+    original_reader = session_meta_module.initial_session_meta_records
+    calls: list[Path] = []
+
+    def counted_reader(path: Path):
+        calls.append(path)
+        return original_reader(path)
+
+    monkeypatch.setattr(session_meta_module, "initial_session_meta_records", counted_reader)
+
+    candidates = official_tool_candidates(codex_home)
+
+    assert {candidate["threadId"] for candidate in candidates} == {"thread-a", "thread-b"}
+    assert calls == [rollout_path]
+
+
 def test_repair_rewrites_initial_session_meta_and_preserves_prompt_fingerprint(tmp_path: Path) -> None:
     codex_home, rollout_path, thread_id = create_codex_home(tmp_path)
     baseline_scan = scan_rollout(rollout_path)

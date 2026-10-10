@@ -1,10 +1,11 @@
-import { classifyPromptText } from "./promptClassification";
+import { classifyPromptText, incomingDelegationText } from "./promptClassification";
 import { normalizeSearchText } from "./threadContentSearch";
 
 export type TimelineKind =
   | "user"
   | "commentary"
   | "assistant"
+  | "assistant_unclassified"
   | "reasoning"
   | "tool_call"
   | "tool_output"
@@ -13,7 +14,8 @@ export type TimelineKind =
   | "context"
   | "status";
 
-export type TimelineFilter = "conversation" | "user" | "commentary" | "assistant" | "reasoning" | "tool" | "all";
+export type TimelineFilter = "conversation" | "user" | "commentary" | "assistant" | "assistant_unclassified" | "reasoning" | "tool" | "all";
+export type TimelineSourceFilter = "all" | "pure" | "focused" | "with_agents" | "automation" | "delegation";
 
 export type TimelineItem = {
   id: string;
@@ -33,17 +35,23 @@ export type TimelineItem = {
   encrypted: boolean;
   hasEncryptedContent: boolean;
   promptSourceType: string;
+  pureText: string;
+  pureCharacterCount: number;
+  hasPureText: boolean;
 };
 
 export type ThreadTimeline = {
   threadId: string;
   title: string;
   rolloutPath: string;
+  rolloutPaths?: string[];
+  segmentCount?: number;
   fileSize: number;
   beforeByte: number | null;
   nextBeforeByte: number | null;
   limit: number;
   kind: TimelineFilter;
+  sourceFilter: TimelineSourceFilter;
   search: string;
   hasMore: boolean;
   scannedRecords: number;
@@ -62,8 +70,14 @@ export function isVisibleCommentaryItem(item: TimelineItem): boolean {
       || (item.sourceType === "response_item" && item.payloadType === "message"));
 }
 
+const markdownCapableKinds = new Set<TimelineKind>(["user", "commentary", "assistant", "assistant_unclassified", "reasoning", "developer", "system", "context"]);
+
+export function supportsMarkdownRendering(item: TimelineItem): boolean {
+  return markdownCapableKinds.has(item.kind) && !item.encrypted && Boolean(item.text);
+}
+
 const decoder = new TextDecoder("utf-8");
-const conversationKinds = new Set<TimelineKind>(["user", "commentary", "assistant"]);
+const conversationKinds = new Set<TimelineKind>(["user", "commentary", "assistant", "assistant_unclassified"]);
 const inlineRecordByteLimit = 8 * 1024 * 1024;
 const recoverableRecordByteLimit = 64 * 1024 * 1024;
 const recoveryChunkBytes = 256 * 1024;
@@ -120,6 +134,7 @@ function textFromValue(value: unknown): string {
     const record = value as Record<string, unknown>;
     const placeholder = attachmentPlaceholder(record);
     if (placeholder) return placeholder;
+    if (["summary_text", "reasoning_text"].includes(String(record.type || ""))) return textFromValue(record.text);
     for (const key of ["text", "message", "output", "content", "summary", "arguments", "input", "result"]) {
       if (key in record) {
         const text = textFromValue(record[key]);
@@ -146,6 +161,34 @@ export function isVisibleCommentaryRecord(item: Record<string, unknown>): boolea
     || (itemType === "response_item" && payload.type === "message" && payload.role === "assistant");
 }
 
+export function timelineItemMatchesSourceFilter(item: TimelineItem, sourceFilter: TimelineSourceFilter): boolean {
+  if (sourceFilter === "all") return true;
+  if (sourceFilter === "automation" || sourceFilter === "delegation") {
+    return item.promptSourceType === sourceFilter;
+  }
+  if (item.kind !== "user" && item.kind !== "context") return true;
+  if (sourceFilter === "pure") return ["user", "attachment", "browser"].includes(item.promptSourceType) && item.hasPureText;
+  if (sourceFilter === "focused") return ["user", "attachment", "browser"].includes(item.promptSourceType) && item.hasPureText;
+  return ["user", "attachment", "browser", "subagent"].includes(item.promptSourceType);
+}
+
+export function timelineItemForSourceFilter(item: TimelineItem, sourceFilter: TimelineSourceFilter): TimelineItem {
+  if (!(["pure", "focused"].includes(sourceFilter) && item.kind === "user")) return item;
+  const filteredText = typeof item.pureText === "string" ? item.pureText : item.text;
+  return {
+    ...item,
+    text: filteredText,
+    characterCount: typeof item.pureCharacterCount === "number" ? item.pureCharacterCount : filteredText.length,
+    textTruncated: false
+  };
+}
+
+function assistantStage(phase: string): Pick<TimelineItem, "kind" | "label"> {
+  if (phase === "commentary") return { kind: "commentary", label: "进度说明" };
+  if (phase === "final" || phase === "final_answer") return { kind: "assistant", label: "最终回复" };
+  return { kind: "assistant_unclassified", label: "助手消息（阶段未标注）" };
+}
+
 export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: number): TimelineItem | null {
   const itemType = String(item.type || "");
   const rawPayload = item.payload;
@@ -154,8 +197,9 @@ export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: 
   const timestamp = typeof item.timestamp === "string" ? item.timestamp : null;
   let base: Partial<TimelineItem> | null = null;
 
-  if (itemType === "user_message") {
-    const text = textFromValue(rawPayload);
+  const delegation = incomingDelegationText(item);
+  if (itemType === "user_message" || delegation !== null) {
+    const text = delegation ?? textFromValue(rawPayload);
     const classification = classifyPromptText(text);
     base = {
       kind: ["user", "attachment", "browser"].includes(classification.sourceType) ? "user" : "context",
@@ -173,9 +217,8 @@ export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: 
       base = { kind: ["user", "attachment", "browser"].includes(classification.sourceType) ? "user" : "context", label: classification.sourceLabel, text, promptSourceType: classification.sourceType };
     }
     else if (payloadType === "agent_message") {
-      const visibleCommentary = isVisibleCommentaryRecord(item);
       const phase = String(payload.phase || "");
-      base = { kind: visibleCommentary ? "commentary" : "assistant", label: visibleCommentary ? "思考过程" : "最终回复", text: textFromValue(payload.message), phase };
+      base = { ...assistantStage(phase), text: textFromValue(payload.message), phase };
     }
     else if (payloadType === "agent_reasoning") base = { kind: "reasoning", label: "推理记录", text: textFromValue(payload.text), readable: true };
     else if (payloadType === "mcp_tool_call_end") {
@@ -200,16 +243,16 @@ export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: 
       const text = textFromValue(payload.content);
       const classification = role === "user" ? classifyPromptText(text) : null;
       const phase = String(payload.phase || "");
-      const visibleCommentary = isVisibleCommentaryRecord(item);
+      const stage = role === "assistant" ? assistantStage(phase) : null;
       base = {
-        kind: visibleCommentary ? "commentary" : (role === "user" && classification && !["user", "attachment", "browser"].includes(classification.sourceType) ? "context" : role),
-        label: classification?.sourceLabel || (role === "assistant" ? (visibleCommentary ? "思考过程" : "最终回复") : labels[role]),
+        kind: stage?.kind || (role === "user" && classification && !["user", "attachment", "browser"].includes(classification.sourceType) ? "context" : role),
+        label: classification?.sourceLabel || stage?.label || labels[role],
         text,
         phase,
         promptSourceType: classification?.sourceType || ""
       };
     } else if (payloadType === "reasoning") {
-      const readableText = textFromValue(payload.summary || payload.content);
+      const readableText = textFromValue(payload.summary) || textFromValue(payload.content);
       const hasEncryptedContent = Boolean(payload.encrypted_content);
       const encrypted = hasEncryptedContent && !readableText;
       base = { kind: "reasoning", label: "推理记录", text: readableText, readable: Boolean(readableText), encrypted, hasEncryptedContent };
@@ -222,6 +265,8 @@ export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: 
   }
   if (!base?.kind) return null;
   const text = String(base.text || "");
+  const classification = base.promptSourceType ? classifyPromptText(text) : null;
+  const isPrompt = Boolean(classification);
   return {
     id: `byte-${byteOffset}`,
     byteOffset,
@@ -239,19 +284,27 @@ export function timelineItemFromJson(item: Record<string, unknown>, byteOffset: 
     readable: base.readable !== false,
     encrypted: Boolean(base.encrypted),
     hasEncryptedContent: Boolean(base.hasEncryptedContent || base.encrypted),
-    promptSourceType: String(base.promptSourceType || "")
+    promptSourceType: String(base.promptSourceType || ""),
+    pureText: isPrompt ? classification?.pureText || "" : text,
+    pureCharacterCount: isPrompt ? classification?.pureCharacterCount || 0 : text.length,
+    hasPureText: isPrompt ? Boolean(classification?.hasPureText) : Boolean(text)
   };
 }
 
-function matches(item: TimelineItem, kind: TimelineFilter, search: string): boolean {
+function matches(item: TimelineItem, kind: TimelineFilter, search: string, sourceFilter: TimelineSourceFilter): boolean {
   if (item.kind === "commentary" && !isVisibleCommentaryItem(item)) return false;
+  if (!timelineItemMatchesSourceFilter(item, sourceFilter)) return false;
   const kindMatches = kind === "all"
     || (kind === "conversation" && conversationKinds.has(item.kind))
+    || (kind === "conversation" && item.kind === "context" && Boolean(item.promptSourceType))
+    || (kind === "user" && ["user", "attachment", "browser", "subagent", "automation", "delegation", "goal"].includes(item.promptSourceType))
     || (kind === "tool" && (item.kind === "tool_call" || item.kind === "tool_output"))
     || item.kind === kind;
   if (!kindMatches) return false;
   const marker = normalizeSearchText(search.trim());
-  return !marker || normalizeSearchText([item.kind, item.label, item.text, item.callId].join("\n")).includes(marker);
+  const searchableText = [item.kind, item.label, item.callId,
+    ["pure", "focused"].includes(sourceFilter) && item.kind === "user" ? item.pureText : item.text].join("\n");
+  return !marker || normalizeSearchText(searchableText).includes(marker);
 }
 
 function duplicate(item: TimelineItem, seen: Map<string, Array<[number, string, string, number]>>): boolean {
@@ -264,7 +317,7 @@ function duplicate(item: TimelineItem, seen: Map<string, Array<[number, string, 
     if (!nearInTime && !nearInFile) return false;
     if (!text || !priorText) return !text && !priorText;
     if (text === priorText) return true;
-    return ["assistant", "reasoning"].includes(item.kind)
+    return ["assistant", "assistant_unclassified", "reasoning"].includes(item.kind)
       && (text.startsWith(priorText) || priorText.startsWith(text));
   });
   if (!repeated) {
@@ -273,6 +326,19 @@ function duplicate(item: TimelineItem, seen: Map<string, Array<[number, string, 
     seen.set(item.kind, prior);
   }
   return repeated;
+}
+
+function isUnphasedAgentMessageMirrorCandidate(item: TimelineItem): boolean {
+  return item.sourceType === "event_msg"
+    && item.payloadType === "agent_message"
+    && !item.phase;
+}
+
+function isCanonicalAgentMessageMirror(item: TimelineItem, pending: TimelineItem): boolean {
+  return item.sourceType === "response_item"
+    && item.payloadType === "message"
+    && ["commentary", "assistant", "assistant_unclassified"].includes(item.kind)
+    && item.text === pending.text;
 }
 
 function decodeJsonStringPrefix(rawValue: string): string {
@@ -442,10 +508,11 @@ export async function readBrowserTimelinePage(
   threadId: string,
   title: string,
   rolloutPath: string,
-  options: { beforeByte?: number | null; limit?: number; kind?: TimelineFilter; search?: string; contentLimit?: number; signal?: AbortSignal } = {}
+  options: { beforeByte?: number | null; limit?: number; kind?: TimelineFilter; sourceFilter?: TimelineSourceFilter; search?: string; contentLimit?: number; signal?: AbortSignal } = {}
 ): Promise<ThreadTimeline> {
   const limit = Math.max(1, Math.min(200, options.limit || 80));
   const kind = options.kind || "conversation";
+  const sourceFilter = options.sourceFilter || "all";
   const search = options.search || "";
   const contentLimit = Math.max(2_000, Math.min(500_000, options.contentLimit || 120_000));
   const newest: TimelineItem[] = [];
@@ -457,12 +524,33 @@ export async function readBrowserTimelinePage(
   let hasMore = false;
   let skippedOversizedRecords = 0;
   let recoveredOversizedRecords = 0;
+  let pendingMirror: { item: TimelineItem; lineEnd: number; recoveredRecord: boolean; recoveredTextTruncated: boolean } | null = null;
+  const appendItem = (item: TimelineItem, lineEnd: number, recoveredRecord = false, recoveredTextTruncated = false): boolean => {
+    if (!matches(item, kind, search, sourceFilter)) return true;
+    const displayItem = timelineItemForSourceFilter(item, sourceFilter);
+    if ((!displayItem.text && displayItem.kind !== "reasoning") || duplicate(displayItem, seen)) return true;
+    if (newest.length >= limit) {
+      hasMore = true;
+      nextBeforeByte = lineEnd;
+      return false;
+    }
+    if (recoveredRecord) {
+      recoveredOversizedRecords += 1;
+    }
+    if (recoveredTextTruncated) displayItem.textTruncated = true;
+    if (displayItem.text.length > contentLimit) {
+      displayItem.text = displayItem.text.slice(0, contentLimit);
+      displayItem.textTruncated = true;
+    }
+    newest.push(displayItem);
+    return true;
+  };
   for await (const [byteOffset, lineEnd, rawLine, completeRecord] of reverseJsonlLines(file, options.beforeByte, options.signal)) {
     options.signal?.throwIfAborted();
     scannedRecords += 1;
     const scanOrigin = options.beforeByte == null ? file.size : Math.max(0, Math.min(options.beforeByte, file.size));
     scannedBytes = Math.max(scannedBytes, scanOrigin - byteOffset);
-    if (scannedRecords > 10_000 || (scannedRecords > 1 && scannedBytes > 32 * 1024 * 1024)) {
+    if (!pendingMirror && (scannedRecords > 10_000 || (scannedRecords > 1 && scannedBytes > 32 * 1024 * 1024))) {
       hasMore = true; scanLimited = true; nextBeforeByte = lineEnd; break;
     }
     let parsed: Record<string, unknown>;
@@ -472,6 +560,8 @@ export async function readBrowserTimelinePage(
         ? await sanitizedOversizedRecord(file, byteOffset, lineEnd, options.signal)
         : null;
       if (!recovered) {
+        if (pendingMirror && !appendItem(pendingMirror.item, pendingMirror.lineEnd, pendingMirror.recoveredRecord, pendingMirror.recoveredTextTruncated)) break;
+        pendingMirror = null;
         skippedOversizedRecords += 1;
         hasMore = byteOffset > 0;
         scanLimited = hasMore;
@@ -481,28 +571,39 @@ export async function readBrowserTimelinePage(
       parsed = recovered.parsed;
       recoveredTextTruncated = recovered.textTruncated;
     } else {
-      try { parsed = JSON.parse(rawLine) as Record<string, unknown>; } catch { continue; }
+      try {
+        parsed = JSON.parse(rawLine) as Record<string, unknown>;
+      } catch {
+        if (pendingMirror && !appendItem(pendingMirror.item, pendingMirror.lineEnd, pendingMirror.recoveredRecord, pendingMirror.recoveredTextTruncated)) break;
+        pendingMirror = null;
+        continue;
+      }
     }
     if (scannedRecords % 250 === 0) await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
     const item = timelineItemFromJson(parsed, byteOffset);
-    if (!item || !matches(item, kind, search) || (!item.text && item.kind !== "reasoning") || duplicate(item, seen)) continue;
-    if (newest.length >= limit) { hasMore = true; nextBeforeByte = lineEnd; break; }
-    if (rawLine === null) {
-      recoveredOversizedRecords += 1;
-      item.textTruncated = recoveredTextTruncated;
+    if (pendingMirror) {
+      if (item && isCanonicalAgentMessageMirror(item, pendingMirror.item)) {
+        pendingMirror = null;
+        if (!appendItem(item, lineEnd, rawLine === null, recoveredTextTruncated)) break;
+        continue;
+      }
+      if (!appendItem(pendingMirror.item, pendingMirror.lineEnd, pendingMirror.recoveredRecord, pendingMirror.recoveredTextTruncated)) break;
+      pendingMirror = null;
     }
-    if (item.text.length > contentLimit) {
-      item.text = item.text.slice(0, contentLimit);
-      item.textTruncated = true;
+    if (!item) continue;
+    if (isUnphasedAgentMessageMirrorCandidate(item)) {
+      pendingMirror = { item, lineEnd, recoveredRecord: rawLine === null, recoveredTextTruncated };
+      continue;
     }
-    newest.push(item);
+    if (!appendItem(item, lineEnd, rawLine === null, recoveredTextTruncated)) break;
   }
+  if (pendingMirror && !hasMore) appendItem(pendingMirror.item, pendingMirror.lineEnd, pendingMirror.recoveredRecord, pendingMirror.recoveredTextTruncated);
   if (hasMore && nextBeforeByte == null) nextBeforeByte = newest.at(-1)?.byteOffset ?? null;
   const items = newest.reverse();
   return {
     threadId, title, rolloutPath, fileSize: file.size,
     beforeByte: options.beforeByte ?? null, nextBeforeByte: hasMore ? nextBeforeByte : null,
-    limit, kind, search, hasMore, scannedRecords, scannedBytes, scanLimited, skippedOversizedRecords, recoveredOversizedRecords, items,
+    limit, kind, sourceFilter, search, hasMore, scannedRecords, scannedBytes, scanLimited, skippedOversizedRecords, recoveredOversizedRecords, items,
     pageCounts: items.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] || 0) + 1 }), {})
   };
 }

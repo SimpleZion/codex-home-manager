@@ -32,11 +32,14 @@ except ImportError:  # pragma: no cover - exercised only by an incomplete runtim
     serialization = Ed25519PrivateKey = Ed25519PublicKey = AESGCM = Scrypt = None  # type: ignore[assignment]
 
 from .hidden_process import run_hidden_command
+from .pagination_patch_status import detect_pagination_patch_status
 from .prompt_index import (
     PromptIndexCancelled,
     iter_prompt_records,
     prompt_index_database_path,
     redacted_jsonl_record_bytes,
+    read_prompt_index_state,
+    read_prompt_context,
     read_prompt_page,
     read_timeline_search_page,
     update_prompt_index,
@@ -92,7 +95,15 @@ thread_columns = [
 manager_hidden_thread_ids_key = "codex_home_manager-hidden-thread-ids"
 
 snapshot_catalog_cache_lock = threading.RLock()
-snapshot_catalog_cache: dict[tuple[str, int, bool], tuple[tuple[tuple[str, int, int], ...], dict[str, Any]]] = {}
+snapshot_catalog_cache_grace_seconds = 5.0
+snapshot_catalog_cache: dict[
+    tuple[str, int, bool],
+    tuple[float, tuple[tuple[str, int, int], ...], dict[str, Any]],
+] = {}
+snapshot_catalog_inflight: dict[tuple[str, int, bool], threading.Event] = {}
+current_codex_version_cache_lock = threading.RLock()
+current_codex_version_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+current_codex_version_cache_ttl_seconds = 60.0
 manager_hidden_thread_ids_updated_at_key = f"{manager_hidden_thread_ids_key}-updated-at"
 legacy_manager_hidden_thread_ids_key = "-".join(["codex", "thread", "manager", "hidden", "thread", "ids"])
 legacy_manager_hidden_thread_ids_updated_at_key = f"{legacy_manager_hidden_thread_ids_key}-updated-at"
@@ -274,7 +285,10 @@ def extract_toml_string_value(text: str, key: str) -> str:
     return match.group(1) if match else ""
 
 
-def inspect_codex_cli_metadata(cli_path_text: str) -> dict[str, Any]:
+def inspect_codex_cli_metadata(cli_path_text: str, *, allow_execution: bool = True, probe_budget=None) -> dict[str, Any]:
+    from .probe_budget import probe_text
+    if probe_budget is not None:
+        probe_budget.check()
     result: dict[str, Any] = {
         "path": cli_path_text,
         "exists": False,
@@ -291,21 +305,24 @@ def inspect_codex_cli_metadata(cli_path_text: str) -> dict[str, Any]:
     official_npm_wrapper = False
     if cli_path.suffix.lower() in {"", ".cmd", ".bat", ".ps1", ".sh"}:
         try:
-            wrapper_text = cli_path.read_text(encoding="utf-8", errors="replace")[:5000]
+            wrapper_text = probe_text(cli_path, probe_budget, errors="replace")[:5000]
             official_npm_wrapper = "node_modules/@openai/codex/bin/codex.js" in wrapper_text.replace("\\", "/").lower()
         except OSError:
             official_npm_wrapper = False
     package_path = cli_path.parent / "node_modules" / "@openai" / "codex" / "package.json"
     if official_npm_wrapper and package_path.exists():
         try:
-            package_data = json.loads(package_path.read_text(encoding="utf-8", errors="replace"))
+            package_data = json.loads(probe_text(package_path, probe_budget, errors="replace"))
             if package_data.get("name") == "@openai/codex":
                 result["version"] = str(package_data.get("version") or "")
                 result["source"] = str(package_path)
         except (OSError, json.JSONDecodeError) as error:
             result["error"] = str(error)
     if not result["version"]:
-        command_result = run_hidden_command([str(cli_path), "--version"], timeout_seconds=8)
+        if not allow_execution:
+            result.update(source="file", error="Version command not executed in read-only inspection")
+            return result
+        command_result = run_hidden_command([str(cli_path), "--version"], timeout_seconds=3)
         version_text = f"{command_result.get('stdout', '')}\n{command_result.get('stderr', '')}".strip()
         version_match = re.search(r"\bcodex(?:-cli)?\s+([^\s]+)", version_text, re.IGNORECASE)
         if version_match:
@@ -336,11 +353,12 @@ def desktop_install_from_resources_path(path_text: str) -> dict[str, Any]:
     }
 
 
-def read_native_host_desktop_install(paths: CodexPaths) -> dict[str, Any]:
+def read_native_host_desktop_install(paths: CodexPaths, *, probe_budget=None) -> dict[str, Any]:
+    from .probe_budget import probe_text
     for file_name in ("chrome-native-hosts-v2.json", "chrome-native-hosts.json"):
         native_host_path = paths.codex_home_path / file_name
         try:
-            data = json.loads(native_host_path.read_text(encoding="utf-8", errors="replace"))
+            data = json.loads(probe_text(native_host_path, probe_budget, errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
         candidate_paths: list[str] = []
@@ -354,16 +372,19 @@ def read_native_host_desktop_install(paths: CodexPaths) -> dict[str, Any]:
                     if isinstance(entry, dict):
                         candidate_paths.append(str(entry.get("resourcesPath") or ""))
         for candidate_path in candidate_paths:
+            if probe_budget is not None:
+                probe_budget.check()
             install = desktop_install_from_resources_path(candidate_path)
             if install:
                 return install
     return {}
 
 
-def read_healthy_native_host_cli_path(paths: CodexPaths) -> str:
+def read_healthy_native_host_cli_path(paths: CodexPaths, *, probe_budget=None) -> str:
+    from .probe_budget import probe_text
     native_host_path = paths.codex_home_path / "chrome-native-hosts-v2.json"
     try:
-        data = json.loads(native_host_path.read_text(encoding="utf-8", errors="replace"))
+        data = json.loads(probe_text(native_host_path, probe_budget, errors="replace"))
     except (OSError, json.JSONDecodeError):
         return ""
     entries = data.get("entries") if isinstance(data, dict) else []
@@ -376,6 +397,8 @@ def read_healthy_native_host_cli_path(paths: CodexPaths) -> str:
         "nodeReplPath",
     )
     for entry in entries if isinstance(entries, list) else []:
+        if probe_budget is not None:
+            probe_budget.check()
         path_values = entry.get("paths") if isinstance(entry, dict) else None
         if not isinstance(path_values, dict):
             continue
@@ -385,16 +408,21 @@ def read_healthy_native_host_cli_path(paths: CodexPaths) -> str:
     return ""
 
 
-def find_codex_desktop_installations() -> list[dict[str, Any]]:
+def find_codex_desktop_installations(*, probe_budget=None) -> list[dict[str, Any]]:
     if os.name != "nt":
         return []
     windows_apps_path = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "WindowsApps"
     installations: list[dict[str, Any]] = []
     try:
-        candidates = list(windows_apps_path.glob("OpenAI.Codex_*"))
+        candidates = windows_apps_path.glob("OpenAI.Codex_*") if probe_budget is not None else list(windows_apps_path.glob("OpenAI.Codex_*"))
     except OSError:
         return installations
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
+        if probe_budget is not None:
+            from .probe_budget import ProbeStopped
+            probe_budget.check()
+            if index >= 128:
+                raise ProbeStopped("Desktop installation inventory limit exceeded")
         match = re.search(r"OpenAI\.Codex_([^_]+)", candidate.name)
         if not match:
             continue
@@ -412,18 +440,44 @@ def find_codex_desktop_installations() -> list[dict[str, Any]]:
     return sorted(installations, key=lambda item: (item["modifiedAtMs"], item["version"]), reverse=True)
 
 
-def detect_current_codex_versions(paths: CodexPaths) -> dict[str, Any]:
+def detect_current_codex_versions(paths: CodexPaths, *, allow_execution: bool = True, probe_budget=None) -> dict[str, Any]:
+    from .probe_budget import probe_text
+    if probe_budget is not None:
+        probe_budget.check()
+    version_input_paths = (
+        paths.config_path,
+        paths.codex_home_path / "managed_config.toml",
+        paths.codex_home_path / "chrome-native-hosts-v2.json",
+        paths.codex_home_path / "chrome-native-hosts.json",
+        paths.version_path,
+    )
+    input_fingerprint: list[tuple[str, int, int]] = []
+    for input_path in version_input_paths:
+        try:
+            stat = input_path.stat()
+            input_fingerprint.append((str(input_path), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            input_fingerprint.append((str(input_path), -1, -1))
+    cache_key: tuple[Any, ...] = (
+        str(paths.codex_home_path).casefold(),
+        os.environ.get("PATH", ""),
+        tuple(input_fingerprint),
+        allow_execution,
+    )
+    now = time.monotonic()
+    with current_codex_version_cache_lock:
+        cached = current_codex_version_cache.get(cache_key)
+        if probe_budget is None and cached and now - cached[0] <= current_codex_version_cache_ttl_seconds:
+            return copy.deepcopy(cached[1])
+
     config_text = ""
     try:
-        config_text = paths.config_path.read_text(encoding="utf-8", errors="replace")
+        config_text = probe_text(paths.config_path, probe_budget, errors="replace")
     except OSError:
         config_text = ""
     managed_config_text = ""
     try:
-        managed_config_text = (paths.codex_home_path / "managed_config.toml").read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
+        managed_config_text = probe_text(paths.codex_home_path / "managed_config.toml", probe_budget, errors="replace")
     except OSError:
         managed_config_text = ""
     runtime_cli_path = extract_toml_string_value(config_text, "CODEX_CLI_PATH")
@@ -431,7 +485,7 @@ def detect_current_codex_versions(paths: CodexPaths) -> dict[str, Any]:
     if not configured_cli_path or not Path(configured_cli_path).is_file():
         configured_cli_path = runtime_cli_path
     if not configured_cli_path or not Path(configured_cli_path).is_file():
-        configured_cli_path = read_healthy_native_host_cli_path(paths)
+        configured_cli_path = read_healthy_native_host_cli_path(paths, probe_budget=probe_budget) if probe_budget is not None else read_healthy_native_host_cli_path(paths)
     if not configured_cli_path:
         plugin_appserver_cli_path = paths.codex_home_path / "plugins" / ".plugin-appserver" / (
             "codex.exe" if os.name == "nt" else "codex"
@@ -439,19 +493,44 @@ def detect_current_codex_versions(paths: CodexPaths) -> dict[str, Any]:
         if plugin_appserver_cli_path.is_file():
             configured_cli_path = str(plugin_appserver_cli_path)
     path_cli_path = shutil.which("codex") or ""
-    configured_cli = inspect_codex_cli_metadata(configured_cli_path)
-    path_cli = inspect_codex_cli_metadata(path_cli_path)
-    desktop_installations = find_codex_desktop_installations()
-    native_host_desktop_install = read_native_host_desktop_install(paths)
-    version_cache = read_version(paths)
-    return {
+    cli_inspections: dict[str, dict[str, Any]] = {}
+
+    def inspect_once(path_text: str) -> dict[str, Any]:
+        normalized_key = os.path.normcase(os.path.abspath(path_text)) if path_text else ""
+        if normalized_key not in cli_inspections:
+            cli_inspections[normalized_key] = inspect_codex_cli_metadata(path_text, allow_execution=allow_execution, probe_budget=probe_budget) if probe_budget is not None or not allow_execution else inspect_codex_cli_metadata(path_text)
+        return copy.deepcopy(cli_inspections[normalized_key])
+
+    configured_cli = inspect_once(configured_cli_path)
+    path_cli = inspect_once(path_cli_path)
+    desktop_installations = find_codex_desktop_installations(probe_budget=probe_budget) if probe_budget is not None else find_codex_desktop_installations()
+    native_host_desktop_install = read_native_host_desktop_install(paths, probe_budget=probe_budget) if probe_budget is not None else read_native_host_desktop_install(paths)
+    if probe_budget is not None:
+        try:
+            version_cache = json.loads(probe_text(paths.version_path, probe_budget))
+        except (OSError, ValueError):
+            version_cache = {}
+        probe_budget.check()
+    else:
+        version_cache = read_version(paths)
+    result = {
         "configuredCli": configured_cli,
-        "runtimeConfiguredCli": inspect_codex_cli_metadata(runtime_cli_path),
+        "runtimeConfiguredCli": inspect_once(runtime_cli_path),
         "pathCli": path_cli,
         "desktopInstall": desktop_installations[0] if desktop_installations else native_host_desktop_install,
         "desktopInstallations": desktop_installations[:5],
         "versionCache": version_cache,
     }
+    with current_codex_version_cache_lock:
+        if probe_budget is None:
+            current_codex_version_cache.clear()
+            current_codex_version_cache[cache_key] = (now, copy.deepcopy(result))
+    return result
+
+
+def clear_current_codex_version_cache() -> None:
+    with current_codex_version_cache_lock:
+        current_codex_version_cache.clear()
 
 
 def connect_database(database_path: Path, readonly: bool = True) -> sqlite3.Connection:
@@ -506,6 +585,55 @@ def fetch_thread_row(paths: CodexPaths, thread_id: str, readonly: bool = True) -
     return dict(row) if row else None
 
 
+def rollout_session_matches_thread(rollout_path: Path, thread_id: str) -> bool:
+    try:
+        with rollout_path.open("rb") as source:
+            first_line = source.readline(8 * 1024 * 1024 + 1)
+    except OSError:
+        return False
+    if len(first_line) > 8 * 1024 * 1024 and not first_line.endswith(b"\n"):
+        return False
+    try:
+        item = json.loads(first_line)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(item, dict) or item.get("type") != "session_meta":
+        return False
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    direct_thread_id = payload.get("id") if "id" in payload else payload.get("session_id")
+    history_base = payload.get("history_base") if isinstance(payload.get("history_base"), dict) else {}
+    return str(direct_thread_id or "") == thread_id or str(history_base.get("thread_id") or "") == thread_id
+
+
+def thread_rollout_paths(paths: CodexPaths, thread_id: str, active_path: Path) -> list[Path]:
+    rollout_paths: list[Path] = []
+    pending_directories = [paths.codex_home_path / "sessions"]
+    while pending_directories:
+        directory = pending_directories.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending_directories.append(Path(entry.path))
+                    continue
+                if not entry.name.endswith(".jsonl") or thread_id not in entry.name:
+                    continue
+                candidate = Path(entry.path)
+                if rollout_session_matches_thread(candidate, thread_id):
+                    rollout_paths.append(candidate)
+            except OSError:
+                continue
+    if not any(comparable_path_text(str(path)) == comparable_path_text(str(active_path)) for path in rollout_paths):
+        rollout_paths.append(active_path)
+    unique_paths: dict[str, Path] = {}
+    for rollout_path in rollout_paths:
+        unique_paths.setdefault(comparable_path_text(str(rollout_path)), rollout_path)
+    return sorted(unique_paths.values(), key=lambda path: comparable_path_text(str(path)))
+
+
 def read_session_index_records(paths: CodexPaths) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not paths.session_index_path.exists():
@@ -542,59 +670,81 @@ def read_session_index_entries(paths: CodexPaths) -> dict[str, dict[str, Any]]:
     return entries
 
 
-rollout_title_cache: dict[tuple[str, str], tuple[int, int, dict[str, Any]]] = {}
 rollout_stats_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
 rollout_daily_token_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
 rollout_display_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
+rollout_daily_token_persistent_cache_lock = threading.RLock()
 
 
-def read_rollout_thread_title_update(rollout_path_text: str | None, thread_id: str) -> dict[str, Any]:
-    normalized_path = normalize_path_text(rollout_path_text)
-    empty_result: dict[str, Any] = {
-        "rolloutTitle": "",
-        "rolloutTitleTimestamp": "",
-        "rolloutTitleLine": None,
-    }
-    if not normalized_path:
-        return empty_result
-    rollout_path = Path(normalized_path)
-    if not rollout_path.exists():
-        return empty_result
+def rollout_daily_token_persistent_cache_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    user_data_root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return (user_data_root / "CodexHomeManager" / "daily-token-cache.sqlite3").resolve(strict=False)
 
-    stat = rollout_path.stat()
-    cache_key = (normalized_path, thread_id)
-    cached = rollout_title_cache.get(cache_key)
-    if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
-        return dict(cached[2])
 
-    result = dict(empty_result)
-    with rollout_path.open("r", encoding="utf-8", errors="replace") as file:
-        for line_number, line in enumerate(file, 1):
-            if '"thread_name_updated"' not in line:
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if item.get("type") != "event_msg":
-                continue
-            payload = item.get("payload") or {}
-            if payload.get("type") != "thread_name_updated":
-                continue
-            payload_thread_id = str(payload.get("thread_id") or "").strip()
-            if payload_thread_id and payload_thread_id != thread_id:
-                continue
-            thread_name = str(payload.get("thread_name") or "").strip()
-            if not thread_name:
-                continue
-            result = {
-                "rolloutTitle": thread_name,
-                "rolloutTitleTimestamp": str(item.get("timestamp") or ""),
-                "rolloutTitleLine": line_number,
-            }
+def _open_rollout_daily_token_persistent_cache() -> sqlite3.Connection:
+    database_path = rollout_daily_token_persistent_cache_path()
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database_path, timeout=5.0)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rollout_daily_tokens (
+            rollout_path TEXT PRIMARY KEY,
+            file_size INTEGER NOT NULL,
+            file_mtime_ns INTEGER NOT NULL,
+            result_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    return connection
 
-    rollout_title_cache[cache_key] = (stat.st_size, stat.st_mtime_ns, dict(result))
-    return result
+
+def read_rollout_daily_token_persistent_cache(
+    normalized_path: str,
+    file_size: int,
+    file_mtime_ns: int,
+) -> dict[str, Any] | None:
+    try:
+        with rollout_daily_token_persistent_cache_lock, closing(_open_rollout_daily_token_persistent_cache()) as connection:
+            row = connection.execute(
+                "SELECT file_size, file_mtime_ns, result_json FROM rollout_daily_tokens WHERE rollout_path = ?",
+                (normalized_path,),
+            ).fetchone()
+        if not row or int(row[0]) != int(file_size) or int(row[1]) != int(file_mtime_ns):
+            return None
+        result = json.loads(str(row[2]))
+        if not isinstance(result, dict) or not isinstance(result.get("summary"), dict) or not isinstance(result.get("days"), list):
+            return None
+        return result
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def write_rollout_daily_token_persistent_cache(
+    normalized_path: str,
+    file_size: int,
+    file_mtime_ns: int,
+    result: dict[str, Any],
+) -> None:
+    try:
+        result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        with rollout_daily_token_persistent_cache_lock, closing(_open_rollout_daily_token_persistent_cache()) as connection:
+            connection.execute(
+                """
+                INSERT INTO rollout_daily_tokens (rollout_path, file_size, file_mtime_ns, result_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(rollout_path) DO UPDATE SET
+                    file_size = excluded.file_size,
+                    file_mtime_ns = excluded.file_mtime_ns,
+                    result_json = excluded.result_json,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized_path, int(file_size), int(file_mtime_ns), result_json, int(time.time())),
+            )
+            connection.commit()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return
 
 
 def sidebar_rank_by_thread_id(
@@ -658,17 +808,21 @@ def parse_source_metadata(source_text: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def thread_kind_metadata(row: dict[str, Any], spawn_edge: dict[str, str] | None) -> dict[str, Any]:
+def thread_kind_metadata(
+    row: dict[str, Any],
+    spawn_edge: dict[str, str] | None,
+    is_spawn_parent: bool = False,
+) -> dict[str, Any]:
     source_metadata = parse_source_metadata(row.get("source"))
     subagent_spawn = source_metadata.get("subagent", {}).get("thread_spawn", {})
     if not isinstance(subagent_spawn, dict):
         subagent_spawn = {}
     thread_source = str(row.get("thread_source") or "")
-    is_subagent = bool(
-        thread_source == "subagent"
-        or spawn_edge
-        or source_metadata.get("subagent")
-    )
+    has_parent_evidence = bool(spawn_edge or source_metadata.get("subagent"))
+    # Recent Codex builds can leave thread_source='subagent' on a user-owned
+    # parent thread. A real child relationship is authoritative; a bare marker
+    # must not hide a thread that is itself the parent of spawned work.
+    is_subagent = bool(has_parent_evidence or (thread_source == "subagent" and not is_spawn_parent))
     return {
         "threadKind": "subagent" if is_subagent else "main",
         "threadSource": thread_source or str(row.get("source") or ""),
@@ -821,18 +975,113 @@ def pinned_project_paths_from_state(global_state: dict[str, Any]) -> list[str]:
     return [normalize_path_text(project_path) for project_path in (project_paths or [])]
 
 
-def saved_project_paths_from_state(global_state: dict[str, Any]) -> list[str]:
+def state_value(global_state: dict[str, Any], key: str, fallback: Any) -> Any:
+    value = global_state.get(key)
+    if value is None:
+        value = global_state.get("electron-persisted-atom-state", {}).get(key)
+    return fallback if value is None else value
+
+
+def legacy_saved_project_paths_from_state(global_state: dict[str, Any]) -> list[str]:
     project_paths = global_state.get("electron-saved-workspace-roots")
     if project_paths is None:
         project_paths = global_state.get("electron-persisted-atom-state", {}).get("electron-saved-workspace-roots")
     return [normalize_path_text(project_path) for project_path in (project_paths or [])]
 
 
-def state_value(global_state: dict[str, Any], key: str, fallback: Any) -> Any:
-    value = global_state.get(key)
-    if value is None:
-        value = global_state.get("electron-persisted-atom-state", {}).get(key)
-    return fallback if value is None else value
+def local_project_records_from_state(global_state: dict[str, Any]) -> list[dict[str, Any]]:
+    local_projects = state_value(global_state, "local-projects", {}) or {}
+    if not isinstance(local_projects, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    for project_id, project_value in local_projects.items():
+        if not isinstance(project_value, dict):
+            continue
+        root_paths = project_value.get("rootPaths") or []
+        if not isinstance(root_paths, list):
+            continue
+        normalized_roots: list[str] = []
+        seen_roots: set[str] = set()
+        for root_path in root_paths:
+            normalized_path = normalize_path_text(root_path)
+            comparable_path = comparable_path_text(normalized_path)
+            if not normalized_path or comparable_path in seen_roots:
+                continue
+            seen_roots.add(comparable_path)
+            normalized_roots.append(normalized_path)
+        if normalized_roots:
+            result.append({
+                "projectId": str(project_id),
+                "label": str(project_value.get("name") or "").strip(),
+                "canonicalPath": normalized_roots[0],
+                "rootPaths": normalized_roots,
+            })
+    return result
+
+
+def local_project_paths_from_state(global_state: dict[str, Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for project in local_project_records_from_state(global_state):
+        canonical_path = str(project["canonicalPath"])
+        comparable_path = comparable_path_text(canonical_path)
+        if comparable_path not in seen:
+            seen.add(comparable_path)
+            result.append(canonical_path)
+    return result
+
+
+def saved_project_paths_from_state(global_state: dict[str, Any]) -> list[str]:
+    current_project_paths = local_project_paths_from_state(global_state)
+    if current_project_paths:
+        return current_project_paths
+    return legacy_saved_project_paths_from_state(global_state)
+
+
+def project_path_aliases_from_state(global_state: dict[str, Any]) -> dict[str, str]:
+    project_records = local_project_records_from_state(global_state)
+    if not project_records:
+        return {}
+    current_project_paths = local_project_paths_from_state(global_state)
+    legacy_project_paths = legacy_saved_project_paths_from_state(global_state)
+    current_comparables = {comparable_path_text(path_text) for path_text in current_project_paths}
+    project_labels = project_labels_from_state(global_state)
+    current_paths_by_identity: dict[str, set[str]] = {}
+    for current_path in current_project_paths:
+        current_comparable = comparable_path_text(current_path)
+        identities = {
+            path_label(current_path).strip().casefold(),
+            str(project_labels.get(current_comparable) or "").strip().casefold(),
+        }
+        for identity in identities - {""}:
+            current_paths_by_identity.setdefault(identity, set()).add(current_path)
+
+    aliases: dict[str, str] = {}
+    secondary_candidates: dict[str, set[str]] = {}
+    for project in project_records:
+        canonical_path = str(project["canonicalPath"])
+        for secondary_path in project["rootPaths"][1:]:
+            secondary_comparable = comparable_path_text(secondary_path)
+            if secondary_comparable not in current_comparables:
+                secondary_candidates.setdefault(secondary_comparable, set()).add(canonical_path)
+    for secondary_comparable, candidates in secondary_candidates.items():
+        if len(candidates) == 1:
+            aliases[secondary_comparable] = next(iter(candidates))
+
+    for legacy_path in legacy_project_paths:
+        legacy_comparable = comparable_path_text(legacy_path)
+        if not legacy_path or legacy_comparable in current_comparables:
+            continue
+        identities = {
+            path_label(legacy_path).strip().casefold(),
+            str(project_labels.get(legacy_comparable) or "").strip().casefold(),
+        }
+        candidates: set[str] = set()
+        for identity in identities - {""}:
+            candidates.update(current_paths_by_identity.get(identity, set()))
+        if len(candidates) == 1:
+            aliases[legacy_comparable] = next(iter(candidates))
+    return aliases
 
 
 def projectless_thread_ids_from_state(global_state: dict[str, Any]) -> set[str]:
@@ -844,6 +1093,71 @@ def thread_workspace_root_hints_from_state(global_state: dict[str, Any]) -> dict
     if not isinstance(hints, dict):
         return {}
     return {str(thread_id): normalize_path_text(str(path_text)) for thread_id, path_text in hints.items()}
+
+
+def thread_project_assignments_from_state(global_state: dict[str, Any]) -> dict[str, dict[str, str]]:
+    assignments = state_value(global_state, "thread-project-assignments", {}) or {}
+    local_projects = state_value(global_state, "local-projects", {}) or {}
+    if not isinstance(assignments, dict):
+        return {}
+    if not isinstance(local_projects, dict):
+        local_projects = {}
+
+    result: dict[str, dict[str, str]] = {}
+    for thread_id, assignment_value in assignments.items():
+        if not isinstance(assignment_value, dict):
+            continue
+        project_id = str(assignment_value.get("projectId") or "")
+        project_value = local_projects.get(project_id, {}) if project_id else {}
+        if not isinstance(project_value, dict):
+            project_value = {}
+        root_paths = project_value.get("rootPaths") or []
+        first_root_path = next(
+            (
+                normalize_path_text(root_path)
+                for root_path in root_paths
+                if normalize_path_text(root_path)
+            ),
+            "",
+        ) if isinstance(root_paths, list) else ""
+        path_text = normalize_path_text(
+            first_root_path
+            or assignment_value.get("path")
+            or assignment_value.get("cwd")
+        )
+        if not path_text:
+            continue
+        result[str(thread_id)] = {
+            "path": path_text,
+            "projectId": project_id,
+            "label": str(project_value.get("name") or "").strip(),
+            "projectKind": str(assignment_value.get("projectKind") or ""),
+        }
+    return result
+
+
+def inherit_thread_project_assignments(
+    assignments: dict[str, dict[str, str]],
+    spawn_edges: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    result = dict(assignments)
+
+    def resolve(thread_id: str, visiting: set[str]) -> dict[str, str] | None:
+        if thread_id in result:
+            return result[thread_id]
+        if thread_id in visiting:
+            return None
+        parent_thread_id = str((spawn_edges.get(thread_id) or {}).get("parentThreadId") or "")
+        if not parent_thread_id:
+            return None
+        inherited = resolve(parent_thread_id, visiting | {thread_id})
+        if inherited is not None:
+            result[thread_id] = inherited
+        return inherited
+
+    for child_thread_id in spawn_edges:
+        resolve(str(child_thread_id), set())
+    return result
 
 
 def explicit_sidebar_thread_ids_from_state(global_state: dict[str, Any]) -> set[str]:
@@ -913,6 +1227,40 @@ def project_display_label(project_path: str, project_kind: str, project_labels: 
     return path_label(project_path)
 
 
+def thread_project_metadata(
+    row: dict[str, Any],
+    thread_project_assignments: dict[str, dict[str, str]],
+    project_path_aliases: dict[str, str],
+    saved_project_comparables: set[str],
+    conversation_roots: set[str],
+    projectless_thread_ids: set[str],
+    project_labels: dict[str, str],
+) -> dict[str, str]:
+    thread_id = str(row["id"])
+    working_directory = normalize_path_text(row.get("cwd"))
+    assignment = thread_project_assignments.get(thread_id, {})
+    project_path = normalize_path_text(assignment.get("path")) or working_directory
+    project_path = project_path_aliases.get(comparable_path_text(project_path), project_path)
+    project_kind = classify_project_kind(
+        project_path=project_path,
+        saved_project_comparables=saved_project_comparables,
+        conversation_roots=conversation_roots,
+        is_projectless_thread=thread_id in projectless_thread_ids,
+    )
+    project_label = str(assignment.get("label") or "").strip() or project_display_label(
+        project_path,
+        project_kind,
+        project_labels,
+    )
+    return {
+        "projectPath": project_path,
+        "projectLabel": project_label,
+        "projectKind": project_kind,
+        "projectId": str(assignment.get("projectId") or ""),
+        "workingDirectory": working_directory,
+    }
+
+
 def row_has_user_signal(row: dict[str, Any], sidebar_entry: dict[str, str] | None = None) -> bool:
     if bool(row.get("has_user_event")):
         return True
@@ -936,6 +1284,10 @@ def project_labels_from_state(global_state: dict[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     for path_text, label in (labels or {}).items():
         result[comparable_path_text(path_text)] = str(label)
+    for project in local_project_records_from_state(global_state):
+        label = str(project["label"])
+        if label:
+            result[comparable_path_text(project["canonicalPath"])] = label
     return result
 
 
@@ -981,8 +1333,6 @@ def classify_thread(
         reasons.append("missing_rollout_file")
     if rollout_in_archived_store:
         reasons.append("rollout_in_archived_sessions")
-    if rollout_display_status in {"missing_visible_event_stream", "sparse_visible_event_stream"}:
-        reasons.append(rollout_display_status)
     if thread_kind == "subagent":
         reasons.append("subagent_child_thread")
     if has_thread_list_rank and thread_list_rank and thread_list_rank > sidebar_limit:
@@ -1024,8 +1374,6 @@ def classify_thread(
         return "needs_user_event_repair", reasons, False
     if active_main and is_manager_hidden:
         return "hidden", reasons, False
-    if active_main and rollout_display_status in {"missing_visible_event_stream", "sparse_visible_event_stream"}:
-        return "needs_user_event_repair", reasons, False
     if active_main and has_user_signal and not has_native_first_user_message:
         return "needs_user_event_repair", reasons, False
     if sidebar_visible:
@@ -1058,8 +1406,10 @@ def build_snapshot(
     saved_project_paths = saved_project_paths_from_state(global_state)
     saved_project_comparables = {comparable_path_text(path) for path in saved_project_paths}
     project_labels = project_labels_from_state(global_state)
+    project_path_aliases = project_path_aliases_from_state(global_state)
     projectless_thread_ids = projectless_thread_ids_from_state(global_state)
     thread_workspace_hints = thread_workspace_root_hints_from_state(global_state)
+    thread_project_assignments = thread_project_assignments_from_state(global_state)
     conversation_roots = conversation_root_candidates(thread_workspace_hints)
 
     rows = fetch_thread_rows(paths)
@@ -1073,8 +1423,18 @@ def build_snapshot(
             "sessionIndexLine": record["sessionIndexLine"],
         }
     spawn_edges = fetch_thread_spawn_edges(paths)
+    thread_project_assignments = inherit_thread_project_assignments(thread_project_assignments, spawn_edges)
+    spawn_parent_thread_ids = {
+        str(edge.get("parentThreadId") or "")
+        for edge in spawn_edges.values()
+        if edge.get("parentThreadId")
+    }
     kind_by_thread_id = {
-        str(row["id"]): thread_kind_metadata(row, spawn_edges.get(str(row["id"])))
+        str(row["id"]): thread_kind_metadata(
+            row,
+            spawn_edges.get(str(row["id"])),
+            is_spawn_parent=str(row["id"]) in spawn_parent_thread_ids,
+        )
         for row in rows
     }
     rollout_stats_by_thread_id = {
@@ -1119,15 +1479,19 @@ def build_snapshot(
 
     for row in rows:
         thread_id = str(row["id"])
-        project_path = normalize_path_text(row.get("cwd"))
-        comparable_project_path = comparable_path_text(project_path)
-        project_kind = classify_project_kind(
-            project_path=project_path,
-            saved_project_comparables=saved_project_comparables,
-            conversation_roots=conversation_roots,
-            is_projectless_thread=thread_id in projectless_thread_ids,
+        project_metadata = thread_project_metadata(
+            row,
+            thread_project_assignments,
+            project_path_aliases,
+            saved_project_comparables,
+            conversation_roots,
+            projectless_thread_ids,
+            project_labels,
         )
-        label = project_display_label(project_path, project_kind, project_labels)
+        project_path = project_metadata["projectPath"]
+        comparable_project_path = comparable_path_text(project_path)
+        project_kind = project_metadata["projectKind"]
+        label = project_metadata["projectLabel"]
         rollout_stat = rollout_stats_by_thread_id[thread_id]
         rollout_in_archived_store = is_archived_rollout_path(paths, rollout_stat["path"])
         session_index_rank = session_rank_by_thread_id.get(thread_id)
@@ -1141,23 +1505,17 @@ def build_snapshot(
         kind_metadata = kind_by_thread_id[thread_id]
         sidebar_entry = session_index_entries.get(thread_id, {})
         sqlite_title = row.get("title") or "(untitled)"
+        sqlite_name_supported = "name" in row
+        sqlite_name = str(row.get("name") or "").strip()
         session_index_title = sidebar_entry.get("sidebarTitle") or ""
-        should_resolve_rollout_title = (
-            project_kind == "conversation"
-            and kind_metadata["threadKind"] == "main"
-            and (
-                thread_id in pinned_thread_ids
-                or thread_id in explicit_sidebar_thread_ids
-                or bool(main_thread_list_rank is not None and main_thread_list_rank <= sidebar_limit)
-            )
-        )
-        rollout_title_entry = (
-            read_rollout_thread_title_update(row.get("rollout_path"), thread_id)
-            if should_resolve_rollout_title
-            else {"rolloutTitle": "", "rolloutTitleTimestamp": "", "rolloutTitleLine": None}
-        )
+        # Initial catalog reads must stay metadata-only. Rollout content belongs to
+        # explicit detail/diagnostic paths because one thread can be several GiB.
+        rollout_title_entry = {"rolloutTitle": "", "rolloutTitleTimestamp": "", "rolloutTitleLine": None}
         rollout_title = str(rollout_title_entry.get("rolloutTitle") or "")
-        sidebar_title = rollout_title or session_index_title
+        # Current Codex exposes threads.name as the official task title and
+        # falls back to threads.title (the first prompt) when name is empty.
+        # session_index.jsonl is legacy recovery evidence, not the live title.
+        sidebar_title = rollout_title or sqlite_name
         display_title = sidebar_title or sqlite_title
         has_user_signal = row_has_user_signal(row, sidebar_entry)
         active_main_candidate = kind_metadata["threadKind"] == "main" and not bool(row.get("archived")) and bool(rollout_stat["exists"])
@@ -1248,6 +1606,8 @@ def build_snapshot(
                 "id": str(row["id"]),
                 "title": display_title,
                 "sqliteTitle": sqlite_title,
+                "sqliteName": sqlite_name,
+                "sqliteNameSupported": sqlite_name_supported,
                 "sidebarTitle": sidebar_title,
                 "sessionIndexTitle": session_index_title,
                 "sessionIndexUpdatedAt": sidebar_entry.get("sessionIndexUpdatedAt") or "",
@@ -1258,6 +1618,8 @@ def build_snapshot(
                 "projectPath": project_path,
                 "projectLabel": label,
                 "projectKind": project_kind,
+                "projectId": project_metadata["projectId"],
+                "workingDirectory": project_metadata["workingDirectory"],
                 "rolloutPath": rollout_stat["path"],
                 "source": row.get("source") or "",
                 **kind_metadata,
@@ -1425,6 +1787,44 @@ def snapshot_catalog_fingerprint(paths: CodexPaths) -> tuple[tuple[str, int, int
     return tuple(fingerprint)
 
 
+def publish_snapshot_catalog(
+    cache_key: tuple[str, int, bool],
+    fingerprint: tuple[tuple[str, int, int], ...],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot["catalogVersion"] = hashlib.sha256(
+        json.dumps(fingerprint, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    with snapshot_catalog_cache_lock:
+        snapshot_catalog_cache[cache_key] = (time.monotonic(), fingerprint, snapshot)
+    return snapshot
+
+
+def complete_snapshot_catalog_build(cache_key: tuple[str, int, bool], inflight: threading.Event) -> None:
+    with snapshot_catalog_cache_lock:
+        if snapshot_catalog_inflight.get(cache_key) is inflight:
+            snapshot_catalog_inflight.pop(cache_key, None)
+            inflight.set()
+
+
+def refresh_snapshot_catalog_in_background(
+    cache_key: tuple[str, int, bool],
+    inflight: threading.Event,
+    fingerprint: tuple[tuple[str, int, int], ...],
+    codex_home_text: str | None,
+    sidebar_limit: int,
+    validate_rollout_display: bool,
+) -> None:
+    try:
+        snapshot = build_snapshot(codex_home_text, sidebar_limit, validate_rollout_display)
+        publish_snapshot_catalog(cache_key, fingerprint, snapshot)
+    except (OSError, sqlite3.DatabaseError, ValueError):
+        # A stale catalog is still usable. The next request retries the refresh.
+        pass
+    finally:
+        complete_snapshot_catalog_build(cache_key, inflight)
+
+
 def build_snapshot_catalog(
     codex_home_text: str | None = None,
     sidebar_limit: int = 50,
@@ -1433,23 +1833,67 @@ def build_snapshot_catalog(
 ) -> dict[str, Any]:
     paths = resolve_codex_paths(codex_home_text)
     cache_key = (str(paths.codex_home_path).casefold(), sidebar_limit, validate_rollout_display)
-    fingerprint = snapshot_catalog_fingerprint(paths)
-    with snapshot_catalog_cache_lock:
-        cached = snapshot_catalog_cache.get(cache_key)
-        if not force_refresh and cached and cached[0] == fingerprint:
-            return cached[1]
-    snapshot = build_snapshot(codex_home_text, sidebar_limit, validate_rollout_display)
-    snapshot["catalogVersion"] = hashlib.sha256(
-        json.dumps(fingerprint, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:24]
-    with snapshot_catalog_cache_lock:
-        snapshot_catalog_cache[cache_key] = (fingerprint, snapshot)
-    return snapshot
+    while True:
+        fingerprint = snapshot_catalog_fingerprint(paths)
+        now = time.monotonic()
+        with snapshot_catalog_cache_lock:
+            cached = snapshot_catalog_cache.get(cache_key)
+            if not force_refresh and cached and (
+                cached[1] == fingerprint
+                or now - cached[0] <= snapshot_catalog_cache_grace_seconds
+            ):
+                return cached[2]
+            inflight = snapshot_catalog_inflight.get(cache_key)
+            if not force_refresh and cached:
+                if inflight is None:
+                    inflight = threading.Event()
+                    snapshot_catalog_inflight[cache_key] = inflight
+                    threading.Thread(
+                        target=refresh_snapshot_catalog_in_background,
+                        args=(
+                            cache_key,
+                            inflight,
+                            fingerprint,
+                            codex_home_text,
+                            sidebar_limit,
+                            validate_rollout_display,
+                        ),
+                        name="codex-home-manager-thread-catalog-refresh",
+                        daemon=True,
+                    ).start()
+                return cached[2]
+            if inflight is None:
+                inflight = threading.Event()
+                snapshot_catalog_inflight[cache_key] = inflight
+                break
+        inflight.wait()
+        force_refresh = False
+
+    try:
+        snapshot = build_snapshot(codex_home_text, sidebar_limit, validate_rollout_display)
+        return publish_snapshot_catalog(cache_key, fingerprint, snapshot)
+    finally:
+        complete_snapshot_catalog_build(cache_key, inflight)
 
 
 def clear_snapshot_catalog_cache() -> None:
     with snapshot_catalog_cache_lock:
         snapshot_catalog_cache.clear()
+
+
+def snapshot_catalog_for_version(
+    codex_home_text: str | None,
+    sidebar_limit: int,
+    catalog_version: str | None,
+) -> dict[str, Any]:
+    if catalog_version:
+        paths = resolve_codex_paths(codex_home_text)
+        cache_key = (str(paths.codex_home_path).casefold(), sidebar_limit, False)
+        with snapshot_catalog_cache_lock:
+            cached = snapshot_catalog_cache.get(cache_key)
+            if cached and str(cached[2].get("catalogVersion") or "") == catalog_version:
+                return cached[2]
+    return build_snapshot_catalog(codex_home_text, sidebar_limit)
 
 
 def snapshot_thread_matches_status(thread: dict[str, Any], filter_mode: str, thread_kind: str) -> bool:
@@ -1575,12 +2019,17 @@ def query_snapshot_thread_page(
     sort_direction: str = "asc",
     limit: int = 100,
     cursor: str | None = None,
+    catalog_version: str | None = None,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    snapshot = build_snapshot_catalog(
-        codex_home_text=codex_home_text,
-        sidebar_limit=sidebar_limit,
-        force_refresh=force_refresh,
+    snapshot = (
+        build_snapshot_catalog(
+            codex_home_text=codex_home_text,
+            sidebar_limit=sidebar_limit,
+            force_refresh=True,
+        )
+        if force_refresh
+        else snapshot_catalog_for_version(codex_home_text, sidebar_limit, catalog_version)
     )
     normalized_search = search.strip().casefold()
     query_shape = {
@@ -1871,18 +2320,12 @@ def parse_rollout_stats(
             if not line_has_newline:
                 stat_at_end = os.fstat(file.fileno())
                 break
-    response_chat_messages = int(display_result["responseUserMessages"]) + int(display_result["responseAssistantMessages"])
-    visible_chat_messages = int(display_result["visibleUserMessages"]) + int(display_result["visibleAgentMessages"])
-    if response_chat_messages == 0:
-        display_result["status"] = "ok" if int(display_result["visibleUserMessages"]) > 0 else "empty"
-    elif int(display_result["responseUserMessages"]) > 0 and int(display_result["visibleUserMessages"]) == 0:
-        display_result["status"] = "missing_visible_event_stream"
-    elif int(display_result["responseAssistantMessages"]) > 0 and int(display_result["visibleAgentMessages"]) == 0:
-        display_result["status"] = "missing_visible_event_stream"
-    elif response_chat_messages >= 10 and visible_chat_messages < max(2, response_chat_messages // 2):
-        display_result["status"] = "sparse_visible_event_stream"
-    else:
-        display_result["status"] = "ok"
+    legacy_user_messages = int(display_result["visibleUserMessages"])
+    legacy_agent_messages = int(display_result["visibleAgentMessages"])
+    display_result["visibleUserMessages"] = int(display_result["responseUserMessages"]) or legacy_user_messages
+    display_result["visibleAgentMessages"] = int(display_result["responseAssistantMessages"]) or legacy_agent_messages
+    canonical_chat_messages = int(display_result["visibleUserMessages"]) + int(display_result["visibleAgentMessages"])
+    display_result["status"] = "ok" if canonical_chat_messages else "empty"
 
     daily_days = sorted(daily_records.values(), key=lambda record: str(record["date"]))
     daily_result["days"] = daily_days
@@ -1994,10 +2437,18 @@ def parse_rollout_daily_token_usage(rollout_path_text: str) -> dict[str, Any]:
         cached = rollout_daily_token_cache.get(normalized_path)
         if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
             return copy.deepcopy(cached[2])
-        parse_rollout_stats(normalized_path)
-        cached = rollout_daily_token_cache.get(normalized_path)
-        if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
-            return copy.deepcopy(cached[2])
+        persistent_cached = read_rollout_daily_token_persistent_cache(
+            normalized_path,
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+        if persistent_cached is not None:
+            rollout_daily_token_cache[normalized_path] = (
+                stat.st_size,
+                stat.st_mtime_ns,
+                copy.deepcopy(persistent_cached),
+            )
+            return copy.deepcopy(persistent_cached)
     result = {
         "summary": {
             "tokens": 0,
@@ -2079,6 +2530,7 @@ def parse_rollout_daily_token_usage(rollout_path_text: str) -> dict[str, Any]:
         result["summary"]["peakTokens"] = int(peak_record["tokens"])
     stat = path.stat()
     rollout_daily_token_cache[normalized_path] = (stat.st_size, stat.st_mtime_ns, copy.deepcopy(result))
+    write_rollout_daily_token_persistent_cache(normalized_path, stat.st_size, stat.st_mtime_ns, result)
     return result
 
 
@@ -2376,8 +2828,7 @@ def is_internal_context_prompt(text: str) -> bool:
         or prefix.startswith("<environment_context>")
         or prefix.startswith("<turn_aborted>")
         or prefix.startswith("<user_interruption>")
-        or "<environment_context>" in prefix
-        or "<permissions instructions>" in prefix
+        or prefix.startswith("<permissions instructions>")
     )
 
 
@@ -2407,7 +2858,8 @@ def pure_user_text_from_prompt(text: str) -> str:
     ):
         return ""
     cleaned_text = remove_embedded_image_blocks(text)
-    marker_match = re.search(r"(?im)^##\s*My request for Codex:\s*$", cleaned_text)
+    cleaned_text = re.sub(r"^<in-app-browser-context(?:\s[^>]*)?>.*?</in-app-browser-context>\s*", "", cleaned_text, flags=re.IGNORECASE | re.DOTALL)
+    marker_match = re.search(r"(?im)^##\s*My request(?:\s+for\s+Codex)?:\s*$", cleaned_text)
     if marker_match:
         return remove_embedded_image_blocks(cleaned_text[marker_match.end() :]).strip()
     if cleaned_text.lstrip().startswith("# In app browser:") or cleaned_text.lstrip().startswith("# Files mentioned by the user:"):
@@ -2475,7 +2927,7 @@ def classify_prompt_record(text: str) -> dict[str, Any]:
             "hasPureText": bool(pure_text),
             **truncation_fields,
         }
-    if prefix.startswith("# In app browser:"):
+    if prefix.startswith("# In app browser:") or re.match(r"<in-app-browser-context(?:\s|>)", prefix, re.IGNORECASE):
         return {
             "sourceType": "browser",
             "sourceLabel": "浏览器上下文",
@@ -2604,18 +3056,12 @@ def rollout_display_integrity(rollout_path_text: str) -> dict[str, Any]:
                 if assistant_text:
                     result["responseAssistantMessages"] += 1
 
-    response_chat_messages = int(result["responseUserMessages"]) + int(result["responseAssistantMessages"])
-    visible_chat_messages = int(result["visibleUserMessages"]) + int(result["visibleAgentMessages"])
-    if response_chat_messages == 0:
-        result["status"] = "ok" if int(result["visibleUserMessages"]) > 0 else "empty"
-    elif int(result["responseUserMessages"]) > 0 and int(result["visibleUserMessages"]) == 0:
-        result["status"] = "missing_visible_event_stream"
-    elif int(result["responseAssistantMessages"]) > 0 and int(result["visibleAgentMessages"]) == 0:
-        result["status"] = "missing_visible_event_stream"
-    elif response_chat_messages >= 10 and visible_chat_messages < max(2, response_chat_messages // 2):
-        result["status"] = "sparse_visible_event_stream"
-    else:
-        result["status"] = "ok"
+    legacy_user_messages = int(result["visibleUserMessages"])
+    legacy_agent_messages = int(result["visibleAgentMessages"])
+    result["visibleUserMessages"] = int(result["responseUserMessages"]) or legacy_user_messages
+    result["visibleAgentMessages"] = int(result["responseAssistantMessages"]) or legacy_agent_messages
+    canonical_chat_messages = int(result["visibleUserMessages"]) + int(result["visibleAgentMessages"])
+    result["status"] = "ok" if canonical_chat_messages else "empty"
     stat = path.stat()
     rollout_display_cache[normalized_path] = (stat.st_size, stat.st_mtime_ns, copy.deepcopy(result))
     return result
@@ -3261,7 +3707,7 @@ def read_thread_logs(
     }
 
 
-timeline_default_kinds = {"user", "commentary", "assistant"}
+timeline_default_kinds = {"user", "commentary", "assistant", "assistant_unclassified"}
 timeline_allowed_kinds = timeline_default_kinds | {"reasoning", "tool_call", "tool_output", "developer", "system", "context", "status", "tool", "all"}
 
 
@@ -3413,6 +3859,8 @@ def timeline_text_from_value(value: Any) -> str:
         placeholder = timeline_attachment_placeholder(value)
         if placeholder:
             return placeholder
+        if value.get("type") in {"summary_text", "reasoning_text"}:
+            return timeline_text_from_value(value.get("text"))
         for key in ("text", "message", "output", "content", "summary", "arguments", "input", "result"):
             if key in value:
                 text = timeline_text_from_value(value.get(key))
@@ -3424,6 +3872,24 @@ def timeline_text_from_value(value: Any) -> str:
     return str(value)
 
 
+def incoming_delegation_text(item: dict[str, Any]) -> str | None:
+    payload = item.get("payload")
+    if item.get("type") != "response_item" or not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "function_call_output" or payload.get("namespace") != "codex_app" or payload.get("name") != "send_message_to_thread":
+        return None
+    output = payload.get("output")
+    return output if isinstance(output, str) and re.match(r"\s*<codex_delegation(?:\s|>)", output, re.IGNORECASE) else None
+
+
+def timeline_assistant_stage(phase: str) -> tuple[str, str]:
+    if phase == "commentary":
+        return "commentary", "进度说明"
+    if phase in {"final", "final_answer"}:
+        return "assistant", "最终回复"
+    return "assistant_unclassified", "助手消息（阶段未标注）"
+
+
 def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str, Any] | None:
     item_type = str(item.get("type") or "")
     raw_payload = item.get("payload")
@@ -3433,8 +3899,9 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
     timestamp = item.get("timestamp")
     event: dict[str, Any] | None = None
 
-    if item_type == "user_message":
-        text = timeline_text_from_value(raw_payload)
+    delegation = incoming_delegation_text(item)
+    if item_type == "user_message" or delegation is not None:
+        text = delegation if delegation is not None else timeline_text_from_value(raw_payload)
         classification = classify_prompt_record(text)
         prompt_source_type = str(classification.get("sourceType") or "user")
         event = {
@@ -3442,6 +3909,10 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
             "label": str(classification.get("sourceLabel") or "用户"),
             "text": text,
             "promptSourceType": prompt_source_type,
+            "pureText": str(classification.get("pureText") or ""),
+            "pureCharacterCount": int(classification.get("pureCharacterCount") or 0),
+            "pureTextTruncated": bool(classification.get("pureTextTruncated")),
+            "hasPureText": bool(classification.get("hasPureText")),
         }
     elif item_type == "turn_context":
         event = {"kind": "context", "label": "轮次上下文", "text": timeline_text_from_value(payload)}
@@ -3458,12 +3929,17 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
                 "label": str(classification.get("sourceLabel") or "用户"),
                 "text": text,
                 "promptSourceType": prompt_source_type,
+                "pureText": str(classification.get("pureText") or ""),
+                "pureCharacterCount": int(classification.get("pureCharacterCount") or 0),
+                "pureTextTruncated": bool(classification.get("pureTextTruncated")),
+                "hasPureText": bool(classification.get("hasPureText")),
             }
         elif payload_type == "agent_message":
             phase = str(payload.get("phase") or "")
+            kind, label = timeline_assistant_stage(phase)
             event = {
-                "kind": "commentary" if phase == "commentary" else "assistant",
-                "label": "思考过程" if phase == "commentary" else "最终回复",
+                "kind": kind,
+                "label": label,
                 "text": timeline_text_from_value(payload.get("message")),
                 "phase": phase,
             }
@@ -3497,17 +3973,22 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
             prompt_source_type = str((classification or {}).get("sourceType") or "user")
             phase = str(payload.get("phase") or "")
             display_role = "context" if role == "user" and prompt_source_type not in {"user", "attachment", "browser"} else role
-            if role == "assistant" and phase == "commentary":
-                display_role = "commentary"
+            assistant_kind, assistant_label = timeline_assistant_stage(phase)
+            if role == "assistant":
+                display_role = assistant_kind
             event = {
                 "kind": display_role,
-                "label": str((classification or {}).get("sourceLabel") or ({"user": "用户", "assistant": "思考过程" if phase == "commentary" else "最终回复", "developer": "开发者上下文", "system": "系统上下文"}[role])),
+                "label": str((classification or {}).get("sourceLabel") or ({"user": "用户", "assistant": assistant_label, "developer": "开发者上下文", "system": "系统上下文"}[role])),
                 "text": text,
                 "phase": phase,
                 "promptSourceType": prompt_source_type if role == "user" else "",
+                "pureText": str((classification or {}).get("pureText") or ""),
+                "pureCharacterCount": int((classification or {}).get("pureCharacterCount") or 0),
+                "pureTextTruncated": bool((classification or {}).get("pureTextTruncated")),
+                "hasPureText": bool((classification or {}).get("hasPureText")),
             }
         elif payload_type == "reasoning":
-            readable_text = timeline_text_from_value(payload.get("summary") or payload.get("content"))
+            readable_text = timeline_text_from_value(payload.get("summary")) or timeline_text_from_value(payload.get("content"))
             has_encrypted_content = bool(payload.get("encrypted_content"))
             encrypted = has_encrypted_content and not readable_text
             event = {
@@ -3556,6 +4037,10 @@ def timeline_event_from_item(item: dict[str, Any], byte_offset: int) -> dict[str
     event.setdefault("encrypted", False)
     event.setdefault("hasEncryptedContent", bool(event.get("encrypted")))
     event.setdefault("promptSourceType", "")
+    event.setdefault("pureText", "")
+    event.setdefault("pureCharacterCount", 0)
+    event.setdefault("pureTextTruncated", False)
+    event.setdefault("hasPureText", False)
     return event
 
 
@@ -3583,6 +4068,7 @@ def iter_jsonl_lines_reverse(
     direct_line_bytes: int = 8 * 1024 * 1024,
     max_line_bytes: int = 64 * 1024 * 1024,
     normalized_search_marker: str | None = None,
+    candidate_check: Callable[[bytes], bool] | None = None,
 ):
     file_size = path.stat().st_size
     position = file_size if before_byte is None else max(0, min(int(before_byte), file_size))
@@ -3598,7 +4084,9 @@ def iter_jsonl_lines_reverse(
 
         def materialize_line(line_start: int, line_end: int, line_bytes: bytes) -> str | None:
             byte_count = line_end - line_start
-            if byte_count > max_line_bytes:
+            if candidate_check and not candidate_check(line_bytes[:4_096]):
+                return ""
+            if byte_count > max_line_bytes and candidate_check is None:
                 return None
             if normalized_search_marker and not timeline_raw_line_matches_normalized_search(
                 line_bytes,
@@ -3616,6 +4104,22 @@ def iter_jsonl_lines_reverse(
                 return recovered.decode("utf-8", errors="replace")
             return line_bytes.decode("utf-8", errors="replace")
 
+        def recover_oversized_candidate(line_start: int, line_end: int) -> str | None:
+            if not candidate_check:
+                return None
+            file.seek(line_start)
+            record_head = file.read(min(4_096, line_end - line_start))
+            if not candidate_check(record_head):
+                return None
+            recovered = redacted_jsonl_record_bytes(
+                file,
+                line_start,
+                line_end,
+                None,
+                include_truncation_metadata=True,
+            )
+            return recovered.decode("utf-8", errors="replace") if recovered is not None else None
+
         while position > 0:
             block_start = max(0, position - max(4_096, int(block_size)))
             file.seek(block_start)
@@ -3627,7 +4131,7 @@ def iter_jsonl_lines_reverse(
                 if newline_index < 0:
                     continue
                 line_start = block_start + newline_index + 1
-                yield line_start, current_line_end, None
+                yield line_start, current_line_end, recover_oversized_candidate(line_start, current_line_end)
                 current_line_end = block_start + newline_index
                 buffer = block[:newline_index]
                 buffer_start = block_start
@@ -3651,16 +4155,39 @@ def iter_jsonl_lines_reverse(
                 oversized_line = True
 
         if oversized_line:
-            yield 0, current_line_end, None
+            yield 0, current_line_end, recover_oversized_candidate(0, current_line_end)
         elif current_line_end > 0 or buffer:
             yield 0, current_line_end, materialize_line(0, current_line_end, buffer)
 
 
-def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text: str) -> bool:
+def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text: str, source_filter: str = "all") -> bool:
+    normalized_source = (source_filter or "all").strip().lower()
+    if normalized_source not in {"all", "pure", "focused", "with_agents", "automation", "delegation"}:
+        raise ValueError(f"unsupported timeline source filter: {source_filter}")
+    prompt_source = str(event.get("promptSourceType") or "")
+    if normalized_source in {"automation", "delegation"} and prompt_source != normalized_source:
+        return False
+    if normalized_source in {"pure", "focused"} and event.get("kind") in {"user", "context"}:
+        if prompt_source not in {"user", "attachment", "browser"} or not bool(event.get("hasPureText")):
+            return False
+    if normalized_source == "with_agents" and event.get("kind") in {"user", "context"} and prompt_source not in {"user", "attachment", "browser", "subagent"}:
+        return False
     if kind_filter == "all":
         kind_matches = True
     elif kind_filter == "conversation":
-        kind_matches = event["kind"] in timeline_default_kinds
+        kind_matches = event["kind"] in timeline_default_kinds or (
+            event["kind"] == "context" and bool(prompt_source)
+        )
+    elif kind_filter == "user":
+        kind_matches = prompt_source in {
+            "user",
+            "attachment",
+            "browser",
+            "subagent",
+            "automation",
+            "delegation",
+            "goal",
+        }
     elif kind_filter == "tool":
         kind_matches = event["kind"] in {"tool_call", "tool_output"}
     else:
@@ -3670,8 +4197,19 @@ def timeline_event_matches(event: dict[str, Any], kind_filter: str, search_text:
     marker = normalize_search_text(search_text)
     if not marker:
         return True
-    haystack = normalize_search_text(str(event.get("text") or ""))
+    use_pure_text = normalized_source in {"pure", "focused"} and event.get("kind") in {"user", "context"}
+    haystack = normalize_search_text(str(event.get("pureText") if use_pure_text else event.get("text") or ""))
     return marker in haystack
+
+
+def timeline_event_for_source_filter(event: dict[str, Any], source_filter: str) -> dict[str, Any]:
+    if source_filter not in {"pure", "focused"} or event.get("kind") not in {"user", "context"}:
+        return event
+    display_event = dict(event)
+    display_event["text"] = str(event.get("pureText") or "")
+    display_event["characterCount"] = int(event.get("pureCharacterCount") or len(display_event["text"]))
+    display_event["textTruncated"] = bool(event.get("pureTextTruncated"))
+    return display_event
 
 
 def truncate_timeline_event(event: dict[str, Any], content_limit: int) -> dict[str, Any]:
@@ -3717,6 +4255,23 @@ def timeline_event_is_duplicate(
     return False
 
 
+def is_unphased_agent_message_mirror_candidate(event: dict[str, Any]) -> bool:
+    return (
+        str(event.get("sourceType") or "") == "event_msg"
+        and str(event.get("payloadType") or "") == "agent_message"
+        and not str(event.get("phase") or "")
+    )
+
+
+def is_canonical_agent_message_mirror(event: dict[str, Any], pending_event: dict[str, Any]) -> bool:
+    return (
+        str(event.get("sourceType") or "") == "response_item"
+        and str(event.get("payloadType") or "") == "message"
+        and str(event.get("kind") or "") in {"commentary", "assistant", "assistant_unclassified"}
+        and str(event.get("text") or "") == str(pending_event.get("text") or "")
+    )
+
+
 def read_thread_timeline(
     codex_home_text: str | None,
     thread_id: str,
@@ -3724,6 +4279,7 @@ def read_thread_timeline(
     limit: int = 80,
     kind_filter: str = "conversation",
     search_text: str = "",
+    source_filter: str = "all",
     content_limit: int = 120_000,
     scan_record_limit: int = 20_000,
     scan_byte_limit: int = 64 * 1024 * 1024,
@@ -3749,8 +4305,42 @@ def read_thread_timeline(
     scan_limited = False
     skipped_oversized_records = 0
     recovered_oversized_records = 0
+    pending_mirror: tuple[dict[str, Any], int, bool] | None = None
     scan_origin = rollout_path.stat().st_size if before_byte is None else max(0, min(int(before_byte), rollout_path.stat().st_size))
     normalized_search_marker = normalize_search_text(search_text.strip())
+    normalized_source_filter = (source_filter or "all").strip().lower()
+    if normalized_source_filter not in {"all", "pure", "focused", "with_agents", "automation", "delegation"}:
+        raise ValueError(f"unsupported timeline source filter: {source_filter}")
+
+    def append_event(event: dict[str, Any], line_end: int, recovered_text_truncated: bool = False) -> bool:
+        nonlocal has_more, next_before_byte, recovered_oversized_records
+        if not timeline_event_matches(event, normalized_kind, search_text, normalized_source_filter):
+            return True
+        text = str(event.get("text") or "")
+        if not text and event.get("kind") != "reasoning":
+            return True
+        event_kind = str(event["kind"])
+        prior_events = seen_content_by_kind.setdefault(event_kind, [])
+        if timeline_event_is_duplicate(event, prior_events):
+            return True
+        prior_events.append((
+            int(event.get("byteOffset") or 0),
+            text.strip(),
+            str(event.get("sourceType") or ""),
+            int(event.get("timestampMs") or 0),
+        ))
+        if len(prior_events) > 256:
+            del prior_events[:-256]
+        if len(events_newest_first) >= safe_limit:
+            has_more = True
+            next_before_byte = line_end
+            return False
+        event = timeline_event_for_source_filter(event, normalized_source_filter)
+        if recovered_text_truncated:
+            recovered_oversized_records += 1
+            event["textTruncated"] = True
+        events_newest_first.append(truncate_timeline_event(event, safe_content_limit))
+        return True
 
     reverse_line_options: dict[str, Any] = {"before_byte": before_byte}
     if normalized_search_marker:
@@ -3758,14 +4348,19 @@ def read_thread_timeline(
     for byte_offset, line_end, raw_line in iter_jsonl_lines_reverse(rollout_path, **reverse_line_options):
         scanned_records += 1
         scanned_bytes = max(scanned_bytes, scan_origin - byte_offset)
-        if scanned_records > max(100, int(scan_record_limit)) or (
-            scanned_records > 1 and scanned_bytes > max(1_048_576, int(scan_byte_limit))
+        if pending_mirror is None and (
+            scanned_records > max(100, int(scan_record_limit))
+            or (scanned_records > 1 and scanned_bytes > max(1_048_576, int(scan_byte_limit)))
         ):
             has_more = True
             scan_limited = True
             next_before_byte = line_end
             break
         if raw_line is None:
+            if pending_mirror is not None:
+                if not append_event(*pending_mirror):
+                    break
+                pending_mirror = None
             skipped_oversized_records += 1
             placeholder_event = {
                 "id": f"byte-{byte_offset}",
@@ -3784,7 +4379,7 @@ def read_thread_timeline(
                 "hasEncryptedContent": False,
                 "promptSourceType": "",
             }
-            if timeline_event_matches(placeholder_event, normalized_kind, search_text):
+            if timeline_event_matches(placeholder_event, normalized_kind, search_text, normalized_source_filter):
                 if len(events_newest_first) >= safe_limit:
                     has_more = True
                     next_before_byte = line_end
@@ -3792,33 +4387,41 @@ def read_thread_timeline(
                 events_newest_first.append(truncate_timeline_event(placeholder_event, safe_content_limit))
             continue
         if raw_line == "":
+            if pending_mirror is not None:
+                if not append_event(*pending_mirror):
+                    break
+                pending_mirror = None
             continue
-        if line_end - byte_offset > 8 * 1024 * 1024:
-            recovered_oversized_records += 1
+        recovered_text_truncated = line_end - byte_offset > 8 * 1024 * 1024
         try:
             item = json.loads(raw_line)
         except json.JSONDecodeError:
+            if pending_mirror is not None:
+                if not append_event(*pending_mirror):
+                    break
+                pending_mirror = None
             continue
         event = timeline_event_from_item(item, byte_offset)
-        if event is None or not timeline_event_matches(event, normalized_kind, search_text):
+        if pending_mirror is not None:
+            pending_event, _pending_line_end, _pending_truncated = pending_mirror
+            if event is not None and is_canonical_agent_message_mirror(event, pending_event):
+                pending_mirror = None
+                if not append_event(event, line_end, recovered_text_truncated):
+                    break
+                continue
+            if not append_event(*pending_mirror):
+                break
+            pending_mirror = None
+        if event is None:
             continue
-        text = str(event.get("text") or "")
-        if not text and event.get("kind") != "reasoning":
+        if is_unphased_agent_message_mirror_candidate(event):
+            pending_mirror = (event, line_end, recovered_text_truncated)
             continue
-        event_kind = str(event["kind"])
-        prior_events = seen_content_by_kind.setdefault(event_kind, [])
-        if timeline_event_is_duplicate(event, prior_events):
-            continue
-        prior_events.append((byte_offset, text.strip(), str(event.get("sourceType") or ""), int(event.get("timestampMs") or 0)))
-        if len(prior_events) > 256:
-            del prior_events[:-256]
-        if len(events_newest_first) >= safe_limit:
-            has_more = True
-            # The next page starts with this look-ahead event. Protocol
-            # duplicates already skipped on this page remain behind the cursor.
-            next_before_byte = line_end
+        if not append_event(event, line_end, recovered_text_truncated):
             break
-        events_newest_first.append(truncate_timeline_event(event, safe_content_limit))
+
+    if pending_mirror is not None and not has_more:
+        append_event(*pending_mirror)
 
     if events_newest_first and next_before_byte is None:
         next_before_byte = events_newest_first[-1]["byteOffset"]
@@ -3832,6 +4435,7 @@ def read_thread_timeline(
         "nextBeforeByte": next_before_byte if has_more else None,
         "limit": safe_limit,
         "kind": normalized_kind,
+        "sourceFilter": normalized_source_filter,
         "search": search_text,
         "hasMore": has_more,
         "scannedRecords": scanned_records,
@@ -3906,9 +4510,14 @@ def get_thread_action_preview_record(codex_home_text: str | None, thread_id: str
     }
 
 
-def build_thread_detail_record(paths: CodexPaths, row: dict[str, Any], spawn_edge: dict[str, str] | None) -> dict[str, Any]:
+def build_thread_detail_record(
+    paths: CodexPaths,
+    row: dict[str, Any],
+    spawn_edge: dict[str, str] | None,
+    is_spawn_parent: bool = False,
+) -> dict[str, Any]:
     rollout_stat = stat_file(row.get("rollout_path"))
-    kind_metadata = thread_kind_metadata(row, spawn_edge)
+    kind_metadata = thread_kind_metadata(row, spawn_edge, is_spawn_parent=is_spawn_parent)
     archived = bool(row.get("archived"))
     visibility = "subagent" if kind_metadata["threadKind"] == "subagent" else "archived" if archived else "visible" if rollout_stat["exists"] else "missing_file"
     project_path = normalize_path_text(row.get("cwd"))
@@ -3983,14 +4592,57 @@ def get_thread_detail(
     include_daily_token_usage: bool = True,
 ) -> dict[str, Any]:
     paths = resolve_codex_paths(codex_home_text)
+    global_state = read_global_state(paths)
+    saved_project_paths = saved_project_paths_from_state(global_state)
+    saved_project_comparables = {comparable_path_text(path) for path in saved_project_paths}
+    project_labels = project_labels_from_state(global_state)
+    project_path_aliases = project_path_aliases_from_state(global_state)
+    projectless_thread_ids = projectless_thread_ids_from_state(global_state)
+    thread_workspace_hints = thread_workspace_root_hints_from_state(global_state)
+    thread_project_assignments = thread_project_assignments_from_state(global_state)
+    conversation_roots = conversation_root_candidates(thread_workspace_hints)
     rows = fetch_thread_rows(paths)
     spawn_edges = fetch_thread_spawn_edges(paths)
+    thread_project_assignments = inherit_thread_project_assignments(thread_project_assignments, spawn_edges)
+    spawn_parent_thread_ids = {
+        str(edge.get("parentThreadId") or "")
+        for edge in spawn_edges.values()
+        if edge.get("parentThreadId")
+    }
+
+    def build_kind_metadata(current_row: dict[str, Any], spawn_edge: dict[str, str] | None) -> dict[str, Any]:
+        return thread_kind_metadata(
+            current_row,
+            spawn_edge,
+            is_spawn_parent=str(current_row["id"]) in spawn_parent_thread_ids,
+        )
+
+    def build_detail_record(current_row: dict[str, Any], spawn_edge: dict[str, str] | None) -> dict[str, Any]:
+        record = build_thread_detail_record(
+            paths,
+            current_row,
+            spawn_edge,
+            is_spawn_parent=str(current_row["id"]) in spawn_parent_thread_ids,
+        )
+        record.update(
+            thread_project_metadata(
+                current_row,
+                thread_project_assignments,
+                project_path_aliases,
+                saved_project_comparables,
+                conversation_roots,
+                projectless_thread_ids,
+                project_labels,
+            )
+        )
+        return record
+
     thread, descendants, row = assemble_thread_detail_tree(
         thread_id,
         rows,
         spawn_edges,
-        thread_kind_metadata,
-        lambda current_row, spawn_edge: build_thread_detail_record(paths, current_row, spawn_edge),
+        build_kind_metadata,
+        build_detail_record,
     )
     detail = {
         "thread": thread,
@@ -4813,7 +5465,7 @@ def create_action_backup(paths: CodexPaths, thread_id: str, action: str) -> dict
     rollout_backup_path = None
     normalized_rollout_path = normalize_path_text(row_before.get("rollout_path"))
     if normalized_rollout_path and Path(normalized_rollout_path).exists():
-        rollout_backup_path = target_directory / Path(normalized_rollout_path).name
+        rollout_backup_path = target_directory / "rollout.jsonl"
         shutil.copy2(normalized_rollout_path, rollout_backup_path)
     manifest = {
         "backupId": backup_id,
@@ -4961,6 +5613,8 @@ def resolve_thread_title_sync_target(paths: CodexPaths, row: dict[str, Any], tar
     thread_id = str(row["id"])
     sidebar_entry = read_session_index_entries(paths).get(thread_id, {})
     sqlite_title = str(row.get("title") or "").strip()
+    sqlite_name_supported = "name" in row
+    sqlite_name = str(row.get("name") or "").strip()
     sidebar_title = str(sidebar_entry.get("sidebarTitle") or "").strip()
     requested_title = str(target_title or "").strip()
     resolved_title = requested_title or sidebar_title
@@ -4969,10 +5623,13 @@ def resolve_thread_title_sync_target(paths: CodexPaths, row: dict[str, Any], tar
     return {
         "threadId": thread_id,
         "sqliteTitle": sqlite_title,
+        "sqliteName": sqlite_name,
+        "sqliteNameSupported": sqlite_name_supported,
         "sidebarTitle": sidebar_title,
         "targetTitle": resolved_title,
         "usesExplicitTarget": bool(requested_title),
-        "needsUpdate": sqlite_title != resolved_title,
+        "targetColumn": "name" if sqlite_name_supported else "title",
+        "needsUpdate": (sqlite_name if sqlite_name_supported else sqlite_title) != resolved_title,
         "sessionIndexLine": sidebar_entry.get("sessionIndexLine"),
         "sessionIndexUpdatedAt": sidebar_entry.get("sessionIndexUpdatedAt") or "",
     }
@@ -4994,8 +5651,11 @@ def sync_thread_sqlite_title(
     backup_manifest = create_optional_action_backup(paths, thread_id, action="sync_thread_sqlite_title", create_backup=create_backup)
     if title_resolution["needsUpdate"]:
         with closing(connect_database(paths.database_path, readonly=False)) as connection, connection:
+            target_column = str(title_resolution["targetColumn"])
+            if target_column not in {"name", "title"}:
+                raise RuntimeError(f"unsupported thread title target column: {target_column}")
             connection.execute(
-                "UPDATE threads SET title = ? WHERE id = ?",
+                f"UPDATE threads SET {target_column} = ? WHERE id = ?",
                 (title_resolution["targetTitle"], thread_id),
             )
             connection.commit()
@@ -5004,6 +5664,9 @@ def sync_thread_sqlite_title(
         "threadId": thread_id,
         "sqliteTitleBefore": title_resolution["sqliteTitle"],
         "sqliteTitleAfter": str((row_after or {}).get("title") or ""),
+        "sqliteNameBefore": title_resolution["sqliteName"],
+        "sqliteNameAfter": str((row_after or {}).get("name") or ""),
+        "targetColumn": title_resolution["targetColumn"],
         "sidebarTitle": title_resolution["sidebarTitle"],
         "targetTitle": title_resolution["targetTitle"],
         "updated": bool(title_resolution["needsUpdate"]),
@@ -6261,11 +6924,34 @@ prompt_only_candidate_pattern = re.compile(
 )
 
 
+def recent_prompt_candidate_line(raw_line_head: bytes) -> bool:
+    if b'send_message_to_thread' in raw_line_head:
+        return True
+    outer_match = timeline_outer_type_pattern.search(raw_line_head)
+    if outer_match is None:
+        return False
+    outer_type = outer_match.group(1)
+    if outer_type == b"user_message":
+        return True
+    payload_match = timeline_payload_type_pattern.search(raw_line_head)
+    payload_type = payload_match.group(1) if payload_match is not None else b""
+    if outer_type == b"event_msg":
+        return payload_type == b"user_message"
+    return (
+        outer_type == b"response_item"
+        and payload_type == b"message"
+        and re.search(rb'"role"\s*:\s*"user"', raw_line_head) is not None
+    )
+
+
 def prompt_timestamp_ms(timestamp: Any) -> int | None:
     return timestamp_ms_from_iso_text(timestamp) if isinstance(timestamp, str) else None
 
 
 def prompt_text_from_item(item: dict[str, Any]) -> tuple[str, str] | None:
+    delegation = incoming_delegation_text(item)
+    if delegation is not None:
+        return delegation, "response_item"
     item_type = str(item.get("type") or "")
     raw_payload = item.get("payload")
     payload = raw_payload if isinstance(raw_payload, dict) else {}
@@ -6314,6 +7000,8 @@ def timeline_index_is_duplicate(
 def timeline_conversation_candidate_line(raw_line: bytes) -> bool:
     """Identify outer conversation records without matching nested checkpoint history."""
     record_head = raw_line[:4_096]
+    if b'send_message_to_thread' in record_head:
+        return True
     outer_match = timeline_outer_type_pattern.search(record_head)
     if outer_match is None:
         return False
@@ -6344,10 +7032,16 @@ def timeline_conversation_event_from_item(item: dict[str, Any], byte_offset: int
         or (item_type == "event_msg" and payload_type in {"user_message", "agent_message"})
         or (item_type == "response_item" and payload_type == "message" and role in {"user", "assistant"})
     )
-    if not supported:
+    if not supported and incoming_delegation_text(item) is None:
         return None
     event = timeline_event_from_item(item, byte_offset)
-    if event is None or str(event.get("kind") or "") not in timeline_default_kinds:
+    if event is None:
+        return None
+    event_kind = str(event.get("kind") or "")
+    prompt_source_type = str(event.get("promptSourceType") or "")
+    if event_kind not in timeline_default_kinds and not (
+        event_kind == "context" and bool(prompt_source_type)
+    ):
         return None
     return event
 
@@ -6381,6 +7075,253 @@ def ensure_rollout_prompt_index(
         cancel_check=cancel_check,
     )
     return database_path, index_state
+
+
+prompt_index_background_chunk_ms = 750
+prompt_index_background_pause_seconds = 0.025
+_prompt_index_background_lock = threading.Lock()
+_prompt_index_background_jobs: dict[str, threading.Thread] = {}
+
+
+def _prompt_index_background_key(codex_home_path: Path, rollout_path: Path, index_kind: str) -> str:
+    return "|".join(
+        (
+            os.path.normcase(str(codex_home_path.expanduser().resolve(strict=False))),
+            os.path.normcase(str(rollout_path.expanduser().resolve(strict=False))),
+            str(index_kind or "prompts").strip().lower(),
+        )
+    )
+
+
+def schedule_rollout_prompt_index(
+    codex_home_path: Path,
+    rollout_path: Path,
+    *,
+    index_kind: str = "prompts",
+) -> bool:
+    """Advance one derived index in bounded background slices, deduplicated per rollout."""
+    key = _prompt_index_background_key(codex_home_path, rollout_path, index_kind)
+    with _prompt_index_background_lock:
+        current = _prompt_index_background_jobs.get(key)
+        if current is not None and current.is_alive():
+            return False
+
+        def run() -> None:
+            try:
+                while rollout_path.is_file():
+                    _, state = ensure_rollout_prompt_index(
+                        codex_home_path,
+                        rollout_path,
+                        max_scan_ms=prompt_index_background_chunk_ms,
+                        index_kind=index_kind,
+                    )
+                    if state["complete"]:
+                        break
+                    time.sleep(prompt_index_background_pause_seconds)
+            except (OSError, sqlite3.DatabaseError, PromptIndexCancelled):
+                pass
+            finally:
+                with _prompt_index_background_lock:
+                    if _prompt_index_background_jobs.get(key) is threading.current_thread():
+                        _prompt_index_background_jobs.pop(key, None)
+
+        worker = threading.Thread(
+            target=run,
+            name=f"codex-home-manager-prompt-index-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:10]}",
+            daemon=True,
+        )
+        _prompt_index_background_jobs[key] = worker
+        worker.start()
+        return True
+
+
+recent_prompt_cursor_prefix = "recent."
+
+
+def _recent_prompt_fingerprint(text: str) -> str:
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _encode_recent_prompt_cursor(payload: dict[str, Any]) -> str:
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    return recent_prompt_cursor_prefix + encoded
+
+
+def _decode_recent_prompt_cursor(cursor: str | None, query_signature: str, file_size: int) -> dict[str, Any]:
+    if not cursor:
+        return {
+            "beforeByte": file_size,
+            "promptCount": 0,
+            "purePromptCount": 0,
+            "visiblePromptCount": 0,
+            "matchCount": 0,
+            "sourceCounts": {},
+            "recent": [],
+        }
+    if not cursor.startswith(recent_prompt_cursor_prefix):
+        raise ValueError("recent prompt cursor has an unsupported format")
+    encoded = cursor[len(recent_prompt_cursor_prefix) :]
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeError, TypeError, json.JSONDecodeError, base64.binascii.Error) as error:
+        raise ValueError("invalid recent prompt cursor") from error
+    if not isinstance(payload, dict) or payload.get("query") != query_signature:
+        raise ValueError("recent prompt cursor does not match the current filters")
+    return payload
+
+
+def read_recent_thread_prompt_page(
+    rollout_path: Path,
+    *,
+    cursor: str | None,
+    limit: int,
+    scope: str,
+    source_type: str | None,
+    scan_budget_ms: int,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    safe_limit = max(1, min(200, int(limit)))
+    file_size = rollout_path.stat().st_size
+    query_signature = hashlib.sha256(
+        json.dumps(
+            {"scope": scope, "sourceType": source_type or "", "order": "desc"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    state = _decode_recent_prompt_cursor(cursor, query_signature, file_size)
+    before_byte = max(0, min(int(state.get("beforeByte") or file_size), file_size))
+    prompt_count = max(0, int(state.get("promptCount") or 0))
+    pure_prompt_count = max(0, int(state.get("purePromptCount") or 0))
+    visible_prompt_count = max(0, int(state.get("visiblePromptCount") or 0))
+    match_count = max(0, int(state.get("matchCount") or 0))
+    raw_source_counts = state.get("sourceCounts")
+    source_counts = {
+        str(key): max(0, int(value))
+        for key, value in (raw_source_counts.items() if isinstance(raw_source_counts, dict) else [])
+    }
+    recent: list[list[Any]] = []
+    raw_recent = state.get("recent")
+    for item in (raw_recent[-8:] if isinstance(raw_recent, list) else []):
+        if not isinstance(item, list) or len(item) != 3:
+            continue
+        fingerprint, timestamp_ms, protocol = item
+        if not isinstance(fingerprint, str) or not isinstance(protocol, str):
+            continue
+        if timestamp_ms is not None and not isinstance(timestamp_ms, int):
+            continue
+        recent.append([fingerprint, timestamp_ms, protocol])
+    prompts: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    scanned_lines = 0
+    next_before_byte = before_byte
+    reached_start = True
+
+    for byte_offset, _line_end, raw_line in iter_jsonl_lines_reverse(
+        rollout_path,
+        before_byte=before_byte,
+        direct_line_bytes=512 * 1024,
+        max_line_bytes=1024 * 1024,
+        candidate_check=recent_prompt_candidate_line,
+    ):
+        reached_start = False
+        next_before_byte = byte_offset
+        scanned_lines += 1
+        if cancel_check and cancel_check():
+            raise PromptIndexCancelled("prompt indexing was cancelled")
+        if raw_line:
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                item = None
+            candidate = prompt_text_from_item(item) if isinstance(item, dict) else None
+            if candidate is not None:
+                text, protocol = candidate
+                normalized_text = text.strip()
+                timestamp = item.get("timestamp") if isinstance(item, dict) else None
+                timestamp_ms = prompt_timestamp_ms(timestamp)
+                classification = classify_prompt_record(normalized_text)
+                canonical_text = str(classification.get("pureText") or "").strip() or normalized_text
+                fingerprint = _recent_prompt_fingerprint(canonical_text)
+                duplicate = any(
+                    prior_protocol != protocol
+                    and prior_fingerprint == fingerprint
+                    and (
+                        timestamp_ms is None
+                        or prior_timestamp_ms is None
+                        or abs(timestamp_ms - prior_timestamp_ms) <= 2_000
+                    )
+                    for prior_fingerprint, prior_timestamp_ms, prior_protocol in recent[-8:]
+                )
+                if normalized_text and not duplicate:
+                    prompt_count += 1
+                    if classification.get("hasPureText"):
+                        pure_prompt_count += 1
+                    if classification.get("visibleByDefault") is not False:
+                        visible_prompt_count += 1
+                    prompt_source_type = str(classification.get("sourceType") or "unknown")
+                    source_counts[prompt_source_type] = source_counts.get(prompt_source_type, 0) + 1
+                    prompt = {
+                        "index": byte_offset + 1,
+                        "lineNumber": 0,
+                        "byteOffset": byte_offset,
+                        "ordinalExact": False,
+                        "timestamp": timestamp if isinstance(timestamp, str) else None,
+                        "protocol": protocol,
+                        **classification,
+                    }
+                    matches_scope = bool(filter_prompts_for_scope([prompt], scope))
+                    if matches_scope and (not source_type or prompt_source_type == source_type):
+                        prompts.append(prompt)
+                        match_count += 1
+                    recent.append([fingerprint, timestamp_ms, protocol])
+                    recent = recent[-8:]
+        if len(prompts) >= safe_limit:
+            break
+        if prompts and (time.perf_counter() - started) * 1000 >= max(100, int(scan_budget_ms)):
+            break
+    else:
+        reached_start = True
+        next_before_byte = 0
+
+    has_more = not reached_start and next_before_byte > 0
+    next_cursor = _encode_recent_prompt_cursor(
+        {
+            "query": query_signature,
+            "beforeByte": next_before_byte,
+            "promptCount": prompt_count,
+            "purePromptCount": pure_prompt_count,
+            "visiblePromptCount": visible_prompt_count,
+            "matchCount": match_count,
+            "sourceCounts": source_counts,
+            "recent": recent,
+        }
+    ) if has_more else None
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    return {
+        "prompts": prompts,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
+        "matchCount": match_count,
+        "matchCountComplete": not has_more,
+        "order": "desc",
+        "sourceCounts": source_counts,
+        "promptCount": prompt_count,
+        "purePromptCount": pure_prompt_count,
+        "visiblePromptCount": visible_prompt_count,
+        "hiddenPromptCount": max(0, prompt_count - visible_prompt_count),
+        "index": {
+            "complete": False,
+            "strategy": "recent",
+            "scannedBytes": max(0, file_size - next_before_byte),
+            "scannedLines": scanned_lines,
+            "fileSize": file_size,
+            "elapsedMs": elapsed_ms,
+        },
+    }
 
 
 def extract_user_prompts_from_rollout(
@@ -6423,7 +7364,9 @@ def read_thread_prompt_page(
     scope: str = "visible",
     source_type: str | None = None,
     order: str = "asc",
+    strategy: str = "index",
     scan_budget_ms: int = 250,
+    defer_index: bool = False,
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     paths = resolve_codex_paths(codex_home_text)
@@ -6433,12 +7376,40 @@ def read_thread_prompt_page(
     rollout_path = Path(normalize_path_text(row.get("rollout_path")))
     if not rollout_path.is_file():
         raise FileNotFoundError(str(rollout_path))
-    database_path, index_state = ensure_rollout_prompt_index(
-        paths.codex_home_path,
-        rollout_path,
-        max_scan_ms=max(1, min(5_000, int(scan_budget_ms))),
-        cancel_check=cancel_check,
-    )
+    normalized_strategy = (strategy or "index").strip().lower()
+    if normalized_strategy == "recent":
+        if order != "desc" or search.strip():
+            raise ValueError("recent prompt strategy requires descending order without search")
+        page = read_recent_thread_prompt_page(
+            rollout_path,
+            cursor=cursor,
+            limit=limit,
+            scope=scope,
+            source_type=source_type,
+            scan_budget_ms=scan_budget_ms,
+            cancel_check=cancel_check,
+        )
+        return {
+            "threadId": thread_id,
+            "title": row.get("title"),
+            "rolloutPath": str(rollout_path),
+            "scope": scope,
+            "search": search,
+            "sourceType": source_type,
+            "order": order,
+            **page,
+        }
+    if normalized_strategy != "index":
+        raise ValueError(f"unsupported prompt read strategy: {strategy}")
+    database_path = prompt_index_database_path(paths.codex_home_path)
+    index_state = read_prompt_index_state(database_path, rollout_path) if defer_index else None
+    if index_state is None:
+        database_path, index_state = ensure_rollout_prompt_index(
+            paths.codex_home_path,
+            rollout_path,
+            max_scan_ms=max(1, min(100 if defer_index else 5_000, int(scan_budget_ms))),
+            cancel_check=cancel_check,
+        )
     page = read_prompt_page(
         database_path,
         rollout_path,
@@ -6451,6 +7422,14 @@ def read_thread_prompt_page(
         index_state=index_state,
         cancel_check=cancel_check,
     )
+    background_scheduled = False
+    if defer_index and not index_state["complete"]:
+        background_scheduled = schedule_rollout_prompt_index(paths.codex_home_path, rollout_path)
+    page["index"] = {
+        **page["index"],
+        "backgroundScheduled": background_scheduled,
+        "queryMode": "cached" if defer_index else "synchronous",
+    }
     return {
         "threadId": thread_id,
         "title": row.get("title"),
@@ -6463,6 +7442,61 @@ def read_thread_prompt_page(
     }
 
 
+def read_thread_prompt_context(
+    codex_home_text: str | None,
+    thread_id: str,
+    *,
+    anchor_index: int,
+    anchor_byte_offset: int | None = None,
+    generation: str | None = None,
+    scope: str = "visible",
+    search: str = "",
+    source_type: str | None = None,
+    before: int = 10,
+    after: int = 10,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    paths = resolve_codex_paths(codex_home_text)
+    row = fetch_thread_row(paths, thread_id)
+    if row is None:
+        raise KeyError(thread_id)
+    rollout_path = Path(normalize_path_text(row.get("rollout_path")))
+    if not rollout_path.is_file():
+        raise FileNotFoundError(str(rollout_path))
+    database_path = prompt_index_database_path(paths.codex_home_path)
+    index_state = read_prompt_index_state(database_path, rollout_path)
+    if index_state is None:
+        database_path, index_state = ensure_rollout_prompt_index(
+            paths.codex_home_path,
+            rollout_path,
+            max_scan_ms=250,
+            cancel_check=cancel_check,
+        )
+    context = read_prompt_context(
+        database_path,
+        rollout_path,
+        anchor_index=anchor_index,
+        anchor_byte_offset=anchor_byte_offset,
+        generation=generation,
+        scope=scope,
+        search=search,
+        source_type=source_type,
+        before=before,
+        after=after,
+        cancel_check=cancel_check,
+    )
+    return {
+        "threadId": thread_id,
+        "title": row.get("title"),
+        "rolloutPath": str(rollout_path),
+        "scope": scope,
+        "search": search,
+        "sourceType": source_type,
+        "index": index_state,
+        **context,
+    }
+
+
 def read_thread_timeline_search_page(
     codex_home_text: str | None,
     thread_id: str,
@@ -6471,10 +7505,11 @@ def read_thread_timeline_search_page(
     limit: int = 80,
     kind: str = "conversation",
     search: str = "",
+    source_filter: str = "all",
     scan_budget_ms: int = 250,
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    if kind not in {"conversation", "user", "commentary", "assistant"}:
+    if kind not in {"conversation", "user", "commentary", "assistant", "assistant_unclassified"}:
         raise ValueError(
             "persistent full-thread search supports conversation, user, commentary, and assistant; "
             "use the byte-cursor timeline endpoint for reasoning, tool, or all-content searches"
@@ -6498,6 +7533,7 @@ def read_thread_timeline_search_page(
         rollout_path,
         kind=kind,
         search=search,
+        source_filter=source_filter,
         cursor=cursor,
         limit=limit,
         index_state=index_state,
@@ -6509,6 +7545,63 @@ def read_thread_timeline_search_page(
         "rolloutPath": str(rollout_path),
         **page,
     }
+
+
+def prepare_thread_prompt_export(
+    paths: CodexPaths,
+    thread_id: str,
+    active_path: Path,
+    *,
+    scope: str,
+    search: str = "",
+    source_type: str | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[Path, list[tuple[Path, int, dict[str, Any]]]]:
+    database_path = prompt_index_database_path(paths.codex_home_path)
+    indexed_segments: list[tuple[Path, int, dict[str, Any]]] = []
+    prompt_index_base = 0
+    for segment_path in thread_rollout_paths(paths, thread_id, active_path):
+        database_path, index_state = ensure_rollout_prompt_index(
+            paths.codex_home_path,
+            segment_path,
+            max_scan_ms=None,
+            cancel_check=cancel_check,
+        )
+        segment_summary = read_prompt_page(
+            database_path,
+            segment_path,
+            scope=scope,
+            search=search,
+            source_type=source_type,
+            cursor=None,
+            limit=1,
+            index_state=index_state,
+            cancel_check=cancel_check,
+        )
+        indexed_segments.append((segment_path, prompt_index_base, segment_summary))
+        prompt_index_base += int(segment_summary["promptCount"])
+    return database_path, indexed_segments
+
+
+def iter_prepared_thread_prompts(
+    database_path: Path,
+    indexed_segments: list[tuple[Path, int, dict[str, Any]]],
+    *,
+    scope: str,
+    search: str = "",
+    source_type: str | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> Iterator[dict[str, Any]]:
+    for segment_path, prompt_index_base, _ in indexed_segments:
+        for prompt in iter_prompt_records(
+            database_path,
+            segment_path,
+            scope=scope,
+            search=search,
+            source_type=source_type,
+            cancel_check=cancel_check,
+        ):
+            yield {**prompt, "index": prompt_index_base + int(prompt["index"])}
 
 
 def stream_thread_prompt_copy(
@@ -6528,19 +7621,22 @@ def stream_thread_prompt_copy(
     rollout_path = Path(normalize_path_text(row.get("rollout_path")))
     if not rollout_path.is_file():
         raise FileNotFoundError(str(rollout_path))
-    database_path, _ = ensure_rollout_prompt_index(
-        paths.codex_home_path,
-        rollout_path,
-        max_scan_ms=None,
-        cancel_check=cancel_check,
-    )
     normalized_format = output_format.strip().lower()
     if normalized_format not in {"text", "jsonl"}:
         raise ValueError(f"unsupported prompt copy format: {output_format}")
-    first_prompt = True
-    for prompt in iter_prompt_records(
-        database_path,
+    database_path, indexed_segments = prepare_thread_prompt_export(
+        paths,
+        thread_id,
         rollout_path,
+        scope=scope,
+        search=search,
+        source_type=source_type,
+        cancel_check=cancel_check,
+    )
+    first_prompt = True
+    for prompt in iter_prepared_thread_prompts(
+        database_path,
+        indexed_segments,
         scope=scope,
         search=search,
         source_type=source_type,
@@ -6597,20 +7693,21 @@ def export_thread_prompts(
     if row is None:
         raise KeyError(thread_id)
     rollout_path = Path(normalize_path_text(row.get("rollout_path")))
-    database_path, index_state = ensure_rollout_prompt_index(paths.codex_home_path, rollout_path, max_scan_ms=None)
-    summary = read_prompt_page(
-        database_path,
+    if not rollout_path.is_file():
+        raise FileNotFoundError(str(rollout_path))
+    database_path, indexed_segments = prepare_thread_prompt_export(
+        paths,
+        thread_id,
         rollout_path,
         scope=scope,
-        search="",
-        source_type=None,
-        cursor=None,
-        limit=1,
-        index_state=index_state,
     )
-    prompt_count = int(summary["matchCount"])
-    all_prompt_count = int(summary["promptCount"])
-    source_counts = dict(summary["sourceCounts"])
+    prompt_count = sum(int(summary["matchCount"]) for _, _, summary in indexed_segments)
+    all_prompt_count = sum(int(summary["promptCount"]) for _, _, summary in indexed_segments)
+    source_counts: dict[str, int] = {}
+    for _, _, summary in indexed_segments:
+        for source_type, source_count in dict(summary["sourceCounts"]).items():
+            source_counts[str(source_type)] = source_counts.get(str(source_type), 0) + int(source_count)
+    rollout_paths = [str(segment_path) for segment_path, _, _ in indexed_segments]
     timestamp_text = datetime_module.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_directory = export_root_path()
     export_directory.mkdir(parents=True, exist_ok=True)
@@ -6624,6 +7721,7 @@ def export_thread_prompts(
                 "threadId": thread_id,
                 "title": row.get("title"),
                 "rolloutPath": normalize_path_text(row.get("rollout_path")),
+                "rolloutPaths": rollout_paths,
                 "promptCount": prompt_count,
                 "allPromptCount": all_prompt_count,
                 "filterScope": scope,
@@ -6633,7 +7731,7 @@ def export_thread_prompts(
             output.write(metadata_text[1:-1].rstrip())
             output.write(',\n  "prompts": [')
             first_prompt = True
-            for prompt in iter_prompt_records(database_path, rollout_path, scope=scope):
+            for prompt in iter_prepared_thread_prompts(database_path, indexed_segments, scope=scope):
                 if not first_prompt:
                     output.write(",")
                 output.write("\n    ")
@@ -6655,6 +7753,7 @@ def export_thread_prompts(
             "",
             f"- Thread ID: `{thread_id}`",
             f"- Rollout path: `{normalize_path_text(row.get('rollout_path'))}`",
+            f"- Rollout segments: {len(rollout_paths)}",
             f"- Prompt count: {prompt_count}",
             f"- All prompt-like records: {all_prompt_count}",
             f"- Filter scope: `{scope}`",
@@ -6664,7 +7763,7 @@ def export_thread_prompts(
         with output_path.open("w", encoding="utf-8", newline="\n") as output:
             output.write("\n".join(lines))
             output.write("\n")
-            for prompt in iter_prompt_records(database_path, rollout_path, scope=scope):
+            for prompt in iter_prepared_thread_prompts(database_path, indexed_segments, scope=scope):
                 export_text = prompt_text_for_scope(prompt, scope)
                 output.write(
                     "\n".join(
@@ -7237,7 +8336,10 @@ def backup_workspace_move_rollouts(
         rollout_path = Path(normalize_path_text(matched_row.get("rollout_path")))
         if not rollout_path.exists():
             continue
-        backup_path = rollout_backup_directory / f"{matched_row['id']}_{rollout_path.name}"
+        thread_component = re.sub(r"[^A-Za-z0-9._-]+", "_", str(matched_row["id"]))[:80]
+        if not thread_component:
+            thread_component = hashlib.sha256(str(matched_row["id"]).encode("utf-8")).hexdigest()[:16]
+        backup_path = rollout_backup_directory / f"{thread_component}.jsonl"
         shutil.copy2(rollout_path, backup_path)
         rollout_backups.append({"threadId": str(matched_row["id"]), "source": str(rollout_path), "backup": str(backup_path)})
     backup_manifest = update_optional_backup_manifest(
@@ -7985,7 +9087,7 @@ def repair_compacted_checkpoint_message(item: Any) -> bool:
             break
     if not first_prompt:
         return False
-    payload["message"] = f"Compacted checkpoint preserved by Codex Home Manager. First user prompt: {first_prompt[:500]}"
+    payload["message"] = f"Compacted checkpoint preserved by Codex Cockpit. First user prompt: {first_prompt[:500]}"
     return True
 
 
@@ -8936,6 +10038,7 @@ def validate_environment(codex_home_text: str | None = None) -> dict[str, Any]:
     if checks["databaseExists"]:
         with closing(connect_database(paths.database_path, readonly=True)) as connection, connection:
             thread_count = int(connection.execute("SELECT COUNT(*) FROM threads").fetchone()[0])
+    current_versions = detect_current_codex_versions(paths)
     return {
         "paths": {
             "codexHome": str(paths.codex_home_path),
@@ -8947,7 +10050,8 @@ def validate_environment(codex_home_text: str | None = None) -> dict[str, Any]:
         "checks": checks,
         "threadCount": thread_count,
         "version": read_version(paths),
-        "currentVersions": detect_current_codex_versions(paths),
+        "currentVersions": current_versions,
+        "paginationPatch": detect_pagination_patch_status(current_versions.get("desktopInstall")),
         "codexProcesses": detect_codex_processes(),
         "writeWarnings": write_safety_warnings(),
     }
@@ -9399,7 +10503,7 @@ def repair_official_thread_tools_exposure(
         "completedCount": 0,
     }
     reason = (
-        "# Disabled by Codex Home Manager: legacy codex_thread_messenger fallback can hide official "
+        "# Disabled by Codex Cockpit: legacy codex_thread_messenger fallback can hide official "
         "codex_app thread tools. Re-enable only after official send_message_to_thread exposure is verified.\n"
     )
     updated_texts = {

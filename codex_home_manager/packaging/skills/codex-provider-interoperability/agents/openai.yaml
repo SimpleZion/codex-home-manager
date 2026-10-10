@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Provider Interoperability"
+  short_description: "Safely switch official and proxy Codex providers"
+  default_prompt: "Use $codex-provider-interoperability to audit and safely repair cross-provider Codex task compatibility."

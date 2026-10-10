@@ -13,7 +13,7 @@ def test_hosted_console_opens_local_full_mode_instead_of_requesting_write_token(
     connector_guard = source_between(
         main_source,
         "function requireLocalConnector(actionLabel: string): boolean",
-        "async function fetchAuthorizedJson",
+        "function paramsWithPreview",
     )
     token_refresh = source_between(
         main_source,

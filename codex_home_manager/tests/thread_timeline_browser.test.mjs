@@ -43,6 +43,26 @@ const denseMatches = findSearchMatches("a".repeat(20_000), "a");
 assert.equal(denseMatches.length, maxSearchMatchesPerText, "per-item highlighting must have a hard upper bound");
 assert.deepEqual(denseMatches.at(-1), { start: maxSearchMatchesPerText - 1, end: maxSearchMatchesPerText });
 
+const delegationText = '<codex_delegation>\n<source_thread_id>source-task</source_thread_id>\n<input>handover complete</input>\n</codex_delegation>';
+const delegationRecord = { type: 'response_item', payload: { type: 'function_call_output', namespace: 'codex_app', name: 'send_message_to_thread', output: delegationText } };
+const delegationMirror = { type: 'event_msg', payload: { type: 'item_completed', item: { ...delegationRecord.payload, type: 'FunctionCallOutput' } } };
+assert.equal(timelineItemFromJson(delegationRecord, 1).promptSourceType, 'delegation');
+assert.equal(timelineItemFromJson(delegationRecord, 1).hasPureText, false);
+assert.equal(timelineItemFromJson(delegationMirror, 2), null);
+for (const replacement of [{ namespace: 'other' }, { name: 'read_thread' }, { output: '{"threadId":"target"}' }, { output: `quoted ${delegationText}` }]) {
+  assert.equal(timelineItemFromJson({ ...delegationRecord, payload: { ...delegationRecord.payload, ...replacement } }, 1).promptSourceType, '');
+}
+const delegationFile = new File([[delegationRecord, delegationMirror, delegationRecord].map(JSON.stringify).join('\n') + '\n'], 'delegation.jsonl');
+const delegationPage = await readBrowserTimelinePage(delegationFile, 'thread-1', 'Fixture', 'delegation.jsonl', { sourceFilter: 'delegation', kind: 'conversation' });
+assert.equal(delegationPage.items.length, 2);
+for (const kind of ['conversation', 'user', 'all']) {
+  for (const sourceFilter of ['all', 'delegation']) {
+    const page = await readBrowserTimelinePage(delegationFile, 'thread-1', 'Fixture', 'delegation.jsonl', { sourceFilter, kind, search: 'handover' });
+    assert.equal(page.items.length, 2, `${kind} + ${sourceFilter} must retain incoming messages`);
+  }
+}
+assert.equal((await readBrowserTimelinePage(delegationFile, 'thread-1', 'Fixture', 'delegation.jsonl', { sourceFilter: 'pure', kind: 'conversation' })).items.length, 0);
+
 const commentary = timelineItemFromJson({
   type: "response_item",
   timestamp: "2026-08-13T01:00:00Z",
@@ -54,7 +74,7 @@ const commentary = timelineItemFromJson({
   }
 }, 1);
 assert.equal(commentary.kind, "commentary");
-assert.equal(commentary.label, "思考过程");
+assert.equal(commentary.label, "进度说明");
 assert.equal(isVisibleCommentaryRecord({
   type: "event_msg",
   payload: { type: "agent_message", phase: "commentary", message: "正在检查阶段结果" }
@@ -78,12 +98,14 @@ assert.equal(isVisibleCommentaryItem({ ...commentary, payloadType: "custom_tool_
 const filterRecords = [
   { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "用户问题" }] } },
   { type: "response_item", payload: { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: "正在核对数据来源" }] } },
+  { type: "event_msg", payload: { type: "agent_message", message: "正在核对数据来源" } },
   { type: "event_msg", payload: { type: "agent_message", phase: "commentary", message: "数据来源已确认，继续验证" } },
   { type: "event_msg", payload: { type: "exec_command_begin", phase: "commentary", command: "python verify.py" } },
   { type: "event_msg", payload: { type: "patch_apply_begin", phase: "commentary", patch: "*** Begin Patch" } },
   { type: "response_item", payload: { type: "reasoning", summary: [{ type: "summary_text", text: "不可进入主要内容的推理" }], encrypted_content: "opaque" } },
   { type: "response_item", payload: { type: "custom_tool_call_output", phase: "commentary", call_id: "tool-2", output: "不可进入思考过程的工具输出" } },
-  { type: "response_item", payload: { type: "message", role: "assistant", phase: "final", content: [{ type: "output_text", text: "最终结论" }] } }
+  { type: "response_item", payload: { type: "message", role: "assistant", phase: "final", content: [{ type: "output_text", text: "最终结论" }] } },
+  { type: "event_msg", payload: { type: "agent_message", message: "最终结论" } }
 ];
 const filterFile = new File([`${filterRecords.map((record) => JSON.stringify(record)).join("\n")}\n`], "filters.jsonl", { type: "application/jsonl" });
 const mainContentPage = await readBrowserTimelinePage(filterFile, "thread-filter", "Filter", "filters.jsonl", { kind: "conversation" });
@@ -96,6 +118,69 @@ assert.deepEqual(mainContentPage.items.map((item) => [item.kind, item.text]), [
 const commentaryPage = await readBrowserTimelinePage(filterFile, "thread-filter", "Filter", "filters.jsonl", { kind: "commentary" });
 assert.deepEqual(commentaryPage.items.map((item) => item.text), ["正在核对数据来源", "数据来源已确认，继续验证"]);
 assert.doesNotMatch(commentaryPage.items.map((item) => item.text).join("\n"), /python verify|Begin Patch|工具输出|推理/);
+
+const automationFile = new File([`${[
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<heartbeat><instructions>巡检插件</instructions></heartbeat>" }] } },
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "普通用户输入" }] } }
+].map((record) => JSON.stringify(record)).join("\n")}\n`], "automation.jsonl", { type: "application/jsonl" });
+const automationPage = await readBrowserTimelinePage(automationFile, "thread-automation", "Automation", "automation.jsonl", {
+  kind: "conversation",
+  sourceFilter: "automation"
+});
+assert.deepEqual(automationPage.items.map((item) => [item.kind, item.promptSourceType, item.text]), [
+  ["context", "automation", "<heartbeat><instructions>巡检插件</instructions></heartbeat>"]
+]);
+
+const attachmentFile = new File([`${[
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Files mentioned by the user:\n\n## secret-file.txt: C:/Temp/secret-file.txt\n\n## My request for Codex:\n请只显示附件里的正文" }] } }
+].map((record) => JSON.stringify(record)).join("\n")}\n`], "attachment.jsonl", { type: "application/jsonl" });
+const attachmentFocusedPage = await readBrowserTimelinePage(attachmentFile, "thread-attachment", "Attachment", "attachment.jsonl", {
+  kind: "user",
+  sourceFilter: "focused"
+});
+assert.deepEqual(attachmentFocusedPage.items.map((item) => item.text), ["请只显示附件里的正文"]);
+const attachmentPurePage = await readBrowserTimelinePage(attachmentFile, "thread-attachment", "Attachment", "attachment.jsonl", {
+  kind: "user",
+  sourceFilter: "pure"
+});
+assert.deepEqual(attachmentPurePage.items.map((item) => item.text), ["请只显示附件里的正文"]);
+const attachmentContextPage = await readBrowserTimelinePage(attachmentFile, "thread-attachment", "Attachment", "attachment.jsonl", {
+  kind: "user",
+  sourceFilter: "with_agents"
+});
+assert.match(attachmentContextPage.items[0].text, /secret-file\.txt/);
+
+const userMirrorBoundaryFile = new File([`${[
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "相同文本" }] } },
+  { type: "event_msg", payload: { type: "agent_message", message: "相同文本" } }
+].map((record) => JSON.stringify(record)).join("\n")}\n`], "user-mirror-boundary.jsonl", { type: "application/jsonl" });
+const userMirrorBoundaryPage = await readBrowserTimelinePage(userMirrorBoundaryFile, "thread-user-mirror-boundary", "User mirror boundary", "user-mirror-boundary.jsonl", { kind: "conversation" });
+assert.deepEqual(userMirrorBoundaryPage.items.map((item) => [item.kind, item.text]), [
+  ["user", "相同文本"],
+  ["assistant_unclassified", "相同文本"]
+]);
+
+const mirrorLoadRecords = [];
+for (let index = 0; index < 80; index += 1) {
+  const text = `阶段进度 ${index} ${"x".repeat(6_000)}`;
+  mirrorLoadRecords.push(
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text }] } },
+    { type: "event_msg", payload: { type: "agent_message", message: text } }
+  );
+}
+const mirrorLoadFile = new File([`${mirrorLoadRecords.map((record) => JSON.stringify(record)).join("\n")}\n`], "mirror-load.jsonl", { type: "application/jsonl" });
+const originalMirrorSlice = mirrorLoadFile.slice.bind(mirrorLoadFile);
+let mirrorSliceCount = 0;
+let mirrorBytesRead = 0;
+mirrorLoadFile.slice = (start, end, contentType) => {
+  mirrorSliceCount += 1;
+  mirrorBytesRead += (end ?? mirrorLoadFile.size) - (start ?? 0);
+  return originalMirrorSlice(start, end, contentType);
+};
+const mirrorLoadPage = await readBrowserTimelinePage(mirrorLoadFile, "thread-mirror-load", "Mirror load", "mirror-load.jsonl", { kind: "commentary", limit: 200 });
+assert.equal(mirrorLoadPage.items.length, 80);
+assert.ok(mirrorSliceCount <= 6, `single-pass mirror normalization used ${mirrorSliceCount} slices`);
+assert.ok(mirrorBytesRead <= mirrorLoadFile.size * 3, `single-pass mirror normalization read ${mirrorBytesRead} bytes for ${mirrorLoadFile.size}-byte input`);
 
 const eventReasoning = timelineItemFromJson({
   type: "event_msg",

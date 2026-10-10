@@ -1,13 +1,14 @@
 import initSqlJs, { type SqlJsDatabase } from "sql.js";
 import sqlWasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import { classifyPromptText, isRealUserPromptText } from "./promptClassification";
+import { classifyPromptText, incomingDelegationText, isRealUserPromptText } from "./promptClassification";
 import { normalizeSearchText } from "./threadContentSearch";
 import {
   readBrowserTimelineItem,
   readBrowserTimelinePage,
   type ThreadTimeline,
   type TimelineFilter,
-  type TimelineItem
+  type TimelineItem,
+  type TimelineSourceFilter
 } from "./threadTimeline";
 
 type BrowserLanguage = "zh" | "en";
@@ -234,6 +235,15 @@ export type BrowserPromptPageOptions = {
   signal?: AbortSignal;
 };
 
+export type BrowserPromptContextOptions = {
+  anchor: BrowserPromptRecord;
+  scope?: BrowserPromptPageOptions["scope"];
+  search?: string;
+  before?: number;
+  after?: number;
+  signal?: AbortSignal;
+};
+
 type BrowserPromptFingerprint = {
   fingerprint: string;
   timestampMs: number | null;
@@ -263,7 +273,7 @@ type BrowserJsonlLine = {
   oversizedPrompt: BrowserOversizedPromptCandidate | null;
 };
 
-type BrowserReverseJsonlLine = Omit<BrowserJsonlLine, "lineNumber" | "nextByteOffset">;
+type BrowserReverseJsonlLine = Omit<BrowserJsonlLine, "lineNumber">;
 
 type BrowserOversizedPromptCandidate = {
   timestamp: string | null;
@@ -296,6 +306,9 @@ const browserPromptDataUrlPrefixes = [
   "data:;base64,"
 ];
 
+const browserPromptRequestMarkers = ["## My request for Codex:", "## My request:"] as const;
+const browserPromptRequestMarkerTailLength = Math.max(...browserPromptRequestMarkers.map((marker) => marker.length));
+
 class BrowserBoundedJsonString {
   value = "";
   truncated = false;
@@ -308,17 +321,21 @@ class BrowserBoundedJsonString {
 
   append(character: string): void {
     if (this.hidingDataUrl) {
-      const requestMarker = "## My request for Codex:";
-      this.hiddenDataUrlTail = `${this.hiddenDataUrlTail}${character}`.slice(-requestMarker.length);
+      this.hiddenDataUrlTail = `${this.hiddenDataUrlTail}${character}`.slice(-browserPromptRequestMarkerTailLength);
       if (character === "\n") {
         this.hiddenDataUrlAtLineStart = true;
       } else if (character === ")" && this.hiddenDataUrlAtLineStart) {
         this.hiddenDataUrlSawClosingLine = true;
         this.hiddenDataUrlAtLineStart = false;
-      } else if (this.hiddenDataUrlSawClosingLine && this.hiddenDataUrlTail.endsWith(requestMarker)) {
-        this.hidingDataUrl = false;
-        this.appendVisible(`\n${requestMarker}`);
-        this.hiddenDataUrlTail = "";
+      } else if (this.hiddenDataUrlSawClosingLine) {
+        const requestMarker = browserPromptRequestMarkers.find((marker) => this.hiddenDataUrlTail.endsWith(marker));
+        if (requestMarker) {
+          this.hidingDataUrl = false;
+          this.appendVisible(`\n${requestMarker}`);
+          this.hiddenDataUrlTail = "";
+        } else if (!/\s/.test(character)) {
+          this.hiddenDataUrlAtLineStart = false;
+        }
       } else if (!/\s/.test(character)) {
         this.hiddenDataUrlAtLineStart = false;
       }
@@ -655,6 +672,7 @@ async function* readBrowserJsonlLinesReverse(
   const startBeforeByte = Math.max(0, Math.min(options.startBeforeByte ?? file.size, file.size));
   const stopBeforeByte = Math.max(0, Math.min(options.stopBeforeByte ?? 0, startBeforeByte));
   let position = startBeforeByte;
+  let nextByteOffset = startBeforeByte;
   let suffixParts: Uint8Array[] = [];
   let suffixBytes = 0;
   let oversized = false;
@@ -681,6 +699,7 @@ async function* readBrowserJsonlLinesReverse(
       prependPart(bytes.subarray(index + 1, segmentEnd));
       yield {
         byteOffset: blockStart + index + 1,
+        nextByteOffset,
         rawLine: oversized ? null : decodeBrowserJsonlParts(suffixParts, suffixBytes),
         oversized,
         oversizedPrompt: null
@@ -688,6 +707,7 @@ async function* readBrowserJsonlLinesReverse(
       suffixParts = [];
       suffixBytes = 0;
       oversized = false;
+      nextByteOffset = blockStart + index + 1;
       segmentEnd = index;
     }
     prependPart(bytes.subarray(0, segmentEnd));
@@ -697,11 +717,31 @@ async function* readBrowserJsonlLinesReverse(
   if ((suffixBytes || oversized) && stopBeforeByte === 0) {
     yield {
       byteOffset: stopBeforeByte,
+      nextByteOffset,
       rawLine: oversized ? null : decodeBrowserJsonlParts(suffixParts, suffixBytes),
       oversized,
       oversizedPrompt: null
     };
   }
+}
+
+async function readBrowserOversizedPrompt(
+  file: Pick<File, "size" | "slice">,
+  line: BrowserReverseJsonlLine,
+  signal?: AbortSignal
+): Promise<BrowserOversizedPromptCandidate | null> {
+  // Reverse scanning finds the boundaries; the existing JSON scanner consumes
+  // only this accepted record in forward chunks, without retaining its bytes.
+  const scanner = new BrowserOversizedPromptScanner();
+  for (let position = line.byteOffset; position < line.nextByteOffset; position += browserJsonlChunkBytes) {
+    signal?.throwIfAborted();
+    const end = Math.min(line.nextByteOffset, position + browserJsonlChunkBytes);
+    const bytes = new Uint8Array(await file.slice(position, end).arrayBuffer());
+    signal?.throwIfAborted();
+    scanner.feed(bytes);
+  }
+  signal?.throwIfAborted();
+  return scanner.finish();
 }
 
 export function supportsBrowserFolderMode(): boolean {
@@ -893,7 +933,6 @@ async function buildBrowserThreadsFromJsonl(input: {
     const explicitSidebarReference = Boolean(indexEntry);
     const inInitialSidebarPage = threadKind === "main" && explicitSidebarReference && threadListRank !== null && threadListRank <= input.sidebarLimit;
     const rolloutDisplayStatus = input.validateRolloutDisplay ? sample.rolloutDisplayStatus : "not_scanned";
-    const displayNeedsRepair = ["missing_visible_event_stream", "sparse_visible_event_stream"].includes(rolloutDisplayStatus);
     const archived = threadFile.archivedStore;
     const fileExists = file.size > 0;
     const visibility = archived
@@ -902,19 +941,18 @@ async function buildBrowserThreadsFromJsonl(input: {
         ? "missing_file"
         : threadKind === "subagent"
           ? "subagent"
-          : displayNeedsRepair
-            ? "needs_user_event_repair"
           : "visible";
     const hiddenReasons: string[] = [];
     if (archived) hiddenReasons.push("rollout_in_archived_sessions");
     if (!fileExists) hiddenReasons.push("missing_rollout_file");
     if (threadKind === "subagent" && !archived && fileExists) hiddenReasons.push("subagent_child_thread");
-    if (displayNeedsRepair) hiddenReasons.push(sample.rolloutDisplayStatus);
     if (threadKind === "main" && !inInitialSidebarPage && !archived && fileExists) hiddenReasons.push("outside_initial_sidebar_limit");
     threads.push({
       id: threadId,
       title,
       sqliteTitle: "",
+      sqliteName: "",
+      sqliteNameSupported: false,
       sidebarTitle: indexEntry?.title || "",
       sessionIndexTitle: indexEntry?.title || "",
       sessionIndexUpdatedAt: indexEntry?.updatedAtMs ? new Date(indexEntry.updatedAtMs).toISOString() : "",
@@ -952,7 +990,7 @@ async function buildBrowserThreadsFromJsonl(input: {
       explicitSidebarReference,
       inInitialSidebarPage,
       outsideInitialLimit: false,
-      codexVisible: threadKind === "main" && !displayNeedsRepair && !archived && fileExists,
+      codexVisible: threadKind === "main" && !archived && fileExists,
       visibility,
       hiddenReasons,
       rolloutDisplayStatus,
@@ -1027,21 +1065,14 @@ async function buildBrowserThreadsFromSqlite(input: {
     const kindMetadata = kindByThreadId.get(threadId) || threadKindMetadataBrowser(row, input.spawnEdges.get(threadId));
     const sidebarEntry = input.sessionIndex.get(threadId);
     const sqliteTitle = firstNonEmpty(stringValue(row.title), "(untitled)");
+    const sqliteNameSupported = Object.prototype.hasOwnProperty.call(row, "name");
+    const sqliteName = stringValue(row.name).trim();
     const sessionIndexTitle = sidebarEntry?.title || "";
-    const shouldResolveRolloutTitle = (
-      projectKind === "conversation"
-      && kindMetadata.threadKind === "main"
-      && (
-        pinnedThreadIds.has(threadId)
-        || explicitSidebarThreadIds.has(threadId)
-        || Boolean(mainThreadListRank !== null && mainThreadListRank <= input.sidebarLimit)
-      )
-    );
-    const rolloutTitleEntry = shouldResolveRolloutTitle && threadFile
-      ? await readBrowserRolloutThreadTitleUpdate(threadFile, threadId, input.signal)
-      : { rolloutTitle: "", rolloutTitleTimestamp: "", rolloutTitleLine: null };
+    // Keep the initial browser-folder catalog metadata-only. Full rollout reads
+    // are reserved for explicit detail views and diagnostics.
+    const rolloutTitleEntry = { rolloutTitle: "", rolloutTitleTimestamp: "", rolloutTitleLine: null };
     const rolloutTitle = String(rolloutTitleEntry.rolloutTitle || "");
-    const sidebarTitle = rolloutTitle || sessionIndexTitle;
+    const sidebarTitle = rolloutTitle || sqliteName;
     const displayTitle = sidebarTitle || sqliteTitle;
     const hasUserSignal = rowHasUserSignalBrowser(row, sidebarEntry);
     const activeMainCandidate = kindMetadata.threadKind === "main" && !boolValue(row.archived) && fileStat.exists;
@@ -1080,6 +1111,8 @@ async function buildBrowserThreadsFromSqlite(input: {
       id: threadId,
       title: displayTitle,
       sqliteTitle,
+      sqliteName,
+      sqliteNameSupported,
       sidebarTitle,
       sessionIndexTitle,
       sessionIndexUpdatedAt: sidebarEntry?.updatedAtMs ? new Date(sidebarEntry.updatedAtMs).toISOString() : "",
@@ -1690,10 +1723,91 @@ export async function readBrowserThreadPrompts(
   };
 }
 
+function browserPromptRecordFromLine(line: BrowserJsonlLine | BrowserReverseJsonlLine): BrowserPromptRecord | null {
+  let candidate: BrowserOversizedPromptCandidate | null = null;
+  if (line.oversized || line.rawLine === null) candidate = line.oversizedPrompt;
+  else {
+    const parsed = parseJsonLine(line.rawLine);
+    if (parsed) candidate = browserPromptTextFromItem(parsed);
+  }
+  if (!candidate) return null;
+  const message = hideBrowserPromptAttachmentData(candidate.text).trim();
+  if (!message) return null;
+  return {
+    index: line.byteOffset + 1,
+    lineNumber: "lineNumber" in line ? line.lineNumber : 0,
+    byteOffset: line.byteOffset,
+    ordinalExact: false,
+    timestamp: candidate.timestamp,
+    text: message,
+    characterCount: message.length,
+    protocol: candidate.protocol,
+    textTruncated: candidate.textTruncated,
+    ...classifyPromptText(message)
+  };
+}
+
+export async function readBrowserThreadPromptContext(
+  workspace: BrowserCodexWorkspace,
+  threadId: string,
+  options: BrowserPromptContextOptions
+): Promise<Record<string, unknown>> {
+  const threadFile = workspace.threadFiles.get(threadId);
+  if (!threadFile) throw new Error(`Thread not found in selected folder: ${threadId}`);
+  const anchorByteOffset = options.anchor.byteOffset;
+  if (anchorByteOffset == null) throw new Error("Prompt context requires an indexed byte offset");
+  const file = await threadFile.handle.getFile();
+  const scope = options.scope || "all";
+  const before = Math.max(0, Math.min(50, options.before ?? 10));
+  const after = Math.max(0, Math.min(50, options.after ?? 10));
+  const earlierCandidates: BrowserPromptRecord[] = [];
+  let reverseRecords = 0;
+  for await (const line of readBrowserJsonlLinesReverse(file, { signal: options.signal, startBeforeByte: anchorByteOffset })) {
+    options.signal?.throwIfAborted();
+    if (reverseRecords >= browserPromptPageScanRecords || anchorByteOffset - line.byteOffset >= browserPromptPageScanBytes) break;
+    reverseRecords += 1;
+    if (line.oversized) line.oversizedPrompt = await readBrowserOversizedPrompt(file, line, options.signal);
+    const prompt = browserPromptRecordFromLine(line);
+    if (prompt && browserPromptMatchesScope(prompt, scope)) earlierCandidates.push(prompt);
+    if (earlierCandidates.length > before) break;
+  }
+  const hasEarlier = earlierCandidates.length > before;
+  const earlier = earlierCandidates.slice(0, before);
+  earlier.reverse();
+  const laterCandidates: BrowserPromptRecord[] = [];
+  let forwardRecords = 0;
+  for await (const line of readBrowserJsonlLines(file, { signal: options.signal, startAtByte: anchorByteOffset, startLineNumber: 0, extractOversizedPrompts: true })) {
+    options.signal?.throwIfAborted();
+    if (forwardRecords >= browserPromptPageScanRecords || line.byteOffset - anchorByteOffset >= browserPromptPageScanBytes) break;
+    forwardRecords += 1;
+    if (line.byteOffset <= anchorByteOffset) continue;
+    const prompt = browserPromptRecordFromLine(line);
+    if (prompt && browserPromptMatchesScope(prompt, scope)) laterCandidates.push(prompt);
+    if (laterCandidates.length > after) break;
+  }
+  const hasLater = laterCandidates.length > after;
+  const later = laterCandidates.slice(0, after);
+  const thread = (workspace.snapshot.threads as Record<string, unknown>[] | undefined)?.find((item) => item.id === threadId);
+  return {
+    threadId,
+    title: thread?.title || "",
+    rolloutPath: threadFile.relativePath,
+    scope,
+    search: options.search || "",
+    sourceType: null,
+    anchorIndex: options.anchor.index,
+    anchorOffset: earlier.length,
+    hasEarlier,
+    hasLater,
+    prompts: [...earlier, options.anchor, ...later],
+    index: { complete: true, strategy: "native", fileSize: file.size }
+  };
+}
+
 export async function readBrowserThreadTimeline(
   workspace: BrowserCodexWorkspace,
   threadId: string,
-  options: { beforeByte?: number | null; limit?: number; kind?: TimelineFilter; search?: string; contentLimit?: number; signal?: AbortSignal } = {}
+  options: { beforeByte?: number | null; limit?: number; kind?: TimelineFilter; sourceFilter?: TimelineSourceFilter; search?: string; contentLimit?: number; signal?: AbortSignal } = {}
 ): Promise<ThreadTimeline> {
   const threadFile = workspace.threadFiles.get(threadId);
   if (!threadFile) throw new Error(`Thread not found in selected folder: ${threadId}`);
@@ -2015,7 +2129,6 @@ function classifyThreadBrowser(input: {
   if (!hasSessionIndex) hiddenReasons.push("missing_session_index_entry");
   if (!input.rolloutExists) hiddenReasons.push("missing_rollout_file");
   if (input.rolloutInArchivedStore) hiddenReasons.push("rollout_in_archived_sessions");
-  if (["missing_visible_event_stream", "sparse_visible_event_stream"].includes(input.rolloutDisplayStatus)) hiddenReasons.push(input.rolloutDisplayStatus);
   if (input.threadKind === "subagent") hiddenReasons.push("subagent_child_thread");
   if (hasThreadListRank && input.threadListRank && input.threadListRank > input.sidebarLimit) hiddenReasons.push("outside_thread_list_initial_page");
   if (input.projectKind === "conversation" && input.mainThreadListRank && input.mainThreadListRank > input.sidebarLimit) hiddenReasons.push("outside_conversation_initial_page");
@@ -2043,35 +2156,11 @@ function classifyThreadBrowser(input: {
   if (!input.rolloutExists) return { visibility: "missing_file", hiddenReasons, codexVisible: false };
   if (activeMain && input.rolloutInArchivedStore) return { visibility: "needs_user_event_repair", hiddenReasons, codexVisible: false };
   if (activeMain && isManagerHidden) return { visibility: "hidden", hiddenReasons, codexVisible: false };
-  if (activeMain && ["missing_visible_event_stream", "sparse_visible_event_stream"].includes(input.rolloutDisplayStatus)) {
-    return { visibility: "needs_user_event_repair", hiddenReasons, codexVisible: false };
-  }
   if (sidebarVisible) return { visibility: "visible", hiddenReasons, codexVisible: true };
   if (!input.hasUserSignal) return { visibility: "hidden", hiddenReasons, codexVisible: false };
   if (!hasUserEvent || !hasSessionIndex) return { visibility: "needs_user_event_repair", hiddenReasons, codexVisible: false };
   return { visibility: "hidden", hiddenReasons, codexVisible: false };
 }
-
-async function readBrowserRolloutThreadTitleUpdate(threadFile: BrowserThreadFile, threadId: string, signal?: AbortSignal) {
-  const result = { rolloutTitle: "", rolloutTitleTimestamp: "", rolloutTitleLine: null as number | null };
-  const file = await abortableBrowserOperation(threadFile.handle.getFile(), signal);
-  for await (const line of readBrowserJsonlLines(file, { signal })) {
-    if (!line.rawLine?.includes("thread_name_updated")) continue;
-    const item = parseJsonLine(line.rawLine);
-    if (item?.type !== "event_msg") continue;
-    const payload = item.payload || {};
-    if (payload.type !== "thread_name_updated") continue;
-    const payloadThreadId = stringValue(payload.thread_id);
-    if (payloadThreadId && payloadThreadId !== threadId) continue;
-    const threadName = stringValue(payload.thread_name);
-    if (!threadName) continue;
-    result.rolloutTitle = threadName;
-    result.rolloutTitleTimestamp = stringValue(item.timestamp);
-    result.rolloutTitleLine = line.lineNumber;
-  }
-  return result;
-}
-
 
 async function listThreadJsonlFiles(root: BrowserDirectoryHandle, signal?: AbortSignal): Promise<BrowserThreadFile[]> {
   const results: BrowserThreadFile[] = [];
@@ -2300,13 +2389,11 @@ function eventPayloadMessageTextBrowser(payload: any): string {
 }
 
 function rolloutDisplayStatusFromCounts(display: RolloutDisplayIntegrity): string {
-  const responseChatMessages = display.responseUserMessages + display.responseAssistantMessages;
-  const visibleChatMessages = display.visibleUserMessages + display.visibleAgentMessages;
-  if (responseChatMessages === 0) return display.visibleUserMessages > 0 ? "ok" : "empty";
-  if (display.responseUserMessages > 0 && display.visibleUserMessages === 0) return "missing_visible_event_stream";
-  if (display.responseAssistantMessages > 0 && display.visibleAgentMessages === 0) return "missing_visible_event_stream";
-  if (responseChatMessages >= 10 && visibleChatMessages < Math.max(2, Math.floor(responseChatMessages / 2))) return "sparse_visible_event_stream";
-  return "ok";
+  const legacyUserMessages = display.visibleUserMessages;
+  const legacyAgentMessages = display.visibleAgentMessages;
+  display.visibleUserMessages = display.responseUserMessages || legacyUserMessages;
+  display.visibleAgentMessages = display.responseAssistantMessages || legacyAgentMessages;
+  return display.visibleUserMessages + display.visibleAgentMessages > 0 ? "ok" : "empty";
 }
 
 function addRolloutDisplayItem(display: RolloutDisplayIntegrity, parsed: any): void {
@@ -2700,8 +2787,8 @@ function buildBrowserDiagnostics(input: {
     ],
     repairHints: {},
     repairPrompt: zh
-      ? "你是运行在用户自己电脑上的 Codex。用户已用 Codex Home Manager 的浏览器目录模式完成只读扫描；如需执行修复，请先在本机验证 CODEX_HOME、state_5.sqlite、session_index.jsonl 和 sessions JSONL，再做带备份的改动。"
-      : "You are Codex running on the user's own machine. The user completed a read-only browser-folder scan in Codex Home Manager. Before repairing anything, verify CODEX_HOME, state_5.sqlite, session_index.jsonl and sessions JSONL locally, then make backed-up changes."
+      ? "你是运行在用户自己电脑上的 Codex。用户已用 Codex Cockpit 的浏览器目录模式完成只读扫描；如需执行修复，请先在本机验证 CODEX_HOME、state_5.sqlite、session_index.jsonl 和 sessions JSONL，再做带备份的改动。"
+      : "You are Codex running on the user's own machine. The user completed a read-only browser-folder scan in Codex Cockpit. Before repairing anything, verify CODEX_HOME, state_5.sqlite, session_index.jsonl and sessions JSONL locally, then make backed-up changes."
   };
 }
 
@@ -2965,7 +3052,11 @@ function browserPromptTextFromItem(value: any): BrowserOversizedPromptCandidate 
   const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
   let text = "";
   let protocol = "";
-  if (itemType === "user_message") {
+  const delegation = incomingDelegationText(value);
+  if (delegation !== null) {
+    text = delegation;
+    protocol = "response_item";
+  } else if (itemType === "user_message") {
     text = typeof rawPayload === "string" ? rawPayload : extractMessage({ payload: rawPayload });
     protocol = "user_message";
   } else if (itemType === "event_msg" && String(payload.type || "") === "user_message") {
@@ -3213,21 +3304,23 @@ async function extractRecentUserPromptRecords(
     startBeforeByte
   })) {
     options.signal?.throwIfAborted();
-    if (scannedRecords >= browserPromptPageScanRecords || startBeforeByte - line.byteOffset >= browserPromptPageScanBytes) {
-      // Keep the boundary at the last processed record. The current record has
-      // not been consumed yet and must remain inside the next reverse page.
+    if (scannedRecords >= browserPromptPageScanRecords || startBeforeByte - nextBeforeByte >= browserPromptPageScanBytes) {
+      // Budget completed records, as in the forward reader: a single large
+      // record must advance the cursor rather than be deferred forever.
       hasMore = nextBeforeByte > 0;
       break;
     }
     scannedRecords += 1;
     nextBeforeByte = line.byteOffset;
     if (line.rawLine === "") continue;
+    let candidate: BrowserOversizedPromptCandidate | null = null;
     if (line.oversized || line.rawLine === null) {
       oversizedRecords += 1;
-      continue;
+      candidate = await readBrowserOversizedPrompt(file, line, options.signal);
+    } else {
+      const parsed = parseJsonLine(line.rawLine);
+      candidate = parsed ? browserPromptTextFromItem(parsed) : null;
     }
-    const parsed = parseJsonLine(line.rawLine);
-    const candidate = parsed ? browserPromptTextFromItem(parsed) : null;
     if (!candidate) continue;
     const message = hideBrowserPromptAttachmentData(candidate.text).trim();
     if (!message || browserPromptIsCrossProtocolDuplicate(message, candidate, recentPrompts)) continue;

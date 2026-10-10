@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { build } from "esbuild";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
+const browserHomeSource = await fs.readFile(path.join(projectRoot, "src", "browserHome.ts"), "utf8");
+const snapshotBuilderSource = browserHomeSource.slice(
+  browserHomeSource.indexOf("async function buildBrowserThreadsFromSqlite"),
+  browserHomeSource.indexOf("function emptyRolloutDisplayIntegrity")
+);
+assert.ok(snapshotBuilderSource.length > 1_000, "browser SQLite snapshot builder must be located");
+assert.doesNotMatch(
+  snapshotBuilderSource,
+  /readBrowserRolloutThreadTitleUpdate/,
+  "initial browser-folder listing must not scan rollout contents for title updates"
+);
 const bundle = await build({
   entryPoints: [path.join(projectRoot, "src", "browserHome.ts")],
   bundle: true,
@@ -29,6 +41,7 @@ const {
   readBrowserThreadDailyTokenUsage,
   readBrowserThreadDetail,
   readBrowserThreadLogs,
+  readBrowserThreadPromptContext,
   readBrowserThreadPrompts
 } = await import(moduleUrl);
 
@@ -122,10 +135,15 @@ function promptWorkspace(threadId, file) {
 }
 
 function jsonlFile(records, filename) {
-  const file = new File([records.map((record) => JSON.stringify(record)).join("\n") + "\n"], filename, {
+  return boundedPromptFile([records.map((record) => JSON.stringify(record)).join("\n") + "\n"], filename);
+}
+
+function boundedPromptFile(parts, filename) {
+  const file = new File(parts, filename, {
     type: "application/jsonl"
   });
   file.text = async () => { throw new Error("whole-file text() must not be used"); };
+  file.arrayBuffer = async () => { throw new Error("whole-file arrayBuffer() must not be used"); };
   const slice = file.slice.bind(file);
   file.slice = (start = 0, end = file.size, contentType) => {
     assert.ok(end - start <= 512 * 1024, `slice exceeded streaming boundary: ${end - start}`);
@@ -257,6 +275,15 @@ const olderPage = await readBrowserThreadPrompts(reverseWorkspace, "thread-rever
 });
 assert.deepEqual(olderPage.prompts.map((prompt) => prompt.pureText), ["oldest prompt"]);
 assert.equal(olderPage.hasMore, false);
+const middleContext = await readBrowserThreadPromptContext(reverseWorkspace, "thread-reverse", {
+  anchor: newestPage.prompts[1],
+  scope: "pure",
+  search: "middle",
+  before: 1,
+  after: 1
+});
+assert.deepEqual(middleContext.prompts.map((prompt) => prompt.pureText), ["oldest prompt", "middle prompt", "newest prompt"]);
+assert.equal(middleContext.anchorOffset, 1);
 
 const sparseReverseFile = jsonlFile([
   { type: "user_message", timestamp: "2026-08-13T07:00:00.000Z", payload: { text: "prompt at reverse scan boundary" } },
@@ -312,7 +339,7 @@ const attachmentPrompt = [
   "A".repeat(9 * 1024 * 1024),
   ")",
   "",
-  "## My request for Codex:",
+  "## My request:",
   "recover the user text after the attachment"
 ].join("\n");
 const oversizedAttachmentFile = jsonlFile([{
@@ -348,5 +375,97 @@ assert.ok(oversizedTextPrompts.prompts[0].text.startsWith("bounded prompt start"
 assert.ok(oversizedTextPrompts.prompts[0].text.endsWith("[Browser folder mode truncated this prompt text.]"));
 assert.ok(oversizedTextPrompts.prompts[0].text.length <= 256 * 1024 + 64);
 assert.ok(!oversizedTextPrompts.prompts[0].text.includes("bounded prompt end"));
+
+for (const [name, file, search, expected] of [
+  ["attachment", oversizedAttachmentFile, "recover the user text", oversizedAttachmentPrompts],
+  ["text", oversizedTextFile, "bounded prompt start", oversizedTextPrompts]
+]) {
+  const threadId = `oversized-search-${name}`;
+  const workspace = promptWorkspace(threadId, file);
+  const ascending = await readBrowserThreadPrompts(workspace, threadId, { order: "asc", scope: "pure", search });
+  const descending = await readBrowserThreadPrompts(workspace, threadId, { order: "desc", scope: "pure", search });
+  const comparable = (page) => page.prompts.map(({ byteOffset, pureText, textTruncated, protocol }) => ({ byteOffset, pureText, textTruncated, protocol }));
+  assert.deepEqual(comparable(ascending), comparable(expected));
+  assert.deepEqual(comparable(descending), comparable(ascending), `${name}: descending search must recover the same bounded text`);
+  assert.equal(descending.matchCount, 1);
+  assert.equal(descending.oversizedRecords, 1);
+  assert.equal(descending.aggregationExact, false);
+  assert.equal(descending.hasMore, false);
+  assert.equal(descending.nextCursor, null);
+}
+
+const paddingBlock = new Blob(["P".repeat(1024 * 1024)]);
+const recoveredText = 'needle "escaped" \\ path\n\u4e2d\u6587';
+const oversizedRecordParts = [
+  '{"type":"response_item","ignored":"',
+  ...Array(9).fill(paddingBlock),
+  '","payload":',
+  JSON.stringify({ type: "message", role: "user", content: [{ type: "input_text", text: recoveredText }] }),
+  '}'
+];
+const oldRecord = JSON.stringify({ type: "user_message", payload: { text: "needle oldest" } });
+const newRecord = JSON.stringify({ type: "user_message", payload: { text: "needle newest" } });
+// CRLF and an unterminated EOF record must preserve byte anchors in both orders.
+const mixedFile = boundedPromptFile([oldRecord, "\r\n", ...oversizedRecordParts, "\r\n", newRecord], "oversized-pagination.jsonl");
+const mixedWorkspace = promptWorkspace("oversized-pagination", mixedFile);
+const orderedPages = {};
+for (const order of ["asc", "desc"]) {
+  const collected = [];
+  const cursors = new Set();
+  let cursor = null;
+  let page;
+  do {
+    page = await readBrowserThreadPrompts(mixedWorkspace, "oversized-pagination", { order, scope: "pure", search: "needle", limit: 1, cursor });
+    collected.push(...page.prompts);
+    cursor = page.nextCursor;
+    if (cursor) {
+      assert.ok(!cursors.has(cursor), "pagination must advance across oversized records");
+      cursors.add(cursor);
+    }
+    assert.ok(cursors.size <= 3, "one-record pages must terminate without duplicates");
+  } while (cursor);
+  assert.equal(page.matchCount, 3);
+  assert.equal(page.oversizedRecords, 1);
+  assert.equal(page.matchCountComplete, true);
+  orderedPages[order] = collected;
+}
+const promptCoverage = (prompts) => prompts.map(({ byteOffset, pureText, protocol, textTruncated }) => ({ byteOffset, pureText, protocol, textTruncated: Boolean(textTruncated) }));
+assert.deepEqual(promptCoverage(orderedPages.desc), promptCoverage([...orderedPages.asc].reverse()));
+assert.deepEqual(orderedPages.asc.map((prompt) => prompt.pureText), ["needle oldest", recoveredText, "needle newest"]);
+assert.equal(orderedPages.desc[1].byteOffset, Buffer.byteLength(oldRecord + "\r\n"));
+const oversizedContext = await readBrowserThreadPromptContext(mixedWorkspace, "oversized-pagination", {
+  anchor: orderedPages.desc[0], scope: "pure", search: "needle", before: 1, after: 0
+});
+assert.deepEqual(oversizedContext.prompts.map((prompt) => prompt.pureText), [recoveredText, "needle newest"]);
+assert.equal(oversizedContext.hasEarlier, true);
+
+// One record may exceed the page budget; consume it once, then defer older records.
+const budgetFile = boundedPromptFile([
+  oldRecord, "\n", '{"type":"user_message","ignored":"', ...Array(33).fill(paddingBlock),
+  '","payload":{"text":"needle over budget"}}'
+], "oversized-budget.jsonl");
+const budgetWorkspace = promptWorkspace("oversized-budget", budgetFile);
+const budgetPage = await readBrowserThreadPrompts(budgetWorkspace, "oversized-budget", { order: "desc", scope: "pure", search: "needle" });
+assert.deepEqual(budgetPage.prompts.map((prompt) => prompt.pureText), ["needle over budget"]);
+assert.equal(budgetPage.hasMore, true);
+assert.ok(budgetPage.nextCursor);
+const afterBudget = await readBrowserThreadPrompts(budgetWorkspace, "oversized-budget", { order: "desc", scope: "pure", search: "needle", cursor: budgetPage.nextCursor });
+assert.deepEqual(afterBudget.prompts.map((prompt) => prompt.pureText), ["needle oldest"]);
+assert.equal(afterBudget.hasMore, false);
+assert.equal(afterBudget.oversizedRecords, 1);
+
+const cancelledFile = boundedPromptFile(oversizedRecordParts, "oversized-cancel.jsonl");
+const cancellation = new AbortController();
+const cancelledSlice = cancelledFile.slice.bind(cancelledFile);
+let firstChunkReads = 0;
+cancelledFile.slice = (start, end, contentType) => {
+  if (start === 0 && ++firstChunkReads === 2) cancellation.abort();
+  return cancelledSlice(start, end, contentType);
+};
+await assert.rejects(
+  readBrowserThreadPrompts(promptWorkspace("oversized-cancel", cancelledFile), "oversized-cancel", { order: "desc", search: "needle", signal: cancellation.signal }),
+  { name: "AbortError" }
+);
+assert.equal(firstChunkReads, 2, "abort must interrupt the forward recovery pass");
 
 console.log("browser home streaming tests passed");

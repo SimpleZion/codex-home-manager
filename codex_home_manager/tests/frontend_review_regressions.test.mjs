@@ -15,7 +15,7 @@ async function importBrowserBundle(entryPoint, mainBundle = false) {
     plugins: [{
       name: "frontend-review-test-stubs",
       setup(buildApi) {
-        buildApi.onResolve({ filter: /styles\.css$/ }, () => ({ path: "styles.css", namespace: "stub" }));
+        buildApi.onResolve({ filter: /\.css$/ }, () => ({ path: "styles.css", namespace: "stub" }));
         buildApi.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: "react-dom-client", namespace: "stub" }));
         buildApi.onResolve({ filter: /^sql\.js$/ }, () => ({ path: "sql.js", namespace: "stub" }));
         buildApi.onResolve({ filter: /sql-wasm\.wasm\?url$/ }, () => ({ path: "sql-wasm", namespace: "stub" }));
@@ -161,7 +161,7 @@ const svgPromptText = [
   "</svg>",
   ")",
   "",
-  "## My request for Codex:",
+  "## My request:",
   "keep this real request"
 ].join("\n");
 const svgPromptFile = new File([`${JSON.stringify({
@@ -228,5 +228,17 @@ assert.match(mainSource, /clearSearchOnEscape/, "Escape search clearing must rem
 assert.match(mainSource, /await writer\.write\(value\)/, "connector copy downloads must remain streamed");
 assert.match(mainSource, /localizedPromptSourceLabel\(prompt, language\)/, "dynamic source labels must use the translation mapping");
 assert.doesNotMatch(mainSource, />\{prompt\.sourceLabel\}</, "raw dynamic source labels must not bypass translation");
+const timelineLoadPageStart = mainSource.indexOf(
+  "const loadPage = React.useCallback(async (beforeByte: number | null = null) => {"
+);
+assert.notEqual(timelineLoadPageStart, -1, "timeline page loader must remain present");
+const timelineLoadPageEnd = mainSource.indexOf("async function loadOlder", timelineLoadPageStart);
+assert.notEqual(timelineLoadPageEnd, -1, "timeline older-page loader must remain present");
+const timelineLoadPageSource = mainSource.slice(timelineLoadPageStart, timelineLoadPageEnd);
+assert.match(
+  timelineLoadPageSource,
+  /if \(queryChanged\) \{[\s\S]*?pendingPrependAnchorRef\.current = null;/,
+  "changing timeline filters must discard an anchor from an older query"
+);
 
 console.log("frontend review regression tests passed");

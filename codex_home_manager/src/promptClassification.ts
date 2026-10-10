@@ -7,6 +7,15 @@ export type PromptClassification = {
   hasPureText: boolean;
 };
 
+export function incomingDelegationText(item: Record<string, unknown>): string | null {
+  const payload = item.payload as Record<string, unknown> | undefined;
+  if (!payload || item.type !== "response_item" || payload.type !== "function_call_output") return null;
+  // The item_completed record is only a UI mirror; index the canonical response once.
+  if (payload.namespace !== "codex_app" || payload.name !== "send_message_to_thread") return null;
+  const output = payload.output;
+  return typeof output === "string" && /^\s*<codex_delegation(?:\s|>)/i.test(output) ? output : null;
+}
+
 const runtimeContextStartMarkers = [
   "<recommended_plugins>",
   "<skills_instructions>",
@@ -62,8 +71,7 @@ function isInternalContextPrompt(text: string): boolean {
     || prefix.startsWith("<environment_context>")
     || prefix.startsWith("<turn_aborted>")
     || prefix.startsWith("<user_interruption>")
-    || prefix.includes("<environment_context>")
-    || prefix.includes("<permissions instructions>");
+    || prefix.startsWith("<permissions instructions>");
 }
 
 export function isRealUserPromptText(text: string): boolean {
@@ -84,8 +92,8 @@ function removeEmbeddedImageBlocks(text: string): string {
 
 function pureUserTextFromPrompt(text: string): string {
   if (!isRealUserPromptText(text)) return "";
-  const cleanedText = removeEmbeddedImageBlocks(text);
-  const markerMatch = /^##\s*My request for Codex:\s*$/im.exec(cleanedText);
+  const cleanedText = removeEmbeddedImageBlocks(text).replace(/^<in-app-browser-context(?:\s[^>]*)?>[\s\S]*?<\/in-app-browser-context>\s*/i, "");
+  const markerMatch = /^##\s*My request(?:\s+for\s+Codex)?:\s*$/im.exec(cleanedText);
   if (markerMatch) {
     return removeEmbeddedImageBlocks(cleanedText.slice(markerMatch.index + markerMatch[0].length)).trim();
   }
@@ -119,7 +127,7 @@ export function classifyPromptText(text: string): PromptClassification {
   if (isCodexInternalContextPrompt(text)) return classification("goal", "续跑目标上下文", false, pureText);
   if (isCodexRuntimeContextPrompt(text)) return classification("internal", runtimeContextLabel(text), false, pureText);
   if (isInternalContextPrompt(text)) return classification("internal", "内部上下文", false, pureText);
-  if (prefix.startsWith("# In app browser:")) return classification("browser", "浏览器上下文", true, pureText);
+  if (prefix.startsWith("# In app browser:") || /^<in-app-browser-context(?:\s|>)/i.test(prefix)) return classification("browser", "浏览器上下文", true, pureText);
   if (prefix.startsWith("# Files mentioned by the user:")) return classification("attachment", "附件上下文", true, pureText);
   return classification("user", "用户输入", true, pureText);
 }
