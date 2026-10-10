@@ -21,7 +21,6 @@ jobs:
     timeout-minutes: 150
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      COVERAGE_FILE: ${{ runner.temp }}/source-ci-artifacts/.coverage
     defaults:
       run:
         shell: pwsh
@@ -75,6 +74,8 @@ jobs:
         run: npx playwright install chromium
 
       - name: Run tests with JUnit output
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/source-ci-artifacts/.coverage
         run: |
           $junitPath = Join-Path $env:RUNNER_TEMP "source-ci-artifacts\junit.xml"
           $coveragePath = Join-Path $env:RUNNER_TEMP "source-ci-artifacts\coverage.xml"
