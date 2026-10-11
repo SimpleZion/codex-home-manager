@@ -7,8 +7,9 @@
 coverage==7.15.2 \
     --hash=sha256:582edc45c2040543fef83341be23c43024a3ab3ae0c2d8bc498a06282905ad40
     # via pytest-cov
-filelock==3.18.0 \
-    --hash=sha256:c401f4f8377c4464e6db25fff06205fd89bdd83b65eb0488ed1b160f780e21de
+filelock==3.20.3 \
+    --hash=sha256:18c57ee915c7ec61cff0ecf7f0f869936c7c30191bb0cf406f1341778d0834e1 \
+    --hash=sha256:4b0dda527ee31078689fc205ec4f1c1bf7d56cf88b6dc9426c4f230e46c2dce1
     # Shared guarded build and publication helpers; kept isolated from global packages.
 pytest-cov==7.1.0 \
     --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
